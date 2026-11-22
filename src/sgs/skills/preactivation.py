@@ -34,8 +34,10 @@ from .flow import (
 )
 
 __all__ = [
+    "AUTO_STARTS",
     "FLOW_RESOLVERS",
     "FLOWS",
+    "auto_start_for",
     "flow_for",
     "preactivation_for",
     "preactivated_skill_ids",
@@ -111,6 +113,53 @@ def _build_resolvers(
 
 FLOW_RESOLVERS = _build_resolvers()
 """``skill_id`` → 按持有者状态现算的流水线解析器（:func:`_build_resolvers` 的快照）。"""
+
+
+AutoStartPredicate = Callable[[GameState, int], bool]
+"""``(state, owner) -> bool``：此刻这条技能的清单要不要**自动展开**（qunying 票 11）。
+
+声明上的 ``auto_start``：前一个事件已结算、下一个事件待选时（【谦逊】：代价结算完、效果
+待选），玩家不该再点一次技能按钮 ⇒ 引擎在出牌阶段询问里点名这条技能，界面据此直接摊开
+它的预发动清单。返回 ``False`` = 走既有的「点技能按钮进入」入口（其余技能一字不改）。
+"""
+
+
+def _build_auto_starts(
+    active: tuple[ActiveSkill, ...] | list[ActiveSkill] = ACTIVE_SKILLS,
+) -> Mapping[str, AutoStartPredicate]:
+    """从**声明**派生"自动展开"的判据表（与 :func:`_build_flows` / :func:`_build_resolvers`
+    同一姿态）：声明了 :attr:`ActiveSkill.auto_start` 的技能自动进表；测试可注入一份声明
+    验"派生"本身，不手抄 id 名单。
+    """
+    return MappingProxyType(
+        {
+            skill.skill_id: skill.auto_start
+            for skill in active
+            if skill.auto_start is not None
+        }
+    )
+
+
+AUTO_STARTS = _build_auto_starts()
+"""``skill_id`` → 自动展开判据（:func:`_build_auto_starts` 的快照）。"""
+
+
+def auto_start_for(
+    state: GameState,
+    seat: int,
+    skill_ids: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    """``skill_ids`` 里此刻**该自动展开清单**的那些（按 id 排序，确定性）。
+
+    与 :func:`preactivations_for` 同一条读法：只回答"这一问要不要自动进入"，不重渲清单、
+    不判断可用性——清单本身仍由 :func:`preactivation_for` 从同一份声明现算。
+    """
+    out: list[str] = []
+    for skill_id in sorted(set(skill_ids)):
+        predicate = AUTO_STARTS.get(skill_id)
+        if predicate is not None and predicate(state, int(seat)):
+            out.append(skill_id)
+    return tuple(out)
 
 
 def flow_for(

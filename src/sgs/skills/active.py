@@ -3574,6 +3574,14 @@ class ActiveSkill(HeroSkillDecl):
     ``preactivation_for`` / ``validate_activation`` / ``preview_activation`` 读同一份解析
     （:func:`~sgs.skills.preactivation.flow_for`）。返回 ``None`` = 此刻没有可发动的流水线。
     """
+    auto_start: "Callable[[GameState, int], bool] | None" = None
+    """此刻这条技能的清单要不要**自动展开**（qunying 票 11 的加法；缺省 ``None``）。
+
+    ``(state, owner) -> bool``，由 :func:`~sgs.skills.preactivation.auto_start_for` 从声明
+    派生（不手抄 id 名单）。首个消费者 =【谦逊】：代价事件结算完、效果事件待选时返回真，
+    出牌阶段询问因此点名这条技能（``PlayPhaseQuery.auto_start``），界面直接摊开它的清单，
+    玩家不必再点一次技能按钮。返回假 = 走既有「点技能按钮进入」入口，其余技能一字不改。
+    """
     extra_modifiers: tuple[Modifier, ...] = ()
     """候选之外**额外**的修饰器（M6 票 04 的加法；缺省空 = 既有七条一字不改）。
 
@@ -9674,6 +9682,17 @@ def _qianxun_flow(state: GameState, seat: int) -> SkillFlow:
     return QIANXUN_COST_FLOW
 
 
+def _qianxun_auto_start(state: GameState, seat: int) -> bool:
+    """【谦逊】的效果事件该不该**自动弹出**（qunying 票 11）。
+
+    判据只有一个：效果窗口开着 = 代价事件已结算、效果事件待选。用户 2026-11-22 第四轮：
+    「执行完 cost 后紧接着就要执行效果，而不是我手动点击发动」⇒ 出牌阶段询问点名这条技能，
+    界面在渲染时直接摊开效果清单。窗口关掉（效果结算完 / `on_cancel`）⇒ 返回假，下一问
+    回到"点技能按钮进入"的既有入口。
+    """
+    return _qianxun_window_open(state, int(seat))
+
+
 def _qianxun_effect_options(
     state: GameState, frame: Any, owner: int, answers: FlowAnswers
 ) -> tuple[str, ...]:
@@ -10054,6 +10073,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         # 代价事件结算完 ⇒ 再可发动、由解析器换成效果事件那一份。
         event_flows=(QIANXUN_EFFECT_FLOW,),
         flow_resolver=_qianxun_flow,
+        # 票 11 的加法：效果窗口开着 ⇒ 下一次出牌阶段询问**点名自动展开**效果事件清单
+        # （用户第四轮：代价结算完紧接着执行效果，不手动点第二次发动）。
+        auto_start=_qianxun_auto_start,
         requirement=(
             "出牌阶段各限一次，你可【①弃置所有手牌；②受到一点无来源的火焰伤害；③将一张"
             "装备牌当作一张延时类锦囊牌对自己使用】，并执行本回合未被选择过的一项："

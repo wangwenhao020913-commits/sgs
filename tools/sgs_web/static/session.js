@@ -1778,6 +1778,8 @@ function commitView(body) {
     state.pendingClock.receivedAt = 0;
     // U2-07：自动提交的去重键是询问序号；换会话后序号会重复，必须作废。
     state.arrangeAutoSeq = null;
+    // qunying 票 11：自动展开的去重键同理（同一局的刷新则保留——玩家取消掉的清单不重开）。
+    state.preactivationAutoSeq = null;
     // U1-06：换会话时详情窗口的座位号属于上一局，必须作废（同一局的刷新则保留）。
     state.modal.heroSeat = null;
     // U3-01 / D5.5：舞台三组跨 commit 保留，但换会话必须清空（上一局的牌不能留在台上）。

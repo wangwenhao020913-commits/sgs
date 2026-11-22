@@ -3447,6 +3447,14 @@ def pending_payload(
     payload["activation_preactivations"] = _preactivation_payload(
         getattr(query, "activation_preactivations", None) or {}
     )
+    # **自动展开**（qunying 票 11）：前一个事件结算完、下一个事件待选时，引擎点名这条技能
+    # （``PlayPhaseQuery.auto_start``，``exclude=True`` 的本地面）⇒ 界面渲染时直接摊开它的
+    # 清单，玩家不必再点一次技能按钮。**键的缺席是保证**：其余技能 / 其余询问的载荷逐字节
+    # 不变（与 ``preview`` / ``default_choice`` / ``structural`` 同一姿态），读取方
+    # = ``preactivation.js:autoStartPreativation``，由 ``pending.js:renderPending`` 调用。
+    auto_start = tuple(getattr(query, "auto_start", ()) or ())
+    if auto_start:
+        payload["auto_start"] = list(auto_start)
     # **步骤预览的可用声明**（table-ux-overhaul 票 11）：这一问有"有流水线的清单"才带
     # ``"preview": true``——即 ``POST …/preview`` 对这一问真能算。前端据此决定"每次选择
     # 变化问一次后端"；**键的缺席是保证**：合成载荷 / 没有流水线的转化清单 / 旧载荷都不带

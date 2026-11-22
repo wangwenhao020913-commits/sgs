@@ -3651,6 +3651,11 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     True,
                     "牌名 → 清单：填 ``UseCard(card, targets=(A,), designations=(Bn,))``",
                 ),
+                "auto_start": (
+                    False,
+                    "界面自动展开标记（qunying 票 11）：AI 不用它——复合候选仍从同一份"
+                    "``preactivations`` 填表，自动展开只改界面的进入方式",
+                ),
             }
         ),
         "PeachQuery": MappingProxyType(

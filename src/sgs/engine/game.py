@@ -101,6 +101,7 @@ from sgs.skills import (
     SeatModifierKind,
     StateChange,
     advance_provider,
+    auto_start_for,
     awakening_skill_awakened,
     blocked_true_names,
     card_preactivations,
@@ -6510,6 +6511,7 @@ class Engine:
             self.state, actor, kind, answers_seq=seq, dying=dying, payload=payload
         )
         preactivations: dict[str, tuple[Step, ...]] = {}
+        auto_start: tuple[str, ...] = ()
         designation_actions: tuple[UseCard, ...] = ()
         card_preactivation_manifests: dict[str, tuple[Step, ...]] = {}
         if kind is QueryKind.PLAY_PHASE:
@@ -6523,6 +6525,14 @@ class Engine:
             )
             preactivations = preactivations_for(
                 self.state, actor, offered, timing=timing
+            )
+            # qunying 票 11：前一个事件结算完、下一个事件待选 ⇒ 点名这条技能，界面直接
+            # 摊开它的清单（玩家不再点第二次技能按钮）。判据来自技能声明；**只有真有清单**
+            # 的技能才点名（标了却没有东西可展开 = 不应发生，客户端也就不会开空面）。
+            auto_start = tuple(
+                skill_id
+                for skill_id in auto_start_for(self.state, actor, offered)
+                if skill_id in preactivations
             )
             flagged = preactivated_skill_ids()
             if flagged:
@@ -6580,6 +6590,7 @@ class Engine:
                 transform_actions=internal_transform_actions,
                 designation_actions=designation_actions,
                 card_preactivations=card_preactivation_manifests,
+                auto_start=auto_start,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)

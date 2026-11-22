@@ -1095,6 +1095,19 @@ class PlayPhaseQuery(_QueryBase):
     02a 只在 query 侧下发；投影载荷在 02b 接。
     """
 
+    auto_start: tuple[str, ...] = Field(default=(), exclude=True)
+    """**自动展开预发动清单**的技能 id（qunying 票 11）。
+
+    前一个事件已结算、下一个事件待选时（【谦逊】：代价事件结算完、效果事件待选），这条
+    技能此刻的清单应当**直接摊开**、玩家不必再点一次技能按钮。判据来自技能声明
+    （``ActiveSkill.auto_start`` → :func:`sgs.skills.preactivation.auto_start_for`），
+    引擎只在"这条技能确实有清单"时点名它；空元组 = 没有要自动展开的（其余询问 / 其余
+    技能因此一字不改）。**不进记录流**（``exclude``）：清单由状态重新渲染，落盘只是冗余，
+    既有 Golden Replay 逐字节不变；接入层在
+    :func:`sgs_web.projection.pending_payload` 里显式下发 ``auto_start`` 键，**为空时不发**
+    （键的缺席是保证）。
+    """
+
 
 class DodgeQuery(_QueryBase):
     kind: Literal["DODGE"] = "DODGE"

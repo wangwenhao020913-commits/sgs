@@ -4248,6 +4248,74 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeOk}`);
 }
 
+/* ============ qunying 票 11：代价结算完 ⇒ 效果事件**自动弹出**（合成载荷） ============
+ *
+ * 服务端只在"前一个事件已结算、下一个事件待选"时给 `auto_start`（票价由 `tests/test_web.py`
+ * 在真 pending 上钉）；这里读界面的那一半：**不点技能按钮**，清单在渲染时直接摊开，
+ * 且同一份询问（同一 `seq`）的再次渲染不会把玩家取消掉的清单反复顶开。
+ */
+{
+  const QIANXUN_ID = "hero.qunying_luxun.qianxun";
+  const effectManifest = [
+    { name: "effect", kind: "option", zones: [], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: [
+        "qianxun_effect_card", "qianxun_effect_move", "qianxun_effect_gain",
+      ] }] },
+    { name: "card", kind: "card", zones: ["equip", "judge"], min: 1, max: 1, order: 1,
+      pool: [{ when: ["qianxun_effect_move"], options: ["21"] }], seats: [0, 1] },
+    { name: "to", kind: "seat", zones: [], min: 1, max: 1, order: 2,
+      pool: [{ when: ["qianxun_effect_move", "21"], options: ["seat:1"] }] },
+    { name: "type", kind: "option", zones: [], min: 1, max: 1, order: 3,
+      pool: [{ when: ["qianxun_effect_gain"], options: ["basic", "trick", "equipment"] }] },
+  ];
+  const view = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 977,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: QIANXUN_ID, answers_seq: 977 },
+      { kind: "EndPhase", answers_seq: 977 },
+    ],
+    preactivations: { [QIANXUN_ID]: effectManifest },
+    preactivation: [],
+    // 票 11 的服务端标记：只有窗口开着（代价已结算、效果待选）时出现。
+    auto_start: [QIANXUN_ID],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  view.skills = [{
+    skill_id: QIANXUN_ID, name: "谦逊", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: false,
+    ui: { requirement: "代价事件结算完，效果事件自动进入", convert_sources: [] },
+  }];
+  ui.state.view = view;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.state.preactivationAutoSeq = null;
+  ui.renderTable();
+  ui.renderPending(view);
+  // **一次点击都没有**：清单在渲染那一刻已经摊开（提示行说第 1/4 步、提示条仍是服务端那句）。
+  check("㉿AS1 带 auto_start 的询问**自动进入**效果事件清单（玩家没点技能按钮）",
+    !!ui.state.preactivation && ui.state.preactivation.skillId === QIANXUN_ID
+      && ui.state.preactivation.steps.length === 4
+      && ui.state.preactivation.cursor === 0
+      && /第 1\/4 步/.test($("t-target-hint").textContent)
+      && !/预发动【/.test($("t-prompt").textContent),
+    `pre=${JSON.stringify(ui.state.preactivation && ui.state.preactivation.skillId)}`
+      + ` hint="${$("t-target-hint").textContent}" prompt="${$("t-prompt").textContent}"`);
+  check("㉿AS2 自动展开的是**效果事件**清单（第一步是效果选项，不是代价选项）",
+    ui.preactivationOptions(ui.state.preactivation, 0).join(",")
+      === "qianxun_effect_card,qianxun_effect_move,qianxun_effect_gain",
+    `options=${(ui.preactivationOptions(ui.state.preactivation, 0) || []).join(",")}`);
+  // 取消一次回第一步、再取消退出本地态；随后同一份询问的轮询重绘**不再**顶开。
+  ui.cancelOrClear();
+  ui.cancelOrClear();
+  check("㉿AS3 玩家可以取消（两次取消退出本地态）",
+    ui.state.preactivation === null, `pre=${JSON.stringify(ui.state.preactivation)}`);
+  ui.renderPending(view);
+  check("㉿AS4 同一个 seq 的再次渲染不会把取消掉的清单自动顶开（只自动展开一次）",
+    ui.state.preactivation === null,
+    `pre=${JSON.stringify(ui.state.preactivation)} seq=${ui.state.preactivationAutoSeq}`);
+}
+
 /* ============ 票 17（合成局面）：窗口里的【渐营】② 提供者入口 + **一步清单** ============
  *
  * 票 24 / Q1（票 24 §4，用户逐字「Q1没有问题，就按照使用来」）之后，② 只在**持有者自己的

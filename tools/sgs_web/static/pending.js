@@ -279,6 +279,10 @@ function renderPending(view) {
     syncDialog();
     return;
   }
+  // 自动展开（qunying 票 11）：引擎点名的清单（`pending.auto_start`，只有"前一个事件结算完、
+  // 下一个事件待选"时才出现）在**这一问刚渲染**时直接摊开，玩家不必再点一次技能按钮。
+  // 进入清单会自己把这一问重绘一遍，故这里直接返回、不重复渲染。
+  if (autoStartPreativation(pending)) return;
   const actions = pending.legal_actions || [];
   const kind = renderKind(pending, actions);
 

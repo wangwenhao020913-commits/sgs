@@ -1718,3 +1718,134 @@ def test_qianxun_composite_actions_drive_the_two_events() -> None:
     assert state.virtual_judge[converted].type == "indulgence", "移动判定区的转化牌保持产物"
     assert module._qianxun_used_effects(state, 0) == {module.QIANXUN_EFFECT_MOVE}
     assert not module._qianxun_window_open(state, 0), "效果结算完窗口关闭"
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 11：代价事件结算完 ⇒ 效果事件**自动弹出**（不再点第二次技能按钮）
+# ---------------------------------------------------------------------------
+
+
+def test_qianxun_auto_start_marker_appears_once_the_cost_event_settles() -> None:
+    """[G1] 代价事件结算完 ⇒ 下一次出牌阶段询问**直接**带效果事件清单 + `auto_start`。
+
+    用户 2026-11-22 第四轮：「执行完 cost 后紧接着就要执行效果，而不是我手动点击发动」。
+    引擎侧的证据 = 那一次询问自己的两个字段：``preactivations[QIANXUN]`` 是**效果事件**
+    的清单（一条代价步骤都没有），``auto_start`` 点名这条技能（界面据此直接摊开清单）。
+    """
+    from sgs.skills import active as module
+
+    # 座位 0 装备区留一张武器：效果② 的选牌步因此有候选（空场时整条效果清单会被
+    # `manifest` 判成"填不出来"、不下发——自动展开也就无从谈起，见票 11 的 Answer）。
+    hand = cards_of_type(PACK_160, "slash")[0], cards_of_type(PACK_160, "dodge")[0]
+    sword = cards_of_type(PACK_160, "qinggang_sword")[0]
+    state = build_state(
+        pack=PACK_160,
+        seats=[SeatSpec(hero=HERO, hand=hand, equip=(sword,))],
+        deck=deck_excluding(PACK_160, *hand, sword),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=71)
+    script = _PlayScript((module.QIANXUN_COST_DISCARD,))
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
+        lambda e: (
+            module._qianxun_window_open(e.state, 0)
+            and e.pending is not None
+            and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE"
+        ),
+    )
+    pending = engine.pending
+    assert pending is not None
+    assert pending.auto_start == (QIANXUN,), (
+        f"代价结算完、窗口开着 ⇒ 这一问点名要自动展开效果事件：{pending.auto_start}"
+    )
+    steps = pending.preactivations[QIANXUN]
+    assert [step.name for step in steps] == ["effect", "card", "to", "type"], (
+        f"自动展开的是**效果事件**的清单：{[step.name for step in steps]}"
+    )
+    assert "cost" not in {step.name for step in steps}, "效果清单里不许混进代价步骤"
+    # `auto_start` 是**本地面**（``exclude=True``）：记录流逐字节不变。
+    assert "auto_start" not in pending.model_dump(), "新字段不进记录流"
+
+
+def test_qianxun_effect_event_cancel_does_not_auto_start_again() -> None:
+    """[G2] 效果事件取消（空池 / 无事发生）⇒ 窗口关闭，下一问**不再**点名自动展开。
+
+    用户裁定第 5 条（票 10 的 ``on_cancel``）：代价不回退、效果位不记、窗口关掉。于是
+    同一份询问回到代价事件（或该技能此刻根本没有入口），``auto_start`` 必须为空——否则
+    玩家取消完又会立刻被顶开。
+    """
+    from sgs.skills import active as module
+
+    # 场上**一张牌都没有** ⇒ 效果② 的选牌步空池 ⇒ 这个效果事件取消（票 10 的 on_cancel）。
+    state = _state(seats=3)
+    engine = Engine.from_state(state, seed=72)
+    script = _PlayScript((module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_MOVE))
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
+        lambda e: (
+            not module._qianxun_window_open(e.state, 0)
+            and bool(module._qianxun_used_costs(e.state, 0))
+            and e.pending is not None
+            and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE"
+        ),
+    )
+    pending = engine.pending
+    assert pending is not None
+    assert pending.auto_start == (), (
+        f"效果事件取消后不再自动展开（窗口已关）：{pending.auto_start}"
+    )
+    assert module._qianxun_used_costs(state, 0) == {module.QIANXUN_COST_DAMAGE}, (
+        "代价不回退（票 10 的裁定）"
+    )
+    assert not module._qianxun_window_open(state, 0), "on_cancel 关掉了效果窗口"
+    names = [step.name for step in pending.preactivations.get(QIANXUN, ())]
+    assert "effect" not in names, f"回到代价事件，不再是效果清单：{names}"
+
+
+def test_qianxun_auto_start_is_derived_from_the_declaration_only() -> None:
+    """[G3] 自动展开的判据从**声明**派生；没有声明的技能一条都不进表。
+
+    与 ``_build_flows`` / ``_build_resolvers`` 同一姿态：注入一份声明验"派生"本身，不手抄
+    id 名单。真实登记表里只有【谦逊】一条（它是唯一把代价 / 效果拆成两个事件的技能）。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.preactivation import AUTO_STARTS, _build_auto_starts
+
+    base = next(skill for skill in module.ACTIVE_SKILLS if skill.skill_id == QIANXUN)
+    untouched = next(
+        skill
+        for skill in module.ACTIVE_SKILLS
+        if skill.skill_id != QIANXUN and skill.auto_start is None
+    )
+    table = _build_auto_starts((untouched, base))
+    assert set(table) == {QIANXUN}, (
+        f"只有声明了 auto_start 的技能进表（不手抄名单）：{sorted(table)}"
+    )
+    assert set(AUTO_STARTS) == {QIANXUN}, (
+        f"当前声明里自动展开只属于【谦逊】：{sorted(AUTO_STARTS)}"
+    )
+    # 别的 A 族技能的真实出牌阶段询问：marker 恒空（行为与引入本机制之前相同）。
+    hand = cards_of_type(PACK_160, "slash")[0]
+    other = build_state(
+        pack=PACK_160,
+        seats=[SeatSpec(hero="huanggai", hand=(hand,)), SeatSpec()],
+        deck=deck_excluding(PACK_160, hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(other, seed=73)
+    run_queries(
+        engine,
+        [_PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
+        lambda e: (
+            e.pending is not None
+            and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE"
+        ),
+    )
+    assert engine.pending.auto_start == (), (
+        f"【黄盖·苦肉】的出牌阶段不带自动展开：{engine.pending.auto_start}"
+    )

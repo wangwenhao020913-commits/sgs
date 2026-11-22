@@ -628,6 +628,36 @@ function enterPreativation(skill, manifest) {
   renderPending(state.view);
 }
 
+/** **自动展开**引擎点名的清单（qunying 票 11）：代价事件结算完 ⇒ 效果事件直接摊开。
+ *
+ * 判据只读服务端下发的 `pending.auto_start`（技能 id 数组）：它只在"前一个事件已结算、
+ * 下一个事件待选"时出现（【谦逊】的窗口位），**键的缺席 = 走既有的点按钮进入**。因此这里
+ * 不认技能 id、不认技能名，与「被动入口」同一姿态——服务端说展开哪一条，就展开哪一条。
+ *
+ * **一次询问只自动展开一次**：`state.preactivationAutoSeq` 记住已经展开过的 `pending.seq`。
+ * 玩家把清单取消掉（主动入口 = 退出本地态、零提交）之后，同一份询问的轮询重绘不再把它
+ * 顶开——否则「取消」在自动展开的面上等于无效。
+ *
+ * 返回真 = 已经进入清单并重绘（调用方不必再渲染这一问）。
+ */
+function autoStartPreativation(pending) {
+  if (!pending || state.playback || state.preactivation) return false;
+  const ids = pending.auto_start || [];
+  if (!ids.length) return false;
+  if (state.preactivationAutoSeq === pending.seq) return false;
+  const skills = (state.view && state.view.skills) || [];
+  for (const skillId of ids) {
+    const skill = skills.find((item) => item.skill_id === skillId);
+    const manifest = preactivationManifest(pending, skillId);
+    // 清单 / 技能条目缺失 ⇒ 不展开（fail-closed：空面比"顶开一个点不动的面"好）。
+    if (!skill || !manifest || !manifest.length) continue;
+    state.preactivationAutoSeq = pending.seq;
+    enterPreativation(skill, manifest);
+    return true;
+  }
+  return false;
+}
+
 /** 点一张**强制转化**的手牌（‘只能’型，神关羽【武神】）：进入它的清单，并把来源步预选成这张牌。
  *
  * 强制 = 源牌只能当产物使用 / 打出（服务端 `transform_products[*].forced` 回答）；

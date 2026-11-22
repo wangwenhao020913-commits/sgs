@@ -17491,3 +17491,98 @@ def test_the_need_card_keys_are_gone_from_a_real_http_payload() -> None:
     assert pending["kind"] == "DODGE", "这条断言必须落在真·需要牌窗口上（否则'没有键'不算证据）"
     assert "need_card_demand" not in pending, "票 05 删的是整键，不是置 None"
     assert "need_card_supplies" not in pending, "供给行表（渲染 + 载荷）按用户裁定一并删除"
+
+
+# ---------------------------------------------------------------------------
+# qunying 票 11：代价事件结算完 ⇒ 效果事件自动弹出（载荷面）
+# ---------------------------------------------------------------------------
+
+
+def _qianxun_play_phase_session(hero: str = "qunying_luxun") -> Session:
+    """真会话 + 真引擎：人类座位 0 的出牌阶段（真 ``pending_payload`` 链路）。
+
+    随机建局走不到【谦逊】的代价 / 效果两个事件，故引擎换成人为局面；会话壳、真引擎、
+    ``pending_payload`` 这条读取方链路一字不换（与 :func:`_yiji_real_session` 同一手法）。
+    """
+    pack = _context_pack()
+    hand = cards_of_type(pack, "slash")[0]
+    # 座 1 装备区留一张武器：代价结算完之后效果② 的选牌步仍有候选，效果清单才存在
+    # （空场时 `manifest` 判"填不出来"、整条不下发，自动展开也就无从谈起）。
+    weapon = cards_of_type(pack, "qinggang_sword")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero=hero, hand=(hand,)), SeatSpec(equip=(weapon,))],
+        deck=deck_excluding(pack, hand, weapon),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+    return session
+
+
+def test_a_real_session_hands_the_effect_event_to_auto_start_after_the_cost() -> None:
+    """[G1][G4] 代价事件提交后，**下一份真 pending** 就带效果事件清单 + `auto_start`。
+
+    读的是生产路径：真 ``Session`` 的挂起 → ``pending_payload``（投影那一份下发载荷）。
+    提交的是客户端会拼的那个复合动作（``buildPreativationAction``：纯选项代价 ⇒
+    ``picks=[]``、``choices=[选项文本]``），不是手抄的引擎内部调用。
+    """
+    from sgs.skills.active import QIANXUN, QIANXUN_COST_DISCARD
+
+    session = _qianxun_play_phase_session()
+    query = session.pending
+    assert query is not None and query.kind == "PLAY_PHASE"
+    before = pending_payload(session)
+    assert before is not None
+    assert "auto_start" not in before, "代价事件这一问还没有要自动展开的东西"
+    cost_steps = before["preactivations"][QIANXUN]
+    assert [step["name"] for step in cost_steps] == ["cost"], (
+        f"这一问是代价事件（手牌里没有装备牌 ⇒ 代价③ 的选牌 / 选产物两步不出现）："
+        f"{[step['name'] for step in cost_steps]}"
+    )
+
+    option = next(
+        option
+        for option in cost_steps[0]["pool"][0]["options"]
+        if option == QIANXUN_COST_DISCARD
+    )
+    assert session.submit_answer(
+        ActivateSkill(
+            skill_id=QIANXUN,
+            picks=(),
+            choices=(option,),
+            answers_seq=query.seq,
+        )
+    ) is False
+
+    next_query = session.pending
+    assert next_query is not None and next_query.kind == "PLAY_PHASE", (
+        f"代价结算完的下一问仍是出牌阶段：{getattr(next_query, 'kind', None)}"
+    )
+    payload = pending_payload(session)
+    assert payload is not None
+    assert payload["auto_start"] == [QIANXUN], (
+        f"下一份载荷点名自动展开【谦逊】的效果事件：{payload.get('auto_start')}"
+    )
+    assert [step["name"] for step in payload["preactivations"][QIANXUN]] == [
+        "effect",
+        "card",
+        "to",
+        "type",
+    ], "载荷里带的是**效果事件**清单（不含代价步骤）"
+
+
+def test_the_auto_start_key_is_absent_for_a_skill_without_a_second_event() -> None:
+    """[G3] 没有第二个事件的 A 族技能：载荷里**没有** `auto_start` 这个键。
+
+    「键的缺席」是其余技能载荷逐字节不变的保证（与 ``preview`` / ``default_choice``
+    同一姿态）；它在真 pending 的真载荷上断言，而不是合成夹具。
+    """
+    session = _qianxun_play_phase_session(hero="huanggai")
+    payload = pending_payload(session)
+    assert payload is not None and payload["kind"] == "PLAY_PHASE"
+    assert "auto_start" not in payload, (
+        f"没有两个事件的技能不带自动展开键：{sorted(payload)}"
+    )
