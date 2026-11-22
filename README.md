@@ -111,5 +111,6 @@ bash tests/smoke-web.sh          # 前端快回路（起临时服务 + 跑真前
 
 - **代码与原创文档**：[MIT](LICENSE)。
 - **游戏素材 / 规则文本**：版权归游卡桌游及各自权利人，本仓库仅作研究引用，**不得商用**；
-  详见 [`NOTICE`](NOTICE)。权利人要求移除时，提 Issue 即可。
+  详见 [`NOTICE`](NOTICE)。权利人要求移除时，提 Issue 即可。仓内的游戏素材是
+  `tools/sgs_web/static/voices/` 的 40 条卡牌语音与 `pic/portraits/` 的 115 张武将立绘。
 - 本项目**不是**官方产品，不提供规则裁定；对局结果仅供学习参考。

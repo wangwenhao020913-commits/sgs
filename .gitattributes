@@ -15,3 +15,7 @@ tools/sgs_web/static/voices/*.mp3 -text
 # 图标静默坏掉而构建照样成功。显式声明，和上面 mp3 同一个理由。
 packaging/assets/*.ico -text
 packaging/assets/*.png -text
+
+# 武将立绘（`pic/portraits/` 下 115 张 jpg）：二进制，与 mp3 / ico 同一个理由。
+# 只钉图片；同树的 `作者.txt` 仍是文本（2 个文件，按 `* text=auto eol=lf` 走）。
+pic/portraits/**/*.jpg -text

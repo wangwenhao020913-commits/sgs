@@ -1,7 +1,7 @@
 """武将立绘的资源索引与 ``/art/`` 服务（hero-portraits 票 01）。
 
-判据来自 ``.scratch/hero-portraits/issues/01-立绘资源与索引.md`` §判据。立绘是
-**gitignored 的用户素材**（``pic/portraits/``），所以这里一条测试都不读本机的
+判据来自 ``.scratch/hero-portraits/issues/01-立绘资源与索引.md`` §判据。立绘是**随仓分发的
+用户素材**（``pic/portraits/``，版权口径见 ``NOTICE`` 第 2 节），但这里一条测试都不读本机的
 ``pic/``：一律用 ``SGS_ART_DIR`` 指到 ``tmp_path``——既走环境变量这条**真产品路径**，
 也顺手钉住"手编作者文件后刷新即生效"（无缓存）。
 

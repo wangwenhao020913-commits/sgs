@@ -22,13 +22,18 @@ archify-main/
 # 语音素材的原始目录（版权素材的来源，只在 NOTICE 里点名）
 SGS_OL_Cardvioces/
 
-# 本机截图 / 背景图（README 不放图片；真要放就显式 `git add -f`）
-pic/
+# 本机截图 / 背景图（README 不放图片；真要放就显式 `git add -f`）。
+# 例外：`pic/portraits/` 是**随仓分发**的武将立绘（115 张；版权与移除口径见 NOTICE 第 2 节）。
+# `index.json` 是 `tools/build-portraits.py` 的生成期快照（含本机绝对路径），不入库。
+pic/*
+!pic/portraits/
+pic/portraits/index.json
 
 # Windows 快捷方式 / 代码图谱索引（本机产物）
 SGS.lnk
 codegraph.json
 
 # 素材包压缩文件，以及 Windows「下载自网络」的 ADS 标记
+# 尾缀 `*`：立绘目录里有 `xxx.jpg:Zone.Identifier` 与 `xxx.jpg:Zone.Identifier.lnk` 两种。
 *.zip
-*:Zone.Identifier
+*:Zone.Identifier*
