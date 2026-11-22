@@ -36,6 +36,8 @@ from typing import Any, Final
 
 APP_NAME: Final = "SGS"
 APP_TITLE: Final = "SGS · 三国杀（便携版）"
+ART_DIR_ENV: Final = "SGS_ART_DIR"
+"""立绘根的开关（与 `sgs_web.portraits.ART_DIR_ENV` 同名；这里显式设给接入层）。"""
 DEFAULT_PORT: Final = 8100
 PORT_FALLBACK_SPAN: Final = 9
 """缺省端口被占时往后顺延几格（8101–8109），再不行才交给内核。"""
@@ -70,6 +72,32 @@ def _bundle_root() -> Path:
             return Path(meipass)
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
+
+
+def _exe_dir() -> Path:
+    """`SGS.exe` 所在目录（源码态 = 仓根）。随包的立绘住在它旁边的 `pic/portraits`。"""
+    if _frozen():
+        return Path(sys.executable).resolve().parent
+    return _bundle_root()
+
+
+def _ensure_art_root() -> Path | None:
+    """把随包的立绘目录**显式**交给接入层，不靠 `sgs_web.REPO_ROOT` 的推断。
+
+    为什么要在启动器里做：`sgs_web.REPO_ROOT` 冻结后算到哪一层，打包时的目录布局说了算；
+    推断一旦偏了就是"玩家打开看到全是空位"这种静默失败。这里按序试两个落点——
+    `<exe 目录>/pic/portraits`（本包的形状，`build.ps1` 复制；玩家可整目录替换）与
+    `<exe 目录>/_internal/pic/portraits`（备选）——命中就设 `SGS_ART_DIR`；
+    用户自己设过就一律不覆盖。都没有 ⇒ 返回 `None`（页面走立绘空位，不报错）。
+    """
+    override = os.environ.get(ART_DIR_ENV, "").strip()
+    if override:
+        return Path(override)
+    for candidate in (_exe_dir() / "pic" / "portraits", _bundle_root() / "pic" / "portraits"):
+        if candidate.is_dir():
+            os.environ[ART_DIR_ENV] = str(candidate)
+            return candidate
+    return None
 
 
 def _data_root() -> Path:
@@ -333,6 +361,7 @@ def _bind(opts: dict[str, Any], runs_dir: Path) -> tuple[Any, int]:
 
 def _run_web(opts: dict[str, Any]) -> int:
     root = _data_root()
+    art_root = _ensure_art_root()
     runs_dir = Path(opts["runs_dir"]).expanduser() if opts["runs_dir"] else root / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -377,6 +406,7 @@ def _run_web(opts: dict[str, Any]) -> int:
     _say(f" 地址：{url}")
     _say(f" 数据：{root}")
     _say(f" 日志：{root / LOG_NAME}")
+    _say(f" 立绘：{art_root}" if art_root is not None else " 立绘：未随包提供（页面走空位）")
     if str(opts["host"]) in ("0.0.0.0", "::"):
         _say(" 注意：已监听全部网卡，同网段的机器也能访问。")
     _say(" 关闭本窗口即退出游戏服务。")

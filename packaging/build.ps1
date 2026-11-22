@@ -298,6 +298,25 @@ if (Test-Path -LiteralPath $licenseSrc) {
     Copy-Item -LiteralPath $licenseSrc -Destination (Join-Path $final 'LICENSE.txt')
 }
 
+# Portrait pack: copy it BESIDE the exe (not into _internal) so the default art
+# root (<exe dir>/pic/portraits) resolves to it, the launcher hands that path to
+# sgs_web via SGS_ART_DIR, and users can swap the whole folder. `index.json`
+# (a machine-local snapshot) is not shipped; Windows ADS markers are skipped.
+$artSrc = Join-Path $Repo 'pic\portraits'
+if (Test-Path -LiteralPath $artSrc) {
+    $artDst = Join-Path $final 'pic\portraits'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $artDst) | Out-Null
+    robocopy $artSrc $artDst /E /XF 'index.json' '*:Zone.Identifier*' /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "Copy of pic\portraits failed (robocopy exit $LASTEXITCODE)"
+    }
+    $artCount = @(Get-ChildItem -LiteralPath $artDst -Recurse -File).Count
+    Write-Host "   art        $artDst ($artCount files)"
+}
+else {
+    Write-Warning 'no pic\portraits in the repository - the package ships without portraits'
+}
+
 $sum = (Get-ChildItem -LiteralPath $final -Recurse -File | Measure-Object -Property Length -Sum).Sum
 $folderMb = if ($sum) { [math]::Round($sum / 1MB, 1) } else { 0 }
 $exeMb = [math]::Round((Get-Item -LiteralPath (Join-Path $final 'SGS.exe')).Length / 1MB, 1)

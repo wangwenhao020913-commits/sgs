@@ -182,6 +182,17 @@ if (Test-Path -LiteralPath (Join-Path $internal 'build-info.json')) {
 $leakedPy = @(Get-ChildItem -LiteralPath $internal -Recurse -File -Filter '*.py' -ErrorAction SilentlyContinue)
 Check 'bundle ships no .py source' ($leakedPy.Count -eq 0) ("found {0}" -f $leakedPy.Count)
 
+# Portrait pack lives BESIDE the exe (build.ps1 copies pic\portraits there; the
+# launcher hands it to sgs_web via SGS_ART_DIR). Both halves are asserted: the
+# folder on disk, and the HTTP route actually serving image bytes in round 1.
+$artDir = Join-Path $AppDir 'pic\portraits'
+Check 'package has portrait folder' (Test-Path -LiteralPath $artDir)
+$artCount = 0
+if (Test-Path -LiteralPath $artDir) {
+    $artCount = @(Get-ChildItem -LiteralPath $artDir -Recurse -File -Include '*.jpg', '*.png').Count
+}
+Check 'package has portrait images' ($artCount -ge 100) ("count={0}" -f $artCount)
+
 # ---------------------------------------------------------------------------
 # 1. Cold start + full functional pass
 # ---------------------------------------------------------------------------
@@ -212,9 +223,48 @@ if ($null -ne $state1) {
         Check "GET /$asset 200" $r.ok ("status=$($r.status)")
     }
 
-    foreach ($api in @('api/decks', 'api/heroes', 'api/hero-presets', 'api/runs')) {
+    foreach ($api in @('api/decks', 'api/heroes', 'api/portraits', 'api/hero-presets', 'api/runs')) {
         $r = Get-Json "$base/$api"
         Check "GET /$api 200" $r.ok ("status=$($r.status)")
+    }
+
+    # The portrait index must name a real image and /art/ must return image bytes
+    # (magic-number sniffed; a JSON 404 or an HTML fallback would pass a status-only
+    # check, which is exactly the silent breakage this asserts against).
+    $artPath = ''
+    $index = Get-Json "$base/api/portraits"
+    if ($index.ok) {
+        try {
+            $idx = $index.body | ConvertFrom-Json
+            if ($idx.PSObject.Properties.Name -contains 'heroes') {
+                foreach ($name in $idx.heroes.PSObject.Properties.Name) {
+                    $entry = $idx.heroes.$name
+                    if ($entry -and ($entry.PSObject.Properties.Name -contains 'portrait') -and $entry.portrait) {
+                        $artPath = [string]$entry.portrait
+                        break
+                    }
+                }
+            }
+        }
+        catch {
+            $artPath = ''
+        }
+    }
+    Check 'portrait index lists an image' ([bool]$artPath) $(if ($artPath) { $artPath } else { 'none' })
+    if ($artPath) {
+        $wc = New-Object System.Net.WebClient
+        try {
+            $bytes = $wc.DownloadData("$base/art/$([uri]::EscapeDataString($artPath))")
+            $isJpeg = ($bytes.Length -gt 3 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xD8 -and $bytes[2] -eq 0xFF)
+            $isPng = ($bytes.Length -gt 8 -and $bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50)
+            Check 'GET /art/... serves image bytes' ($isJpeg -or $isPng) ("bytes={0} path={1}" -f $bytes.Length, $artPath)
+        }
+        catch {
+            Check 'GET /art/... serves image bytes' $false $_.Exception.Message
+        }
+        finally {
+            $wc.Dispose()
+        }
     }
 
     $create = Post-Json "$base/api/sessions" @{

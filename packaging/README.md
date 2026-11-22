@@ -8,8 +8,9 @@
 |---|---|
 | `dist/SGS-win64/SGS.exe` | 入口（console 子系统）：无敌启动 = 起本地服务 + 开浏览器；带参 = 命令行跑一局 |
 | `dist/SGS-win64/_internal/` | 解释器 + 字节码 + `static/` + `sgs/data/files/` + `build-info.json` |
+| `dist/SGS-win64/pic/portraits/` | **115 张武将立绘**（在 exe 旁边、不在 `_internal` 里；玩家可整目录替换换素材） |
 | `dist/SGS-win64/使用说明.txt` | 给最终用户的中文说明（版本号由构建脚本填入） |
-| `dist/SGS-win64/NOTICE.txt` | 第三方内容清单（含随包的 40 条 OL 语音） |
+| `dist/SGS-win64/NOTICE.txt` | 第三方内容清单（含随包的 40 条 OL 语音 + 115 张武将立绘） |
 | `dist/SGS-win64/LICENSE.txt` | MIT 全文（MIT 要求随副本分发） |
 | `dist/SGS-win64-<HEAD>-<日期>.zip` | 分发用的压缩包（`dist/` 已在 `.gitignore` 里） |
 
@@ -40,6 +41,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\selfcheck.ps1
 构建 venv、staging 树、PyInstaller 中间产物。**不需要**管理员权限，**不写**系统 PATH，
 构建完删掉这个目录就等于回到干净状态。
 
+C 盘紧（本机 2026-11-23 只剩 1.75 GB）时可以把构建区挪到别的盘、复用已有的解释器：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 `
+  -BuildRoot 'D:\sgs-build' `
+  -PythonExe 'C:\Users\asus\sgs-build\python3144\python.exe' `
+  -Version <git 短 HEAD>
+```
+
+（`-PythonExe` 给了现成解释器就不再下载 / 安装；venv 与 PyInstaller 中间产物落到新的
+`-BuildRoot`。）
+
 ## 为什么是现在这个形状（决策记录）
 
 | 决定 | 理由 |
@@ -51,6 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\selfcheck.ps1
 | **端口 8100 优先，然后在 8101–8109 里顺延，最后才交给内核** | 固定端口最省事，但"被占就起不来"是最常见的支持问题；直接甩给内核又会让**每次启动地址都变**、书签作废。顺延几格让地址基本稳定。实测这台机器上 8100 被 WSL 侧的服务占着，exe 自己落到了 8101。 |
 | **zip 自己逐条写**，不用 `Compress-Archive` / `ZipFile.CreateFromDirectory` | 这两个在 **.NET Framework**（PowerShell 5.1）下都会把条目名写成反斜杠 `SGS-win64\_internal\…`，那不是合法的 zip 布局：资源管理器能忍，7-Zip / WinRAR / 其他系统的 `unzip` 会解错。所以逐文件 `CreateEntryFromFile` 并显式把分隔符换成 `/`，同时保留顶层 `SGS-win64/` 目录。 |
 | **随包保留 40 条 OL 卡牌语音** | 用户 2026-11-14 明确选择「保留」（本可排除以缩小包体、规避第三方音频转发）。`NOTICE.txt` 里写明了这一点与"权利人要求即移除"的口径。 |
+| **立绘放 exe 旁边（`pic/portraits/`），不塞进 `_internal`** | 两个原因。① 冻结后 `sgs_web.REPO_ROOT` 落在哪一层由打包布局决定，推断偏了就是"全是空位"的静默失败——启动器**显式**探测 `pic/portraits` 并设 `SGS_ART_DIR`（`_ensure_art_root`），不靠推断；② 立绘是玩家最可能想换的东西，放 `_internal` 里就得连包一起换，放旁边则整目录替换即可。`index.json`（生成期快照）与 Windows `:Zone.Identifier` 标记不随包。 |
 | **两个 `.ps1` 纯 ASCII、无 BOM** | Windows PowerShell 5.1 用 **ANSI 代码页**解码无 BOM 的脚本：UTF-8 中文注释会变乱码，解析器吐出的是乱码报错（本项目真踩过两次）。中文全部放 `使用说明.txt` / `NOTICE.txt` / 本文件，以及 exe 自己的控制台输出。 |
 | **不在 CI 里打 exe** | `tests/test_dod.py::test_there_is_no_second_gate_entry` 要求 `.github/workflows/` 下**每个** `.yml` 都调用 `bash tests/run_all.sh`；为打包单开一条 workflow 会白跑 8 分钟门禁。exe 是发布产物，不是门禁判据。 |
 | **不往 `tests/` 加测试** | 用户的口径是"不动源码"。打包后的验证由 `selfcheck.ps1` 承担（它测的是产物，不是源码）。`packaging/` 在 `tools/gate-staged.sh` 的分级里是 **skip**，所以提交它不会触发全量门禁。 |
@@ -61,11 +75,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\selfcheck.ps1
 
 1. `_internal/` 里真的有 `sgs_web/static/`（含 `voices/` 41 条）、`sgs_web/descriptions.json`、
    `sgs/data/files/*.json`、`python314.dll`、`VCRUNTIME140.dll`、`build-info.json`，且**没有**
-   `.py` 源码泄漏（`noarchive=False` 意味着只发字节码）；
+   `.py` 源码泄漏（`noarchive=false` 意味着只发字节码）；**exe 旁边**有 `pic/portraits/`
+   （≥100 张图）；
 2. **回合 1（干净启动，`--port 0`）**：`server.json` 出现 → `GET /` 是开局页 → 5 个静态资源 +
-   4 个 API 全 200 → `POST /api/sessions`（8 人 / `standard_ex_160`）→ 拿到挂起询问 → 提交一步
-   应答 200（回包带 `records`）→ `server.log` 落盘；杀进程后断言**进程真的没了**、且没有
-   监听器还挂在它的 pid 上；
+   5 个 API 全 200 → `GET /api/portraits` 能拿到至少一张图、`GET /art/<那张>` 回的**是图片字节**
+   （按魔数判，防"JSON 404 也 200"）→ `POST /api/sessions`（8 人 / `standard_ex_160`）→
+   拿到挂起询问 → 提交一步应答 200（回包带 `records`）→ `server.log` 落盘；杀进程后断言
+   **进程真的没了**、且没有监听器还挂在它的 pid 上；
 3. **回合 2（陈旧状态）**：自己写一份"死端口 65000 + 死 pid 999999"的 `server.json`，再启动
    必须能起来且**不复用那个死端口**；
 4. **回合 3（默认端口 + 单实例）**：不带参数启动（走 8100→8109 的梯子）能落到一个可答端口；
