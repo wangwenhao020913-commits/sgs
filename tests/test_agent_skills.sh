@@ -279,6 +279,56 @@ scan_issue_answers() { # $1=仓库根；返回 1 = 有错
   [ "$errors" -eq 0 ]
 }
 
+# 人工档签字（ADR-030，用户 2026-11-22 裁定 Q7）：票头可选一行 `Human:`，值域只有三个 ——
+# `过` / `不适用:<理由>` / `待`；**resolved 的票不许 `待`**（"待" = 还没判，等于没收口）。
+#
+# 为什么**不**强求每张票都写：`.scratch/` 里有 328 张 2026-11-22 之前 resolved 的历史票，
+# 一刀切会整片判红。这里只做"写了就必须合法 + resolved 不许挂着待"这两条硬判据；强制
+# 写在这一层之外 —— 票面模板（`docs/agents/skill-authoring/batch-ticket.md`）与
+# `AGENTS.md` 注意 4 都带这一行，新票照抄即有。
+scan_issue_human() { # $1=仓库根；返回 1 = 有错
+  local root="$1" errors=0 declared=0 resolved_ok=0
+  local files=() f line value
+  if [ -d "$root/.scratch" ]; then
+    while IFS= read -r f; do files+=("$f"); done < <(
+      find "$root/.scratch" -mindepth 3 -maxdepth 3 -type f -path '*/issues/*.md' 2>/dev/null | sort
+    )
+  fi
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo "PASS: 无 .scratch/*/issues/，工单 Human: 检查 skip（干净 clone 全绿）"
+    return 0
+  fi
+  for f in "${files[@]}"; do
+    line="$(grep -m1 '^Human:' "$f" || true)"
+    [ -n "$line" ] || continue
+    declared=$((declared+1))
+    value="$(printf '%s' "${line#Human:}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$value" in
+      过) resolved_ok=$((resolved_ok+1)) ;;
+      不适用:*)
+        if [ -z "$(printf '%s' "${value#不适用:}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" ]; then
+          echo "FAIL: ${f#"$root"/} 的『Human: 不适用:』后面没写理由（要具体到人工条目编号或文件）"
+          errors=$((errors+1))
+        fi
+        ;;
+      待)
+        if grep -qE '^Status: resolved[[:space:]]*$' "$f"; then
+          echo "FAIL: ${f#"$root"/} 是 resolved 但『Human: 待』（人工条目没签字不算收口）"
+          errors=$((errors+1))
+        fi
+        ;;
+      *)
+        echo "FAIL: ${f#"$root"/} 的『Human:』值不在词表（过 / 不适用:<理由> / 待）：$value"
+        errors=$((errors+1))
+        ;;
+    esac
+  done
+  if [ "$errors" -eq 0 ]; then
+    echo "PASS: 工单 Human: 签字合法（$declared 张票声明了人工档，其中 $resolved_ok 张判过）"
+  fi
+  [ "$errors" -eq 0 ]
+}
+
 # 工单 `Touches:`（retro S8）：声明本票会改哪些文件，让"前沿能不能并行"成为机械判断
 # （`/implement-spec` 的规则是"文件不重叠才并行"）。字段**可选**；写了就必须每条路径都
 # 存在 —— 写错的声明比不写更坏（会让人据此做出错误的并行决定）。
@@ -403,6 +453,39 @@ if ! answer_probe "$GOOD" "$GOOD" green on; then
 fi
 
 if ! scan_issue_answers "$PWD"; then fail=1; fi
+
+# 人工档签字的合成反例（ADR-030）：词表外 / resolved 挂待 都要红，合法值要绿。
+human_probe() { # $1=要测的票头正文；返回 red|green
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  mkdir -p "$probe/.scratch/demo/issues"
+  printf '%s\n' "$1" > "$probe/.scratch/demo/issues/01-a.md"
+  out="$(scan_issue_human "$probe" 2>&1 || true)"
+  rm -rf "$probe"
+  if out_is_red "$out"; then echo red; else echo green; fi
+}
+if [ "$(human_probe $'Type: task\nStatus: resolved\nHuman: 过了\n')" != red ]; then
+  echo "FAIL: 合成反例未变红：Human 词表外的值未被判红"
+  fail=1
+fi
+if [ "$(human_probe $'Type: task\nStatus: resolved\nHuman: 待\n')" != red ]; then
+  echo "FAIL: 合成反例未变红：resolved 却写着 Human: 待 未被判红"
+  fail=1
+fi
+if [ "$(human_probe $'Type: task\nStatus: resolved\nHuman: 不适用:\n')" != red ]; then
+  echo "FAIL: 合成反例未变红：Human: 不适用 后面没写理由未被判红"
+  fail=1
+fi
+if [ "$(human_probe $'Type: task\nStatus: resolved\nHuman: 过\n')" != green ]; then
+  echo "FAIL: 合成反例未变绿：Human: 过 被判红"
+  fail=1
+fi
+if [ "$(human_probe $'Type: task\nStatus: claimed\nHuman: 待\n')" != green ]; then
+  echo "FAIL: 合成反例未变绿：在飞的票 Human: 待 被判红（待只对 resolved 是错）"
+  fail=1
+fi
+
+if ! scan_issue_human "$PWD"; then fail=1; fi
 
 # `Touches:` 声明可解析的合成反例（正反两面）。
 touches_probe() { # $1=red|green

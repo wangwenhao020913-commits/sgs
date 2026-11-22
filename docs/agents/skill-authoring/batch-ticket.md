@@ -5,7 +5,9 @@
 `.scratch/<effort>/issues/<NN>-<slug>.md` 用（`.scratch/` 不进版本库）。
 
 票面字段遵守 `docs/agents/issue-tracker.md`：`Status:` 一行、可选 `Touches:` / `Ruling:` /
-`规则原文:`；开工先置 `Status: claimed`，收口写 `## Answer` 再置 `Status: resolved`。
+`规则原文:` / `Human:`；开工先置 `Status: claimed`，收口写 `## Answer` 再置 `Status: resolved`。
+`Human:` 是**人工档签字**（`docs/agents/manual-checks.md`）：`过` / `不适用:<理由>` / `待`，
+`resolved` 的票不许停在 `待`。
 
 票里若带来新的**机制 / 动作面 / 信息通道**，先过一遍 AI 适配契约的 §1 checklist
 （`docs/agents/ai-adaptation.md`）：AI 会不会被悄悄打废，就在那一张清单里问。
@@ -26,6 +28,7 @@ Status: claimed
 Touches: src/sgs/skills/<模块>.py, tests/test_hero_<包>.py, 开发文档/06-里程碑与风险.md
 规则原文: 三国杀详细规则.txt §十九 L<起>–L<止>
 Ruling: <若本票依赖某条既有裁定，写账本行关键词>
+Human: 待（收口前改成 `过` 或 `不适用:<理由>`；见 `docs/agents/manual-checks.md`）
 
 ## 批次清单
 

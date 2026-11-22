@@ -286,6 +286,15 @@ else
       nshard_total=1
     fi
   else
+    # ---- 统计类已独占一片 ⇒ **总进程数维持 `SGS_GATE_SHARDS`**，其余文件少分一片 ----
+    # 为什么不是"再加一片"：这台机是 8 核 / 3.8 GB，3 个 pytest 同时跑会互相拖慢，而
+    # `test_fuzz.py` 的单局判据是 **wall-clock**（"超过墙上时钟兜底仍未收局"）。实测：
+    # 3 片时它在 seed=5351297216392131677 / 8 人上判红，单独跑 80 s 全绿——那是被饿的，
+    # 不是性能退化。故：统计类占一片，其余仍只分 $((shards-1)) 片。
+    if [ "$nshard_total" -gt 0 ]; then
+      shards=$((shards - 1))
+      [ "$shards" -ge 1 ] || shards=1
+    fi
     # ---- 余下的按文件行数降序 + 贪心（LPT），均衡的是"行数"这个便宜代理 ----
     [ "$shards" -le "${#pytest_files[@]}" ] || shards="${#pytest_files[@]}"
     [ "$shards" -ge 1 ] || shards=1

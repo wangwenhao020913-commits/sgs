@@ -16,8 +16,11 @@
 | `Human: 不适用:<理由>` | 本票不触碰任何人工条目（理由要写具体到条目编号或文件） |
 | `Human: 待` | 还没判——**`Status: resolved` 的票不允许出现 `待`**（`tests/test_agent_skills.sh` 核） |
 
-只对写了 `Answer contract: on` 的 effort 生效（复用 `issue-tracker.md` 的既有 opt-in，
-不追溯历史票）。
+**机械核到哪一步**（`tests/test_agent_skills.sh` 的 `scan_issue_human`）：**写了就必须合法**——
+值在词表内，且 `resolved` 的票不许停在 `待`、`不适用:` 必须带理由。它**不**强求每张票都写：
+`.scratch/` 里有 328 张 2026-11-22 之前 resolved 的票，一刀切会整片判红。强制写在这一层之外——
+票面模板（`docs/agents/skill-authoring/batch-ticket.md` 的 `Human: 待`）与 `AGENTS.md` 注意 4
+都带这一行，新票照抄即有。
 
 ## 登记表
 
