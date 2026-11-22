@@ -2517,9 +2517,13 @@ _HOSTILE_SEAT_STEPS = (
     # （``hero.mou_liucheng.lveying:target`` / ``...yingwu:target``），不登记会落进"帮盟友"。
     "hero.mou_liucheng.lveying:",
     "hero.mou_liucheng.yingwu:",
-    # 群英包·「锋势」陆逊【谦逊】（qunying 票 01）：手写询问的三个座位步都指向**别人**——
-    # 「②移动场上一张牌」要挑对手的装备 / 判定牌（源座位）、再放到另一名角色那里（目的
-    # 座位）；「①视为使用」的目标同样是敌人。不登记会落进"帮盟友"的缺省分支。
+    # 群英包·「锋势」陆逊【谦逊】（qunying 票 01）：座位步都指向**别人**——
+    # 「②移动场上一张牌」的**目的地**放到另一名角色那里；「①视为使用」的目标同样是敌人。
+    # 不登记会落进"帮盟友"的缺省分支。
+    # 票 03b 起效果② 的"目的地"是流水线的 ``to`` 步（询问名 ``qianxun:to``，短 id 前缀），
+    # 手写的 ``:target`` / ``:targets`` 仍是全限定 id ⇒ **两条前缀都登记**（只留全限定会
+    # 让流水线那一步落回"帮盟友"）。
+    "qianxun:",
     "hero.qunying_luxun.qianxun:",
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。

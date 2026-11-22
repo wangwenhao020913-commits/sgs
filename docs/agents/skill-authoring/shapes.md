@@ -60,6 +60,7 @@
 | 多步：座位 → 选项 → 选牌 | 「选择一名男性角色，然后弃置一张手牌或将一张装备牌置入其装备区」 | `hero.jie_sunshangxiang.jieyin` |
 | 选项步（闭集，可动态） | 「选择一项：1… 2…」 | `hero.jie_xushu.jianyan` |
 | 选项步 + **置灰**（`disabled`：列出来但此刻不可选） | 「将此牌当任意一张基本牌或普通锦囊牌」——牌名**列全**，"此刻没有合法目标"的置灰 | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】；`disabled` 见 `src/sgs/skills/flow.py:PickOption`） |
+| **选项 → 依赖该选项的后续步骤**（`FlowBranch`：选了这一项之后才有的几步） | 「选择一项：1… 2…；若选 2，则再在场上点一张牌、然后选一名角色」 | `hero.qunying_luxun.qianxun`（qunying 票 03b：选代价 → 选效果 → 效果② 的「场上点选一张牌 → 目的地（非法置灰）」；`src/sgs/skills/flow.py:FlowBranch`。它是**步骤的组合子**，不是第六种原语） |
 | 手写询问（循环/逐点/逐目标） | 「逐点触发、每个伤害点各问一次」「逐个目标」 | `hero.guojia.yiji`、`hero.jie_machao.tieqi` |
 | 手写**主体**（`SkillFlow` 只装前几步，段机住在 `effect` 里） | 「扣置一张手牌…然后其他角色**依次**质疑」——一次发动里有**变长循环**（逐座位问）；或「失去 1 点体力**或**弃一张武器牌，然后…」——两条代价分支的**后续步骤不同**（一条要选牌、一条不要） | `hero.yuji_mobile.guohuo`（前两步是流水线，质疑循环住在提交点；判据见 `src/sgs/skills/flow.py:SkillFlow` 的"本语言没有循环 / 每轮提交步骤"）；**条件步**同形：`hero.dianwei_mobile.qiangxi`（选项步留在流水线，选牌 / 选目标 / 付费住在 `effect`——`steps` 是定长元组，任一步"没有候选"= 取消整条，没有"跳过这一步"） |
 | 钩子 + 修饰器（触发后改值） | 「当你失去 1 点体力后…本阶段…」 | `hero.jie_huanggai.zhaxiang` |
@@ -250,6 +251,7 @@
 | `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`disabled` = **显示但不可选**的那几项（同形态的可调用档）⇒ 清单的 `StepPool.disabled` 让界面置灰、校验器拒收；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
 | `PickProvide` | `provide` | 选一张用于"提供"的牌（转化 / 提供者） |
 | `Arrange` | `arrange` | 排列（观星）；含它的流水线不下发预发动清单。规格可以是 `DeckTopArrange`（牌堆顶 / 底）或 `TwoRowArrange`（**两行交换**：具名行 + 定切分 + 不枚举候选 + 行内不调序；首个载体 = 神诸葛亮【七星】），后者见 §4.1 |
+| `FlowBranch` | `branch` | **按前序选项分叉的子步骤**（qunying 票 03b）：`key` = 前序 `PickOption` 的步骤键，`branches` = `选项文本 → 子步骤元组`（空元组 / 没列出的选项 = 这项后面没有步骤，**不是取消**）。它是**步骤的组合子**，不是第六种原语：子步仍是 `cards` / `option` 两种（闭集，`tests` 与构造期都核），各处的面 / 池 / 文案 / 置灰规则一条不改。**必须是流水线的最后一步**（子步占据有效序列的尾部，询问位置 `(name, index)` 因此唯一）。子步的 `key` 与顶层步**共用** `answers`，故整条流水线唯一。四个读取方读同一份展开（`src/sgs/skills/flow.py:_branch_steps`）：执行器（就地展开）、校验器（只摊回选中分支的答案、未选中分支的答案判"多余"）、清单（`StepPool.when` 给行，分支行**不许**收成空 `when`）、预览（按已选答案跳过不存在的子步）。首个载体 =【谦逊】效果② |
 
 ### 3.8 要牌窗口登记表 `CARD_REQUEST_WINDOWS`（票 16 / E2）
 
@@ -430,6 +432,7 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 | 一句话文案 | `SkillDef.requirement` | 提示条与预发动清单 |
 | 预发动清单 | `preactivation.js` | 由流水线步骤渲染；`Arrange` 不下发；**触发技要翻 `preactivated`**（见下） |
 | 选项**置灰不可选** | `preactivation.js:preactivationDisabled` | `StepPool.disabled`（`PickOption.disabled`）；画成 `.dis` + `disabled` **且不接 click**，键盘 / 合成事件那一层由 `selectPreativationOption` 再挡一次；垫片 = `tests/support/ui_smoke.mjs` 的合成载荷 |
+| **分支步骤**的候选（前序选项决定后面有哪些步） | `preactivation.js:preactivationPoolRow`（`StepPool.when` 的精确匹配） | 分支子步的行**逐条**带完整前序前缀（`FlowBranch` 的行不许收成 `when=()`，否则未选中的分支会命中"与前序无关"的兜底行）；未选中分支 ⇒ 匹配不到 = 这一步**不存在**，服务端预览按同一份解析跳过它；垫片 = `tests/support/ui_smoke.mjs` 的分支清单 |
 | 舞台 / 动效 | `session.js` / `effects.js` | 见 `docs/agents/frontend-map.md` |
 | 牌面标签 | `card-view.js:cardTagsNode` | 标签类型必须在 `CARD_TAG_TYPES` 登记 |
 | 武将详情 / 被封锁技能图标 | `hero-detail.js` / `table.js` | |
@@ -482,6 +485,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 武将牌上的牌点选（弹窗） | 弹窗：一行牌（**牌面对宿主可见**），点选后提交 | `modal.js:stepDialogKind`（`heroPick`，判据 = 槽的 `ref.zone === "hero"`） | `hero.shen_zhugeliang.kuangfeng` / `.dawu`（huo-shenzhugeliang 票 02） |
 | 两行观看选择面（弹窗） | 弹窗：上行被观看角色的手牌 / 下行自己的手牌；同花色置灰（两行一起算）、四色各一才可提交；右端「放弃」= 候选里的 `Pass`（超时同义），凑不出四色时只剩「放弃」 | `modal.js:stepDialogKind`（`watchTwoRows`；判据 = `SELECT_CARDS` + `spec.max_per_suit` + 槽位恰好跨两个座位且含询问者；空选择面认服务端 `dialog` 标记）；渲染 = `reveal.js:renderWatchRows`，置灰复用 `reveal.js:suitSlotState` | 框架票 93（lei-shenganning）；首个技能载体 = 神甘宁【魄袭】（`hero.shen_ganning.poxi`，票 01） |
 | 多选弹窗（勾选 + 提交） | 弹窗：逐项一行勾选框（置灰项列出来但点不动）、右端「提交」；勾选是本地态，提交时拼出候选里那条 `SelectOptions` | `modal.js:stepDialogKind`（`multiChoice`）+ `options.js:renderMultiSelect` + `answer.js:multiSelectAction` | `hero.jie_xiahouyuan_mobile.shensu`（界夏侯渊移动版【神速】「至多三项」，jie-feng-batch2 票 01a / 01） |
+| **分支子步**（前序选项决定后面还有哪些步骤） | 牌桌 / 弹窗：**每个子步自己的面**（组合子，不新开面；选牌步 = 牌桌直选，目的地步 = 座位 / 选项面） | `src/sgs/skills/flow.py:FlowBranch` + `flow.manifest` 的 `StepPool.when`（行按前序答案给） | `hero.qunying_luxun.qianxun`（qunying 票 03b） |
 | fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
 
 **套不套用要写出来**：第 3 步反查出的相似技能就是模板源。套用 ⇒ 票面写它的 id 与抄哪一行；

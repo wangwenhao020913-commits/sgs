@@ -34468,4 +34468,135 @@ await clickAndWait($("btn-lobby-pool"));
   ui.resetSelection();
 }
 
+
+/* ============ qunying 票 03b：预发动清单的**分支步骤**（FlowBranch） ============
+ *
+ * 合成载荷与 `flow.manifest` 的下发形状同形：选代价 → 选效果 →（**只在效果② 下**）在场上
+ * 点一张牌 → 选目的地（非法目的地列出来、画灰、不接 click）。界面要证明四件事：
+ *  1. 清单能**吃下带分支的清单**（行按前序答案给）而不抛错；
+ *  2. 选① 时效果② 的行**匹配不到** ⇒ 这一步没有候选（界面不替服务端发明候选）；
+ *  3. 选② 后两步依次出现：选牌步的候选只有效果② 那几行、目的地步的置灰项点不动；
+ *  4. 填完拼出的复合动作与逐问同形：`picks` = 牌 id、`choices` = 代价 / 效果 / 目的地。
+ * 服务端那一侧（清单怎么渲染、预览怎么跳过分支）由 `tests/test_web.py` 的真会话断言钉。
+ */
+{
+  const branchSword = {
+    ...synthCard(4501, "青釭剑"), type: "qinggang_sword", slot: "weapon",
+    attack_range: 2, kind: "normal",
+  };
+  const branchJudge = {
+    ...synthCard(4502, "乐不思蜀"), type: "indulgence", kind: "normal",
+  };
+  const costWhen = ["qianxun_cost_damage", "qianxun_effect_move"];
+  const manifest = [
+    { name: "cost", kind: "option", zones: [], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["qianxun_cost_damage"] }] },
+    { name: "effect", kind: "option", zones: [], min: 1, max: 1, order: 1,
+      pool: [{ when: [], options: ["qianxun_effect_card", "qianxun_effect_move"] }] },
+    // 只有效果② 有分支行：选① 时下面这一步**匹配不到任何行**（= 这一步不存在）。
+    { name: "card", kind: "card", zones: ["equip", "judge"], min: 1, max: 1, order: 2,
+      pool: [{ when: costWhen, options: ["4501", "4502"] }] },
+    { name: "to", kind: "option", zones: [], min: 1, max: 1, order: 2,
+      pool: [{ when: [...costWhen, "4502"], options: ["seat:1", "seat:2"], disabled: ["seat:2"] }] },
+  ];
+  const branchPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 2501,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 2501 }],
+    preactivations: { "hero.demo.flowbranch": manifest },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  };
+  const branchView = synthView(branchPending);
+  branchView.skills = [{
+    skill_id: "hero.demo.flowbranch", name: "分叉", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "分叉演示", convert_sources: [] },
+  }];
+  branchView.snapshot.players[0].equip = [branchSword];
+  branchView.snapshot.players[1].judge = [branchJudge];
+  ui.state.view = branchView;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(branchView);
+
+  const optionButton = (text) => Array.from($("t-options").children)
+    .find((node) => node.textContent === text);
+  // 选项步的中文标签住 `options.js:OPTION_LABELS`（界面只读那一份）。
+  const COST_LABEL = "②受到一点无来源的火焰伤害";
+  const EFFECT_CARD_LABEL = "①视为使用一张基本牌或普通锦囊牌";
+  const EFFECT_MOVE_LABEL = "②移动场上一张牌";
+  const branchSkill = Array.from($("t-skills").children)
+    .find((node) => node.getAttribute("data-skill-id") === "hero.demo.flowbranch");
+  clickButton(branchSkill);
+  check("U-BRANCH-01 带分支的清单能进预发动（4 步；分支行不喂给第一步）",
+    !!ui.state.preactivation && ui.state.preactivation.steps.length === 4
+      && ui.state.preactivation.cursor === 0
+      && (ui.preactivationOptions(ui.state.preactivation, 0) || []).join(",")
+        === "qianxun_cost_damage",
+    `steps=${ui.state.preactivation && ui.state.preactivation.steps.length}`
+      + ` cursor=${ui.state.preactivation && ui.state.preactivation.cursor}`
+      + ` labels=${JSON.stringify(Array.from($("t-options").children).map((n) => n.textContent))}`);
+  check("U-BRANCH-01b 选代价那一步铺成提示区按钮（标签 = `OPTION_LABELS` 的中文）",
+    setEquals(Array.from($("t-options").children).map((n) => n.textContent), [COST_LABEL]),
+    JSON.stringify(Array.from($("t-options").children).map((n) => n.textContent)));
+
+  clickButton(optionButton(COST_LABEL));
+  clickButton(optionButton(EFFECT_CARD_LABEL));
+  check("U-BRANCH-02 选① 时效果② 的分支行**匹配不到** ⇒ 这一步没有候选（不发明候选）",
+    ui.state.preactivation.cursor === 2
+      && ui.preactivationOptions(ui.state.preactivation, 2) === null,
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` options=${JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 2))}`);
+
+  clickButton($("btn-cancel"));  // 取消 = 回第一步（清空答案）
+  clickButton(optionButton(COST_LABEL));
+  clickButton(optionButton(EFFECT_MOVE_LABEL));
+  check("U-BRANCH-03 选② 后出现「在场上选一张牌」：候选只有效果② 那几行",
+    ui.state.preactivation.cursor === 2
+      && setEquals(ui.preactivationOptions(ui.state.preactivation, 2), ["4501", "4502"]),
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` options=${JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 2))}`);
+
+  const branchJudgeSlot = byClass(seatBox(1), "mini-slot")
+    .find((node) => node.getAttribute("data-card-id") === "4502");
+  check("U-BRANCH-04 别人判定区的那张牌接成可点（跨座位直选，不铺左下角面板）",
+    !!branchJudgeSlot && branchJudgeSlot.tagName === "BUTTON"
+      && !branchJudgeSlot.classList.contains("dis")
+      && $("t-options").children.length === 0,
+    `slot=${branchJudgeSlot && branchJudgeSlot.tagName}`
+      + ` options=${$("t-options").children.length}`);
+  clickButton(branchJudgeSlot);
+  check("U-BRANCH-05 点一张 = 写进选牌步的本地答案并进「选目的地」",
+    ui.state.preactivation.cursor === 3
+      && JSON.stringify(ui.state.preactivation.answers[2].values) === "[4502]",
+    `cursor=${ui.state.preactivation.cursor}`
+      + ` answers=${JSON.stringify(ui.state.preactivation.answers[2])}`);
+
+  const greyedSeat = optionButton("seat:2");
+  const legalSeat = optionButton("seat:1");
+  check("U-BRANCH-06 非法目的地列出来但**画灰且不接 click**",
+    !!greyedSeat && greyedSeat.classList.contains("dis") && greyedSeat.disabled === true
+      && (greyedSeat.listeners.click || []).length === 0
+      && !!legalSeat && !legalSeat.classList.contains("dis")
+      && (legalSeat.listeners.click || []).length > 0,
+    `grey=${!!greyedSeat && greyedSeat.classList.contains("dis")}`
+      + ` legal=${!!legalSeat && !legalSeat.classList.contains("dis")}`);
+  if (legalSeat) clickButton(legalSeat); else ui.selectPreativationOption("seat:1");
+  const branchAction = ui.buildAction();
+  check("U-BRANCH-07 填完 = 复合动作（picks = 选中的牌、choices = 代价 / 效果 / 目的地）",
+    !!branchAction && branchAction.kind === "ActivateSkill"
+      && branchAction.skill_id === "hero.demo.flowbranch"
+      && JSON.stringify(branchAction.picks) === "[4502]"
+      && JSON.stringify(branchAction.choices)
+        === '["qianxun_cost_damage","qianxun_effect_move","seat:1"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(branchAction));
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -12947,16 +12947,12 @@ def test_the_selection_spec_omits_seats_until_a_face_declares_them() -> None:
     )
 
 
-def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
-    """真会话：4 人局，人类座位 = 「锋势」陆逊，停在【谦逊】效果② 的**跨座位**选牌面。
+def _qianxun_play_session() -> tuple[Session, int, int]:
+    """真会话：4 人局，人类座位 = 「锋势」陆逊，停在**出牌阶段**（【谦逊】可发动）。
 
     局面：座 0 装备区一把武器（自己也在池里）；座 1 判定区一张**转化过的**延时锦囊
-    （产物 = 乐不思蜀）；座 2 / 3 空场。驱动走真会话（真引擎、真流水线、真
-    ``pending_payload``）：发动【谦逊】→ 代价②（1 点无来源火焰伤害）→ 效果②，
-    停在 ``SELECT_CARDS``。
+    （产物 = 乐不思蜀）；座 2 / 3 空场。返回 ``(会话, 座 0 的武器, 座 1 的转化牌)``。
     """
-    from sgs.skills import active as module
-    from sgs.skills.hero_qunying import QIANXUN
     from sgs.skills.virtual import transformed_card
 
     pack = _context_pack()
@@ -12991,9 +12987,18 @@ def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
     )
     session.engine = Engine.from_state(state, seed=1)
     session.drive()
-
     pending = session.pending
-    assert pending is not None and str(pending.kind) == "PLAY_PHASE"
+    assert pending is not None and str(pending.kind) == "PLAY_PHASE", pending
+    return session, sword, converted
+
+
+def _session_at_the_qianxun_move_face() -> tuple[Session, int]:
+    """真会话：[前面同上] → 发动【谦逊】→ 代价② → 效果②，停在 ``SELECT_CARDS``。"""
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+
+    session, _sword, converted = _qianxun_play_session()
+    pending = session.pending
     session.submit_answer(
         next(
             action
@@ -13084,6 +13089,119 @@ def test_a_real_session_reaches_the_cross_seat_qianxun_field_face() -> None:
     assert state.virtual_judge[converted].type == "indulgence", (
         "判定区 → 判定区的移动保持产物（乐不思蜀还是乐不思蜀）"
     )
+
+
+def test_the_qianxun_preactivation_payload_carries_the_effect_two_branch() -> None:
+    """[C2] 真会话载荷：``preactivations`` 里【谦逊】有"在场上选一张牌 / 选目的地"两步。
+
+    读的是**真实产出路径**（真引擎 → 真 ``pending_payload``；候选 / 池不是手抄的）：清单 =
+    选代价 → 选效果 → 效果② 的两个子步。两步的行只在"效果②"下出现（``when`` 的第二格），
+    再走**真的预览端点**证明"选② 之后光标依次落在它们上面、选① 时它们不存在"——`[G1]` 的
+    另一半（未选中分支的行不出现）由「选① 时预览直接越过」回答。
+    """
+    from sgs.skills import active as module
+    from sgs.skills.hero_qunying import QIANXUN
+
+    session, sword, converted = _qianxun_play_session()
+    pending = session.pending
+    payload = pending_payload(session)
+    steps = payload["preactivations"][QIANXUN]
+
+    assert [step["name"] for step in steps] == ["cost", "effect", "card", "to"], (
+        f"清单 = 选代价 / 选效果 / 在场上选一张牌 / 选目的地：{[s['name'] for s in steps]}"
+    )
+    assert [step["kind"] for step in steps] == ["option", "option", "card", "option"]
+    assert steps[2]["wording"] == "在场上（任何角色的装备区 / 判定区）点选要移动的那张牌"
+    assert steps[3]["wording"] == "选择目的地角色（该区域已被废除或已有牌的，不能指定）"
+    for branch_step in steps[2:]:
+        assert branch_step["pool"], f"{branch_step['name']} 应当有候选行"
+        for row in branch_step["pool"]:
+            assert row["when"][1] == module.QIANXUN_EFFECT_MOVE, (
+                f"分支行只挂在效果② 上：{row['when']}"
+            )
+    card_rows = {row["when"][0]: tuple(row["options"]) for row in steps[2]["pool"]}
+    assert card_rows[module.QIANXUN_COST_DAMAGE] == (str(sword), str(converted)), (
+        f"选牌步的候选 = 场上两个座位的牌：{card_rows}"
+    )
+    assert card_rows[module.QIANXUN_COST_DISCARD] == (str(sword), str(converted))
+    assert card_rows[module.QIANXUN_COST_EQUIP] == (str(converted),), (
+        "代价③ 与效果② 不共用同一张装备牌（风险 1：唯一那张被排除出选牌面）"
+    )
+    assert {tuple(row.get("disabled", ())) for row in steps[3]["pool"]} == {()}, (
+        "这一局面里所有其他座位都是合法目的地"
+    )
+
+    # **真预览端点**：选② 之后光标落在"在场上选一张牌"，选① 时两步都不存在（直接可提交）。
+    registry = _registry_with(session)
+    seq = pending.seq
+    status, after_two = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
+            ],
+        },
+    )
+    assert status == 200, after_two
+    assert after_two["cursor"] == 2 and after_two["kind"] == "card", after_two
+    assert set(after_two["options"]) == {str(sword), str(converted)}, after_two
+
+    status, after_card = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
+                {"name": "card", "values": [converted]},
+            ],
+        },
+    )
+    assert status == 200, after_card
+    assert after_card["cursor"] == 2 and after_card["next"] == "to", after_card
+
+    status, editing_to = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_MOVE]},
+                {"name": "card", "values": [converted]},
+                {"name": "to", "values": []},
+            ],
+        },
+    )
+    assert status == 200, editing_to
+    assert editing_to["cursor"] == 3 and editing_to["kind"] == "option", editing_to
+    assert set(editing_to["options"]) == {"seat:0", "seat:2", "seat:3"}, editing_to
+    assert editing_to["can_submit"] is False
+
+    status, other_effect = _preview(
+        registry,
+        session,
+        {
+            "answers_seq": seq,
+            "skill_id": QIANXUN,
+            "answers": [
+                {"name": "cost", "values": [module.QIANXUN_COST_DAMAGE]},
+                {"name": "effect", "values": [module.QIANXUN_EFFECT_CARD]},
+            ],
+        },
+    )
+    assert status == 200, other_effect
+    assert other_effect["cursor"] == len(steps), (
+        f"效果① 后面没有步骤（清单已填完）：{other_effect}"
+    )
+    assert other_effect["can_submit"] is True
 
 
 def _two_row_watch_query(pack, *, actor: int = 0, target: int = 1):

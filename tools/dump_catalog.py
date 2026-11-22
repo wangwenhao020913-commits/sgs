@@ -53,6 +53,7 @@ _STEP_NAMES = {
     "PickOption": "option",
     "PickProvide": "provide",
     "Arrange": "arrange",
+    "FlowBranch": "branch",
 }
 
 
@@ -189,7 +190,14 @@ def enumerate_surface() -> dict[str, tuple[str, ...]]:
     """
     from sgs.effects import ModifierPoint
     from sgs.skills.catalog import SeamKind
-    from sgs.skills.flow import Arrange, PickCards, PickOption, PickProvide, PickSeats
+    from sgs.skills.flow import (
+        Arrange,
+        FlowBranch,
+        PickCards,
+        PickOption,
+        PickProvide,
+        PickSeats,
+    )
     from sgs.state import FrameKind, QueryKind, Zone
     from sgs.timing import Timing
 
@@ -200,7 +208,8 @@ def enumerate_surface() -> dict[str, tuple[str, ...]]:
         "queries": tuple(kind.name for kind in QueryKind),
         "zones": tuple(zone.name for zone in Zone),
         "steps": tuple(
-            _STEP_NAMES[t.__name__] for t in (PickCards, PickSeats, PickOption, PickProvide, Arrange)
+            _STEP_NAMES[t.__name__]
+            for t in (PickCards, PickSeats, PickOption, PickProvide, Arrange, FlowBranch)
         ),
         "frames": tuple(kind.name for kind in FrameKind),
     }
