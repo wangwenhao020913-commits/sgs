@@ -27,7 +27,7 @@ from sgs.agents import HeuristicPlayer, tape_from_journal
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.effects import check_targets
 from sgs.engine import Engine, ai_stream, dump_journal
-from sgs.state import UseCard, project
+from sgs.state import Pass, UseCard, project
 
 from support import SeatSpec, build_state
 
@@ -37,7 +37,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 from ai_eval import main  # noqa: E402
 from ai_eval.replay import (  # noqa: E402
     Candidate,
+    GodViewReport,
+    ReplayReport,
     _prune_lines,
+    _true_relation,
     render_replay,
     run_replay,
 )
@@ -161,6 +164,10 @@ def test_the_seed_7004_replay_explains_the_lord_duel_step() -> None:
     assert any(
         line.subject.startswith("手牌") and "响应" in line.reason for line in step.prune
     )
+    assert any(
+        line.subject == "座位目标面" and "没有座位被剪掉" in line.reason
+        for line in step.prune
+    )
 
     text = render_replay(report)
     assert "## 询问 seq=510（记录 seq=511）座位 3 · PLAY_PHASE" in text
@@ -204,9 +211,27 @@ def test_a_full_ai_game_replays_without_a_comparison_mismatch(
     assert report.explained, "整局必须有可解释的 AI 询问"
     assert len(report.explained) == report.queries
     assert report.mismatches == ()
-    assert any(step.resolved != step.chosen for step in report.explained), (
-        "夹具里必须出现一次转化确认（复合应答 → 引擎解析）"
+    assert report.comparison_mismatches == ()
+    composite = next(
+        (
+            step
+            for step in report.explained
+            if step.resolved != step.chosen and step.kind == "PLAY_PHASE"
+        ),
+        None,
     )
+    assert composite is not None, "夹具里必须出现一次转化确认（复合应答 → 引擎解析）"
+    assert composite.prune and composite.prune[0].subject != "剪枝面", (
+        "复合动作也要有座位目标面（引擎 check_targets 读解析后的牌）"
+    )
+    assert any(line.subject.startswith("座位") for line in composite.prune)
+    for step in report.explained:
+        if step.kind == "PLAY_PHASE":
+            continue
+        assert step.prune and step.prune[0].subject == "剪枝面", (
+            "响应 / 选项 / 选牌窗口不做出牌阶段的目标剪枝"
+        )
+        assert all("距离" not in line.reason for line in step.prune)
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +304,18 @@ def test_the_pruning_face_names_death_distance_and_illegal_target() -> None:
         chosen=True,
     )
 
-    lines = _prune_lines(state, project(state, 0), 0, [candidate])
-    reasons = {line.subject: line.reason for line in lines}
+    lines = _prune_lines(
+        state,
+        project(state, 0),
+        0,
+        "PLAY_PHASE",
+        [candidate],
+        focus=candidate.action,
+    )
+    pairs = [(line.subject, line.reason) for line in lines]
+    reasons = dict(pairs)
 
-    assert reasons["座位1"] == "已阵亡"
+    assert ("座位1", "已阵亡") in pairs
     assert reasons["座位2"].startswith("不是合法目标")
     assert reasons["座位3"].startswith("距离不足")
     assert "距离 2" in reasons["座位3"] and "牌面上限 1" in reasons["座位3"]
@@ -335,6 +368,126 @@ def test_godview_ties_each_wrong_judgment_to_its_in_office_cost(
     text = render_replay(report)
     assert "## 上帝视角（--godview）" in text
     assert "| 观察者 | 目标 | 判定 | 真值 |" in text
+
+
+def _prune_fixture():
+    pack = load_content_pack(deck_profile="standard_108")
+    snatch = next(
+        index for index, card in enumerate(pack.deck.cards) if card.type == "snatch"
+    )
+    slash = next(
+        index for index, card in enumerate(pack.deck.cards) if card.type == "slash"
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(snatch,), identity=Identity.LORD),
+            SeatSpec(alive=False, hp=0, identity=Identity.REBEL),
+            SeatSpec(hand=(), equip=(), judge=(), identity=Identity.LOYALIST),
+            SeatSpec(hand=(slash,), identity=Identity.REBEL),
+            SeatSpec(hand=(slash,), identity=Identity.REBEL),
+            SeatSpec(hand=(slash,), identity=Identity.LOYALIST),
+        ],
+        rule_config=RuleConfig(player_count=6),
+    )
+    return state, project(state, 0), state.card(snatch)
+
+
+def test_a_pass_step_still_gets_a_target_face_from_the_top_card_candidate() -> None:
+    """Pass / EndPhase 没有选中牌，剪枝面仍按**最高分候选**的牌给出目标面。"""
+    state, view, card = _prune_fixture()
+    card_candidate = Candidate(
+        action=UseCard(answers_seq=1, card=card, targets=(5,)),
+        score=1.0,
+        items=(),
+        chosen=False,
+    )
+    pass_candidate = Candidate(
+        action=Pass(answers_seq=1), score=2.0, items=(), chosen=True
+    )
+
+    lines = _prune_lines(
+        state,
+        view,
+        0,
+        "PLAY_PHASE",
+        [card_candidate, pass_candidate],
+        focus=pass_candidate.action,
+    )
+    pairs = [(line.subject, line.reason) for line in lines]
+
+    assert ("座位目标面", "未选中牌（Pass）；按最高分候选 【顺手牵羊♠3】 的目标面分析") in pairs
+    assert any(subject == "座位1" and reason == "已阵亡" for subject, reason in pairs)
+
+
+def test_a_non_play_phase_step_does_not_borrow_play_phase_target_rules() -> None:
+    state, view, card = _prune_fixture()
+    candidate = Candidate(
+        action=UseCard(answers_seq=1, card=card, targets=(5,)),
+        score=1.0,
+        items=(),
+        chosen=True,
+    )
+
+    lines = _prune_lines(
+        state, view, 0, "RESPOND", [candidate], focus=candidate.action
+    )
+
+    assert len(lines) == 1 and lines[0].subject == "剪枝面"
+    assert "不是出牌阶段" in lines[0].reason
+    assert all("距离" not in line.reason for line in lines)
+
+
+def test_the_renegade_truth_is_the_real_balance_not_the_stale_table() -> None:
+    """内奸的真值按真实存活力量均衡（`_renegade_hostility`），不读历史静态行。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    seats = [
+        SeatSpec(identity=Identity.LORD),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    balanced = build_state(
+        pack=pack, seats=seats, rule_config=RuleConfig(player_count=5)
+    )
+    # 全员存活：主公侧 2（主公 + 忠臣）对反贼 2 ⇒ spread=0 ⇒ 反贼对均衡的内奸是「中立」。
+    assert _true_relation(balanced, Identity.RENEGADE, Identity.REBEL) == "中立"
+
+    # 忠臣阵亡：主公侧 1 对反贼 2 ⇒ spread=-1/3 ⇒ 反贼侧占优，内奸该帮反贼 ⇒「敌」。
+    unbalanced = build_state(
+        pack=pack,
+        seats=[
+            *seats[:1],
+            SeatSpec(alive=False, hp=0, identity=Identity.LOYALIST),
+            *seats[2:],
+        ],
+        rule_config=RuleConfig(player_count=5),
+    )
+    assert _true_relation(unbalanced, Identity.RENEGADE, Identity.REBEL) == "敌"
+    assert _true_relation(unbalanced, Identity.LORD, Identity.REBEL) == "敌"
+
+
+def test_the_ruler_warns_when_the_tape_disagrees_with_the_recomputed_argmax() -> None:
+    """score / godview 不拿对照当失败条件，但把"录像被改过"显式打出来（不静默）。"""
+    report = ReplayReport(
+        run="x",
+        seed=1,
+        player_count=5,
+        human_seat=None,
+        queries=1,
+        recorded_actions=1,
+        explained=(),
+        mismatches=(),
+        score=None,
+        godview=GodViewReport(wrong=(), decisions=1, open_at_end=0),
+        comparison_mismatches=((77, "EndPhase", "UseCard(【决斗】 → 座位1)", None),),
+    )
+
+    text = render_replay(report)
+
+    assert "注意：对照不一致 1 步" in text
+    assert "seq=77" in text
 
 
 # ---------------------------------------------------------------------------

@@ -303,12 +303,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         elif args.command == "replay":
             # 回放台不判 verdict、不打胜率：explain / score / godview 共用一次引擎重放。
-            if not (args.explain or args.score or args.godview):
-                print(
-                    "参数错误：replay 至少要选一个模式（--explain / --score / --godview）",
-                    file=sys.stderr,
-                )
-                return 2
             report = run_replay(
                 run=args.run,
                 runs_dir=args.runs_dir,
@@ -320,6 +314,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 window=args.window,
             )
             sys.stdout.write(render_replay(report))
+            if report.comparison_mismatches and not report.explained:
+                print(
+                    f"注意：对照不一致 {len(report.comparison_mismatches)} 步"
+                    "（版本或输入不匹配）；读数仍以录像状态为准",
+                    file=sys.stderr,
+                )
             if report.mismatches:
                 print(
                     f"对照失败：{len(report.mismatches)} 步的记录动作 ≠ 重算 argmax"

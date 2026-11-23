@@ -42,11 +42,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-# 回放台是**仓库工具**（tools/，不进发行包）：候选派发表 `_SCORERS` 与推断用的
-# `_identity_relation` / `_dodge_probability` / `_lethal_to` 是 `HeuristicPlayer.respond`
-# 自己读的那几行；`Score` 已由 `sgs.agents` 公开再导出，工具不复制第二份打分器。
-# 依赖方向仍是 `tools/ → src/sgs`（src 内部不吃这条深导），与
-# `tests/test_heuristic_ai.py` 的 parity 用例同一条路。
+# 回放台是**仓库工具**（tools/，不进发行包）：它读的私有名字是 `HeuristicPlayer.respond`
+# 自己读的那几行——候选派发表 `_SCORERS`、身份关系 `_identity_relation` / `_hostility` /
+# `_renegade_hostility_from_balance` / `_unknown_identity_remainder` / `_enemy_identities` /
+# `_ally_identities`、记牌 `_dodge_probability`、斩杀 `_lethal_to` / `_damage_card`。
+# `Score` 已由 `sgs.agents` 公开再导出；工具不复制第二份打分器。依赖方向仍只有
+# `tools/ → src/sgs`（`src/sgs` 内部不反向 import `tools/`），与
+# `tests/test_heuristic_ai.py` 的 parity 用例、`tools/ai_eval/compat.py` 的
+# `getattr(module, "_SCORERS", None)`（缺表 fail-closed）同一条先例。这是 tools 层的
+# 刻意例外；`src/sgs/agents/__init__.py` 的"外部不得深导"约束仍对 src 的消费者生效。
 import sgs.agents.heuristic as heuristic_scoring
 from sgs.agents import HeuristicPlayer, Score
 from sgs.data import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity
@@ -81,6 +85,13 @@ IDENTITY_ORDER: tuple[Identity, ...] = (
 
 _LOG_FLOOR = 1e-12
 """对数损失的下限：模型给 0 的概率时不让 `log(0)` 把整批数变成 inf。"""
+
+_REL_ENEMY = "敌"
+_REL_ALLY = "友"
+_REL_NEUTRAL = "中立"
+_REL_UNDECIDED = "未定"
+_REL_SELF = "本人"
+"""关系判定的闭集（解释 / 上帝视角共用；中文只出现在输出层，比较用这几个常量）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +225,8 @@ class ReplayReport:
     mismatches: tuple[ExplainStep, ...]
     score: ScoreReport | None
     godview: GodViewReport | None
+    comparison_mismatches: tuple[tuple[int, str, str, str | None], ...] = ()
+    """全部 AI 步骤的「记录 vs 重算」不一致（score / godview 不因此失败，但会在输出里提示）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +252,7 @@ def run_replay(
         raise AiEvalSpecError("--seq 只与 --explain 一起用（尺子 / 上帝视角要整局）")
     if not explain and (seq is not None or seat is not None):
         raise AiEvalSpecError("--seq / --seat 只与 --explain 一起用")
-    if window <= 0:
+    if explain and window <= 0:
         raise AiEvalSpecError(f"--window 必须是正整数，得到 {window}")
     if seat is not None and seat < 0:
         raise AiEvalSpecError(f"--seat 不能为负：{seat}")
@@ -257,10 +270,10 @@ def run_replay(
             f"录像里没有 seq={seq} 的询问；可用 seq 从 {available[0]} 到 {available[-1]}"
             f"（共 {len(available)} 个）"
         )
-    if score and not _identity_scoring_allowed(loaded):
-        raise AiEvalSpecError(
-            "本局不是 4~8 人身份局（或身份配比不可用）：--score 的免费标签没有定义"
-        )
+    if score:
+        _require_identity_mode(loaded, "score")
+    if godview:
+        _require_identity_mode(loaded, "godview")
     engine = _engine_for(loaded.meta)
     driver = _Driver(
         engine=engine,
@@ -305,6 +318,7 @@ def run_replay(
         mismatches=tuple(step for step in driver.steps if step.mismatch),
         score=score_report,
         godview=godview_report,
+        comparison_mismatches=tuple(driver.comparison_mismatches),
     )
 
 
@@ -324,6 +338,8 @@ class _LoadedRun:
     action_record_seqs: dict[int, int]
     """``answers_seq`` → 应答记录自己的 ``seq``（人读的「记录 seq=511」）。"""
     identities: tuple[Identity | None, ...]
+    revealed: dict[int, Identity]
+    """阵亡 / 亮明事件里公开的身份（免费标签的优先来源；未亮明的幸存者才回落发牌表）。"""
     recorded_actions: int
     query_aliases: frozenset[int]
     """``--seq`` 可以写的数：询问 seq 与它的动作记录 seq（票面的人读口径是后者）。"""
@@ -353,6 +369,7 @@ def _load_run(runs_dir: Path, run: str) -> _LoadedRun:
     actions: dict[int, Action] = {}
     action_record_seqs: dict[int, int] = {}
     identities: list[Identity | None] = [None] * int(meta["player_count"])
+    revealed: dict[int, Identity] = {}
     query_seqs: set[int] = set()
     for record in records:
         kind = getattr(record, "kind", None)
@@ -365,6 +382,10 @@ def _load_run(runs_dir: Path, run: str) -> _LoadedRun:
             seat = getattr(record, "seat", None)
             if isinstance(seat, int) and 0 <= seat < len(identities):
                 identities[seat] = record.identity
+        elif kind == "delta" and getattr(record, "delta_type", None) == "identity_reveal":
+            seat = getattr(record, "seat", None)
+            if isinstance(seat, int) and 0 <= seat < len(identities):
+                revealed[seat] = record.identity
 
     tape_actions = _meta_tape(meta, meta_path)
     _check_tape_matches_journal(tape_actions, actions, meta_path, journal_path)
@@ -387,6 +408,7 @@ def _load_run(runs_dir: Path, run: str) -> _LoadedRun:
         actions=actions,
         action_record_seqs=action_record_seqs,
         identities=tuple(identities),
+        revealed=revealed,
         recorded_actions=len(actions),
         query_aliases=frozenset(aliases),
     )
@@ -460,6 +482,15 @@ class _StopReplay(Exception):
     """`--seq` 命中后，在**下一次**参与询问时停下（不依赖引擎的私有步进接口）。"""
 
 
+@dataclass(frozen=True)
+class _ScoreSample:
+    """一个座位步的两种基线预测 + 真值（避免用元组下标读同一组字段）。"""
+
+    uniform: tuple[float, ...]
+    prior: tuple[float, ...]
+    truth: Identity
+
+
 @dataclass
 class _OpenJudgment:
     judged: str
@@ -510,14 +541,14 @@ class _Driver:
                 self._narratives[seat] = NarrativeCursor(
                     viewer=seat, heroes=heroes, pack_id=loaded.meta["pack_id"]
                 )
-        self._score_samples: list[tuple[tuple[float, ...], tuple[float, ...], Identity]] = []
+        self._score_samples: list[_ScoreSample] = []
         self._score_queries = 0
         self._score_seats: set[int] = set()
         self._initial_counts = _initial_counts(loaded)
-        self._identity_scoring = _identity_scoring_allowed(loaded)
         self._open: dict[tuple[int, int], _OpenJudgment] = {}
         self._wrong: list[WrongJudgment] = []
         self._decisions = 0
+        self.comparison_mismatches: list[tuple[int, str, str, str | None]] = []
 
     def participant(self, seat: int) -> "_SeatParticipant":
         return _SeatParticipant(self, seat)
@@ -551,12 +582,35 @@ class _Driver:
             return recorded
 
         ai_action, captured = self._ask_ai(seat, query)
+        resolved, resolution_error = _resolve_ai_action(
+            self.engine.state, query, ai_action
+        )
+        mismatch = resolution_error is not None or resolved != recorded
+        if mismatch:
+            self.comparison_mismatches.append(
+                (
+                    query.seq,
+                    _action_label(recorded),
+                    _action_label(resolved),
+                    resolution_error,
+                )
+            )
         if self.score:
             self._sample_score(seat, query)
         if self.godview:
             self._track_godview(seat, query)
         if self.explain and self._matches(seat, query):
-            self.steps.append(self._explain(seat, query, ai_action, recorded, captured))
+            self.steps.append(
+                self._explain(
+                    seat,
+                    query,
+                    ai_action,
+                    resolved,
+                    resolution_error,
+                    recorded,
+                    captured,
+                )
+            )
             if self.target_seq is not None:
                 self._stop_after = True
         return recorded
@@ -621,6 +675,8 @@ class _Driver:
         seat: int,
         query: Any,
         ai_action: Action,
+        resolved: Action,
+        resolution_error: str | None,
         recorded: Action,
         captured: list[tuple[Action, float, tuple[tuple[str, float], ...]]],
     ) -> ExplainStep:
@@ -636,7 +692,6 @@ class _Driver:
             )
         best = max(score for _, score, _ in captured)
         winners = [index for index, (_, score, _) in enumerate(captured) if score == best]
-        resolved, resolution_error = _resolve_ai_action(self.engine.state, query, ai_action)
         candidates = tuple(
             Candidate(action=action, score=score, items=items, chosen=index == chosen_index)
             for index, (action, score, items) in enumerate(captured)
@@ -651,7 +706,14 @@ class _Driver:
             identities=_identity_reads(view),
             dodge=_dodge_reads(view, resolved),
             lethal=_lethal_reads(view, resolved),
-            prune=_prune_lines(self.engine.state, view, seat, candidates, focus=resolved),
+            prune=_prune_lines(
+                self.engine.state,
+                view,
+                seat,
+                _kind_name(query.kind),
+                candidates,
+                focus=resolved,
+            ),
             candidates=candidates,
             chosen=ai_action,
             resolved=resolved,
@@ -685,10 +747,7 @@ class _Driver:
         `view.players[*].identity is None` 的时刻 ⇒ 标签是"后来才免费拿到"的那一份，
         亮明后的座位不进来（否则等于拿答案算答案，会把读数灌水）。
         """
-        if not self._identity_scoring:
-            raise AiEvalSpecError(
-                "本局不是 4~8 人身份局（或身份配比不可用）：--score 的免费标签没有定义"
-            )
+        _require_identity_mode(self.loaded, "score")
         view = query.view
         self._score_queries += 1
         truth = self.loaded.identities
@@ -707,7 +766,9 @@ class _Driver:
             )
         unknown = len(hidden)
         for target in hidden:
-            label = truth[target]
+            # 免费标签优先读**阵亡 / 亮明**；终局仍暗的幸存者（如只剩内奸）用发牌表兜底——
+            # 终局的 side 已把它公开，发牌表是同一张事实的内部投影，不是另一份答案。
+            label = self.loaded.revealed.get(target, truth[target])
             if label not in IDENTITY_ORDER:
                 raise AiEvalSpecError(f"座位 {target} 的身份不可用：{label!r}")
             uniform = tuple(
@@ -717,16 +778,16 @@ class _Driver:
                 self._initial_counts[identity] / self.loaded.player_count
                 for identity in IDENTITY_ORDER
             )
-            self._score_samples.append((uniform, prior, label))
+            self._score_samples.append(_ScoreSample(uniform, prior, label))
             self._score_seats.add(target)
 
     def score_report(self) -> ScoreReport:
         if not self._score_samples:
             raise AiEvalSpecError("--score 没有采到任何座位步（没有暗着的座位）")
         baselines = []
-        for name, index in (("配比均匀后验", 0), ("恒先验", 1)):
-            predictions = [sample[index] for sample in self._score_samples]
-            truths = [sample[2] for sample in self._score_samples]
+        for name, field in (("配比均匀后验", "uniform"), ("恒先验", "prior")):
+            predictions = [getattr(sample, field) for sample in self._score_samples]
+            truths = [sample.truth for sample in self._score_samples]
             baselines.append(
                 BaselineScore(
                     name=name,
@@ -771,12 +832,12 @@ class _Driver:
                 continue
             enemy, ally = heuristic_scoring._identity_relation(view, target)
             judged = _relation_label(enemy, ally)
-            truth = _true_relation(mine, self.loaded.identities[target])
+            truth = _true_relation(self.engine.state, mine, self.loaded.identities[target])
             current = self._open.get(key)
             if current is not None and current.judged != judged:
                 self._close(key, query.seq)
                 current = None
-            if judged in ("敌", "友") and current is None:
+            if judged in (_REL_ENEMY, _REL_ALLY, _REL_NEUTRAL) and current is None:
                 self._open[key] = _OpenJudgment(
                     judged=judged,
                     truth=truth,
@@ -908,25 +969,20 @@ def _identity_reads(view: Any) -> tuple[IdentityRead, ...]:
                     hand_count=player.hand_count,
                     enemy=0.0,
                     ally=1.0,
-                    label="本人",
+                    label=_REL_SELF,
                     confidence=1.0,
                 )
             )
             continue
         enemy, ally = heuristic_scoring._identity_relation(view, player.seat)
+        # 归一 ``-0.0``（``-0.0 == 0``）：输出里不要出现 "P(敌)=-0.00"。
         enemy = 0.0 if enemy == 0 else enemy
         ally = 0.0 if ally == 0 else ally
-        mine = view.players[view.seat].identity
-        if player.identity is not None and mine is not None:
-            # 已亮明：身份本身是确定信息 ⇒ 判定读**静态敌对表**，不读内奸那行动态局面函数
-            # （动态函数在均衡点是 (0, 0)，把它当作"未定"会掩盖"反贼 / 忠臣"这个硬事实）。
-            label = _static_relation_label(mine, player.identity)
-            confidence = 1.0
-            fraction = None
-        else:
-            label = _relation_label(enemy, ally)
-            confidence = _relation_confidence(enemy, ally)
-            fraction = _relation_fraction(view, player.seat, enemy, ally)
+        # 判定读**同一个** `_identity_relation`（内奸那行是动态局面函数）；已亮明的事实由
+        # 同一行的「反贼 / 忠臣 / 主公」单独展示，不把静态敌对表伪装成"AI 的判定"。
+        label = _relation_label(enemy, ally)
+        confidence = _relation_confidence(enemy, ally)
+        fraction = _relation_fraction(view, player.seat, enemy, ally)
         reads.append(
             IdentityRead(
                 seat=player.seat,
@@ -951,22 +1007,21 @@ def _relation_label(enemy: float, ally: float) -> str:
     neutral = max(0.0, 1.0 - enemy - ally)
     best = max(enemy, ally, neutral)
     if best == 0.0:
-        return "中立"
+        return _REL_NEUTRAL
     winners = [
         name
-        for name, value in (("敌", enemy), ("友", ally), ("中立", neutral))
+        for name, value in (
+            (_REL_ENEMY, enemy),
+            (_REL_ALLY, ally),
+            (_REL_NEUTRAL, neutral),
+        )
         if value == best
     ]
     if len(winners) == 1:
         return winners[0]
-    if "中立" in winners:
-        return "中立"
-    return "未定"
-
-
-def _static_relation_label(mine: Identity, theirs: Identity) -> str:
-    relation = heuristic_scoring._hostility(mine, theirs)
-    return {"enemy": "敌", "ally": "友"}.get(relation, "中立")
+    if _REL_NEUTRAL in winners:
+        return _REL_NEUTRAL
+    return _REL_UNDECIDED
 
 
 def _relation_confidence(enemy: float, ally: float) -> float:
@@ -1029,17 +1084,30 @@ def _prune_lines(
     state: Any,
     view: Any,
     actor: int,
+    kind: str,
     candidates: Sequence[Candidate],
     *,
-    focus: Action | None = None,
+    focus: Action | None,
 ) -> tuple[PruneLine, ...]:
-    """剪枝面：手牌里哪张不在候选里 + 选中牌的哪个座位不在目标集里。
+    """剪枝面：手牌里哪张不在候选里 + 选中牌的目标面里谁被剪掉。
 
     数据源 = **引擎的合法行动**（候选集合，来自 `legal_actions`）与引擎的规则读数
-    （`behavior_for` / `distance` / `attack_range`）；这里只把"为什么"翻译成人话，
-    **不重算**候选。故 `--explain` 的剪枝面与 AI 真正看到的面是同一份。
+    （`behavior_for` / `check_targets` / `distance` / `attack_range`）；这里只把"为什么"
+    翻译成人话，**不重算**候选。故剪枝面与 AI 真正看到的面是同一份。
+
+    **只对出牌阶段开目标剪枝**：响应窗口（`DODGE` / `PEACH` / `RESPOND`）的候选是
+    "能打出的响应牌"，不是"这张牌能指定谁"；把出牌阶段的目标规则套上去会给出错误原因。
+    非出牌阶段返回一行说明，不硬造剪枝。
     """
-    from sgs.effects import attack_range, behavior_for, distance
+    from sgs.effects import attack_range, behavior_for, check_targets, distance
+
+    if kind != "PLAY_PHASE":
+        return (
+            PruneLine(
+                subject="剪枝面",
+                reason="本询问不是出牌阶段（响应 / 选项 / 选牌），不做座位目标剪枝",
+            ),
+        )
 
     lines: list[PruneLine] = []
     used_cards: set[int] = set()
@@ -1048,7 +1116,10 @@ def _prune_lines(
         card = getattr(action, "card", None)
         if card is not None:
             used_cards.add(card.card_id)
-        used_cards.update(int(pick) for pick in (getattr(action, "picks", ()) or ()))
+        if getattr(action, "kind", None) == "ActivateSkill":
+            # `ActivateSkill.picks` 是**成本牌 id**（丈八蛇矛 / 贯石斧…）；`SelectCards.picks`
+            # 是面内**位置**，两者不能混为一谈。
+            used_cards.update(int(pick) for pick in (getattr(action, "picks", ()) or ()))
     for card in view.self_hand:
         if card.card_id in used_cards:
             continue
@@ -1059,21 +1130,25 @@ def _prune_lines(
             )
         )
 
-    chosen = focus or next(
-        (candidate.action for candidate in candidates if candidate.chosen), None
-    )
+    chosen = focus
     card = getattr(chosen, "card", None) if chosen is not None else None
-    # 复合动作（转化确认）的候选没有 `.card`，而引擎把它解析成一条普通使用 / 打出：
-    # 目标集无法从候选面反推 ⇒ 只给手牌级剪枝，不拿"没出现在复合候选里"误判座位剪枝。
-    candidate_card_ids = {
-        action.card.card_id
-        for candidate in candidates
-        for action in (candidate.action,)
-        if getattr(action, "card", None) is not None
-    }
-    if card is None or card.card_id not in candidate_card_ids:
-        return tuple(lines)
-    legal_targets: set[int] = set()
+    face_note: str | None = None
+    if card is None:
+        card_candidates = [
+            candidate
+            for candidate in candidates
+            if getattr(candidate.action, "card", None) is not None
+        ]
+        if not card_candidates:
+            return tuple(lines)
+        best = max(candidate.score for candidate in card_candidates)
+        top = next(candidate for candidate in card_candidates if candidate.score == best)
+        card = top.action.card
+        face_note = (
+            f"未选中牌（{_kind_name(getattr(chosen, 'kind', chosen))}）；"
+            f"按最高分候选 {_card_label(card)} 的目标面分析"
+        )
+    legal_targets: set[int] = set(check_targets(state, actor, card))
     for candidate in candidates:
         action = candidate.action
         if getattr(action, "card", None) is None:
@@ -1081,39 +1156,64 @@ def _prune_lines(
         if action.card.card_id != card.card_id:
             continue
         legal_targets.update(_action_targets(action))
+
     rule = behavior_for(card).target_rule
-    for seat, player in enumerate(view.players):
-        if seat == actor or seat in legal_targets:
-            continue
+    seat_lines = [
+        PruneLine(
+            subject=f"座位{seat}",
+            reason=_seat_prune_reason(state, view, actor, seat, card, rule),
+        )
+        for seat, player in enumerate(view.players)
+        if seat != actor and seat not in legal_targets
+    ]
+    if face_note is not None:
+        lines.append(PruneLine(subject="座位目标面", reason=face_note))
+    if seat_lines:
+        lines.extend(seat_lines)
+    else:
         lines.append(
             PruneLine(
-                subject=f"座位{seat}",
-                reason=_seat_prune_reason(state, view, actor, seat, card, rule),
+                subject="座位目标面",
+                reason="没有座位被剪掉（这张牌对全部其他存活座位合法）",
             )
         )
     return tuple(lines)
 
 
+def _distance_limit(rule: Any, state: Any, actor: int) -> tuple[str, int] | None:
+    """这张牌的**距离上限**：``(上限名, 数值)``；不查距离 ⇒ ``None``。
+
+    两条来源：攻击范围（``needs_distance``，【杀】族）与牌面额定上限（``max_distance``，
+    【顺手牵羊】= 1）。手牌级与座位级剪枝共用这一份读法，不各写一条 if 级联。
+    """
+    from sgs.effects import attack_range
+
+    if rule.needs_distance:
+        return "攻击范围", attack_range(state, actor)
+    if rule.max_distance is not None:
+        return "牌面上限", rule.max_distance
+    return None
+
+
 def _card_prune_reason(state: Any, view: Any, actor: int, card: Any) -> str:
-    from sgs.effects import attack_range, behavior_for, distance
+    from sgs.effects import behavior_for, distance
 
     try:
         behavior = behavior_for(card)
     except KeyError:  # pragma: no cover - 表外牌名（人为载荷）
         return "引擎没有给出合法行动（牌名不在行为表里）"
     rule = behavior.target_rule
-    if rule.needs_distance:
+    limit = _distance_limit(rule, state, actor)
+    if limit is not None:
+        label, reach = limit
         distances = [
             distance(state, actor, player.seat)
             for player in view.players
             if player.seat != actor and player.alive
         ]
-        reach = attack_range(state, actor)
         if distances and min(distances) > reach:
-            return f"距离不足（最近距离 {min(distances)} > 攻击范围 {reach}）"
+            return f"距离不足（最近距离 {min(distances)} > {label} {reach}）"
         return "没有合法目标（距离 / 目标规则）"
-    if rule.max_distance is not None:
-        return f"没有合法目标（牌面距离上限 {rule.max_distance}）"
     if rule.self_only:
         return "当前使用条件不满足（只能对自己，且条件未成立）"
     if rule.rated_targets == 0 and not rule.includes_self:
@@ -1124,24 +1224,20 @@ def _card_prune_reason(state: Any, view: Any, actor: int, card: Any) -> str:
 def _seat_prune_reason(
     state: Any, view: Any, actor: int, seat: int, card: Any, rule: Any
 ) -> str:
-    from sgs.effects import attack_range, distance
+    from sgs.effects import distance
 
     player = view.players[seat]
     if not player.alive:
         return "已阵亡"
     if rule.self_only:
         return "不是合法目标（这张牌只能对自己）"
-    if rule.needs_distance:
+    limit = _distance_limit(rule, state, actor)
+    if limit is not None:
+        label, reach = limit
         dist = distance(state, actor, seat)
-        reach = attack_range(state, actor)
         if dist > reach:
-            return f"距离不足（距离 {dist} > 攻击范围 {reach}）"
-        return "不是合法目标（目标规则）"
-    if rule.max_distance is not None:
-        dist = distance(state, actor, seat)
-        if dist > rule.max_distance:
-            return f"距离不足（距离 {dist} > 牌面上限 {rule.max_distance}）"
-        return "不是合法目标（牌面条件）"
+            return f"距离不足（距离 {dist} > {label} {reach}）"
+        return "不是合法目标（目标规则 / 牌面条件）"
     return "不是合法目标（目标规则 / 牌面条件）"
 
 
@@ -1163,6 +1259,14 @@ def _identity_scoring_allowed(loaded: _LoadedRun) -> bool:
     )
 
 
+def _require_identity_mode(loaded: _LoadedRun, mode: str) -> None:
+    """`--score` / `--godview` 需要 4~8 人身份局；一条判据、按模式给不同的话。"""
+    if not _identity_scoring_allowed(loaded):
+        raise AiEvalSpecError(
+            f"本局不是 4~8 人身份局（或身份配比不可用）：--{mode} 没有免费身份标签"
+        )
+
+
 def _remaining_identities(view: Any) -> list[Identity] | None:
     roster = IDENTITY_ROSTERS.get(len(view.players))
     if roster is None:
@@ -1177,13 +1281,37 @@ def _remaining_identities(view: Any) -> list[Identity] | None:
     return remaining
 
 
-def _true_relation(mine: Identity, theirs: Identity | None) -> str:
-    """上帝视角的**真值**：身份表的静态敌对关系（内奸那行动态局面函数是决策权重，
-    不是"谁在身份上与我为敌"这个事实；两者在均衡点会分叉，故真值不读它）。"""
+def _true_relation(state: Any, mine: Identity, theirs: Identity | None) -> str:
+    """上帝视角的**真值**：按真实存活局面求关系（不是 AI 视角里的期望）。
+
+    内奸那一行是**局面函数**（`_renegade_hostility` 按真实两阵营力量差求值），
+    `_HOSTILITY` 的内奸行在代码里被注明是历史值、不是今天的取值；故非内奸读静态表、
+    内奸读真实局面读出的动态值。隐藏座位在本函数里用**真实身份**（工具侧全知），
+    与 AI 视图里的期望配比分开——这正是"上帝视角"与"AI 的判定"的差。
+    """
     if theirs is None:
-        return "中立"
+        return _REL_NEUTRAL
+    if mine == Identity.RENEGADE:
+        relationship = heuristic_scoring._renegade_hostility_from_balance(
+            theirs, _true_renegade_balance(state)
+        )
+        if relationship > 0:
+            return _REL_ENEMY
+        if relationship < 0:
+            return _REL_ALLY
+        return _REL_NEUTRAL
     relation = heuristic_scoring._hostility(mine, theirs)
-    return {"enemy": "敌", "ally": "友"}.get(relation, "中立")
+    return {"enemy": _REL_ENEMY, "ally": _REL_ALLY}.get(relation, _REL_NEUTRAL)
+
+
+def _true_renegade_balance(state: Any) -> tuple[int, int, int]:
+    """真实存活局面下的 ``(D, 主公侧存活, 反贼侧存活)``（内奸动态关系的输入）。"""
+    alive = [player for player in state.players if player.alive]
+    lord_side = sum(
+        1 for player in alive if player.identity in (Identity.LORD, Identity.LOYALIST)
+    )
+    rebel_side = sum(1 for player in alive if player.identity == Identity.REBEL)
+    return len(alive) - 1, lord_side, rebel_side
 
 
 def _log_loss(predictions: Sequence[tuple[float, ...]], truths: Sequence[Identity]) -> float:
@@ -1241,6 +1369,17 @@ def render_replay(report: ReplayReport) -> str:
         lines.extend(_render_score(report.score))
     if report.godview is not None:
         lines.extend(_render_godview(report.godview))
+    if report.comparison_mismatches and not report.explained:
+        lines.extend(
+            [
+                "",
+                f"注意：对照不一致 {len(report.comparison_mismatches)} 步"
+                "（版本或输入不匹配）；本读数仍以录像状态为准（--explain 可列出）",
+            ]
+        )
+        for seq, recorded, resolved, error in report.comparison_mismatches[:5]:
+            detail = f"（{error}）" if error else ""
+            lines.append(f"  - seq={seq}：记录={recorded} ≠ 重算={resolved}{detail}")
     if report.mismatches:
         lines.extend(
             [
@@ -1320,7 +1459,7 @@ def _render_view(step: ExplainStep) -> list[str]:
 def _render_inference(step: ExplainStep) -> list[str]:
     lines = ["- 身份判定（P(敌) / P(友) 来自 AI 的同一函数 `_identity_relation`）："]
     for read in step.identities:
-        if read.label == "本人":
+        if read.label == _REL_SELF:
             lines.append(f"  - 座位{read.seat}：本人（{_identity_text(read.public_identity)}）")
             continue
         if read.public_identity is not None:
@@ -1464,12 +1603,20 @@ def _cards_text(cards: Iterable[Any]) -> str:
 
 
 def _card_label(card: Any) -> str:
-    suit_values = {"spade": "♠", "heart": "♥", "club": "♣", "diamond": "♦"}
-    suit = suit_values.get(str(getattr(card.suit, "value", card.suit)), "")
+    """牌面文字：花色 / 点数 / 显示名都读 `sgs_web.display` 的**唯一**映射表。"""
+    from sgs_web.display import RANK_TEXT, SUIT_LABELS, card_display
+
+    display = card_display(card)
+    name = display.get("display_name") or card.name
+    attribute = display.get("attribute") or "普通"
+    raw_suit = getattr(card, "suit", None)
+    suit_value = getattr(raw_suit, "value", raw_suit)
+    suit = SUIT_LABELS.get(suit_value) if suit_value is not None else None
     rank = getattr(card, "rank", None)
-    rank_text = {1: "A", 11: "J", 12: "Q", 13: "K"}.get(rank, str(rank)) if rank else ""
+    rank_text = RANK_TEXT.get(rank, "") if rank is not None else ""
+    attribute_text = "" if attribute == "普通" else f"·{attribute}"
     virtual = "·虚拟" if getattr(card, "virtual_sources", ()) else ""
-    return f"【{card.name}{suit}{rank_text}{virtual}】"
+    return f"【{name}{attribute_text}{suit['symbol'] if suit else ''}{rank_text}{virtual}】"
 
 
 def _phase_text(phase: Any) -> str:

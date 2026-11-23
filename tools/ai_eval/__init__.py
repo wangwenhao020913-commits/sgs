@@ -31,8 +31,8 @@ from .cli import main
 from .decisions import Divergence, decision_diff, diff_decisions
 from .errors import AiEvalError, AiEvalRunError, AiEvalSpecError, AiVersionError
 from .live import LiveReading, render_live, run_live
-from .replay import ReplayReport, render_replay, run_replay
 from .misses import DecisionFact, MissCounts, count_misses, fact_from_query
+from .replay import ReplayReport, render_replay, run_replay
 from .seeds import (
     SeedBatch,
     derive_batch,
@@ -55,9 +55,9 @@ __all__ = (
     "DecisionFact",
     "LoadedVersion",
     "LiveReading",
-    "ReplayReport",
     "MissCounts",
     "PairedComparison",
+    "ReplayReport",
     "SeedBatch",
     "by_identity",
     "compare_pairs",
@@ -77,9 +77,9 @@ __all__ = (
     "render_replay",
     "run_cases",
     "run_live",
-    "run_replay",
     "run_promote",
     "run_quick",
+    "run_replay",
     "run_seal",
     "seat_zero_identity",
 )

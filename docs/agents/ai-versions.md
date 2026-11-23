@@ -8,13 +8,13 @@
 工具在 `tools/ai_eval/`（**不进 `src/`**，与 `tools/sgs_batch/` 同层）。统一调用方式：
 
 ```bash
-PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|live> ...
+PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|live|replay> ...
 ```
 
 `PYTHONPATH=tools` **不可省**：`.venv` 是 editable 只指 `src/`，漏写会
 `No module named ai_eval`——响亮失败，不是静默打错版本（spec §2.9）。
 
-## 1 · 三档评估命令与实机读数
+## 1 · 三档评估命令 / 实机读数 / 回放台
 
 | 档 | 命令 | 内容 | 成本 |
 |---|---|---|---|
@@ -22,6 +22,7 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|live> ...
 | 晋级 | `promote --baseline ai-vN --anchor ai-v0 --deals 768 --workers 8` | 换座配对胜率差 + 决策 diff + 分身份 + 五条件字段 | ≈26 min CPU |
 | 封印 | `seal --batch sealed-1 --versions ai-v0 ai-vN --workers 8` | **1024 副写死**批（CLI 不暴露副数），**只出聚合**、不打印逐种子 | ≈17 min |
 | 实机 | `live --run <stem> [--runs-dir runs]` | 一局 journal + meta 的两行读数（§2.11 两个廉价指标 + 人类超时）；**不判 verdict、不打胜率** | ≈1 s |
+| 回放台 | `replay <stem> [--explain [--seq N]] [--score] [--godview]` | 一次引擎重放的决策解释 / 基线尺子 / 上帝视角复盘；**不判 verdict、不打胜率** | ≈1–2 s |
 
 ```bash
 # 快检：改完立刻（改的是**提交**里的代码；工作树与提交不一致会打一行警告）
@@ -40,6 +41,14 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
 
 - `live` 只读一局录像（`<stem>.jsonl` + `<stem>.meta.json`），输出是**两行摘要 + 空报账表**，
   不写 JSON、不判 verdict、不打胜率、不打逐种子；缺文件时点名完整路径失败。
+
+- `replay` 的三个模式共用一次引擎重放：explain 的剪枝面**只对出牌阶段**开目标剪枝
+  （响应 / 选项 / 选牌窗口不套用出牌阶段的目标规则；Pass / EndPhase 按最高分候选的牌给出
+  目标面；转化确认读引擎 `check_targets` 解析后的牌）；score 的真值优先读**阵亡亮明**，
+  终局仍暗的幸存者用发牌表兜底；godview 的"真值"按**真实存活局面**求（内奸行动态局面
+  函数，不读静态历史行）。seed=7004 的入仓夹具是前 512 条前缀（全量 ai-v4 录像在 PEACH
+  顺序上与今天引擎分歧），`--explain --seq` 可用；`--score` / `--godview` 要整局，不能用
+  那条前缀。票面 / 读数：`.scratch/ai-view/issues/03-replay-console.md`。
 
 - **候选 = 提交**：`--candidate-ref`（缺省 `HEAD`）解析出的完整 sha 既派生种子批、也
   `git show` 出被评估的启发式字节。工作树与提交不一致时 CLI 在 stderr 警告一行，但**照样评估
