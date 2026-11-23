@@ -32,6 +32,7 @@ from sgs_batch import BatchSpecError, BatchWorkerError
 
 from .errors import AiEvalError, AiEvalRunError
 from .live import DEFAULT_RUNS_DIR, render_live, run_live
+from .replay import PUBLIC_WINDOW, render_replay, run_replay
 from .run import run_promote, run_quick, run_seal
 from .versions import HEURISTIC_PATH, load_version, repository_root
 
@@ -120,6 +121,51 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_RUNS_DIR,
         help=f"录像目录（缺省 {DEFAULT_RUNS_DIR}）。",
+    )
+
+    replay = commands.add_parser(
+        "replay",
+        help="回放台：一次引擎重放的 explain / score / godview（ai-view 票 03；spec §2.2）。",
+    )
+    replay.add_argument("run", help="录像文件名（不含 .jsonl / .meta.json 后缀）。")
+    replay.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR,
+        help=f"录像目录（缺省 {DEFAULT_RUNS_DIR}）。",
+    )
+    replay.add_argument(
+        "--explain",
+        action="store_true",
+        help="单步决策解释：输入 / 推断 / 剪枝 / 候选 / 对照五段。",
+    )
+    replay.add_argument(
+        "--score",
+        action="store_true",
+        help="尺子：免费标签上的对数损失 / ECE / Brier（只统计当时还暗着的座位）。",
+    )
+    replay.add_argument(
+        "--godview",
+        action="store_true",
+        help="上帝视角复盘：把错误判定与它的在位代价对齐。",
+    )
+    replay.add_argument(
+        "--seq",
+        type=int,
+        default=None,
+        help="只解释这一步（询问 seq 或动作记录 seq；与 --explain 同用）。",
+    )
+    replay.add_argument(
+        "--seat",
+        type=int,
+        default=None,
+        help="只解释这个座位的 AI 询问（与 --explain 同用）。",
+    )
+    replay.add_argument(
+        "--window",
+        type=int,
+        default=PUBLIC_WINDOW,
+        help=f"公开面窗口条数（缺省 {PUBLIC_WINDOW}）。",
     )
     return parser
 
@@ -254,6 +300,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "live":
             # 实机读数不是判决批：只有两行摘要 + 空报账表，没有 JSON / verdict / 胜率。
             sys.stdout.write(render_live(run_live(run=args.run, runs_dir=args.runs_dir)))
+            return 0
+        elif args.command == "replay":
+            # 回放台不判 verdict、不打胜率：explain / score / godview 共用一次引擎重放。
+            if not (args.explain or args.score or args.godview):
+                print(
+                    "参数错误：replay 至少要选一个模式（--explain / --score / --godview）",
+                    file=sys.stderr,
+                )
+                return 2
+            report = run_replay(
+                run=args.run,
+                runs_dir=args.runs_dir,
+                explain=args.explain,
+                score=args.score,
+                godview=args.godview,
+                seq=args.seq,
+                seat=args.seat,
+                window=args.window,
+            )
+            sys.stdout.write(render_replay(report))
+            if report.mismatches:
+                print(
+                    f"对照失败：{len(report.mismatches)} 步的记录动作 ≠ 重算 argmax"
+                    "（版本或输入不匹配）",
+                    file=sys.stderr,
+                )
+                return 1
             return 0
         else:
             # 封印批副数写死（spec §2.4 B）：CLI 不传 deals。

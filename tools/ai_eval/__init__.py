@@ -22,6 +22,8 @@
   ``QueryKind`` 的 fail-closed 兼容层在 :mod:`ai_eval.compat`，票 36）；
 - **实机读数**：:func:`run_live` / :func:`render_live`（spec §5；一局 journal + meta，
   不判 verdict、不打胜率）。
+- **回放台**：:func:`run_replay` / :func:`render_replay`（`ai-view` 票 03；explain /
+  score / godview 共用一次引擎重放，不判 verdict、不打胜率）。
 """
 
 from .cases import CasesResult, run_cases
@@ -29,6 +31,7 @@ from .cli import main
 from .decisions import Divergence, decision_diff, diff_decisions
 from .errors import AiEvalError, AiEvalRunError, AiEvalSpecError, AiVersionError
 from .live import LiveReading, render_live, run_live
+from .replay import ReplayReport, render_replay, run_replay
 from .misses import DecisionFact, MissCounts, count_misses, fact_from_query
 from .seeds import (
     SeedBatch,
@@ -52,6 +55,7 @@ __all__ = (
     "DecisionFact",
     "LoadedVersion",
     "LiveReading",
+    "ReplayReport",
     "MissCounts",
     "PairedComparison",
     "SeedBatch",
@@ -70,8 +74,10 @@ __all__ = (
     "noise_floor",
     "paired_diff_ci",
     "render_live",
+    "render_replay",
     "run_cases",
     "run_live",
+    "run_replay",
     "run_promote",
     "run_quick",
     "run_seal",

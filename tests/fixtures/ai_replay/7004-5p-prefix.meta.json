@@ -1,0 +1,462 @@
+{
+  "ai": "heuristic",
+  "deck_profile": "standard_ex_160",
+  "event_schema_version": 2,
+  "finished_at": "2026-10-30T04:32:13.815383",
+  "hero_pool": [],
+  "hero_pool_explicit": true,
+  "heroes": [
+    "jie_gongsunzan",
+    "jie_xushu",
+    "huangzhong",
+    "lvbu",
+    "zhaoyun"
+  ],
+  "human_seat": 0,
+  "pack_id": "standard",
+  "player_count": 5,
+  "rule_config": {
+    "first_seat": 0,
+    "player_count": 5,
+    "starting_hand_size": 4
+  },
+  "seed": 7004,
+  "session_log": [],
+  "tape": [
+    {
+      "answers_seq": 24,
+      "card": {
+        "attack_range": null,
+        "card_id": 100,
+        "color": "black",
+        "name": "杀",
+        "rank": 10,
+        "slot": null,
+        "suit": "club",
+        "type": "slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        2
+      ]
+    },
+    {
+      "answers_seq": 37,
+      "card": {
+        "attack_range": null,
+        "card_id": 62,
+        "color": "red",
+        "name": "闪",
+        "rank": 5,
+        "slot": null,
+        "suit": "diamond",
+        "type": "dodge",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": []
+    },
+    {
+      "answers_seq": 57,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 79,
+      "card": {
+        "attack_range": null,
+        "card_id": 11,
+        "color": "red",
+        "name": "乐不思蜀",
+        "rank": 6,
+        "slot": null,
+        "suit": "heart",
+        "type": "indulgence",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        4
+      ]
+    },
+    {
+      "answers_seq": 91,
+      "card": {
+        "attack_range": 3,
+        "card_id": 51,
+        "color": "black",
+        "name": "丈八蛇矛",
+        "rank": 12,
+        "slot": "weapon",
+        "suit": "spade",
+        "type": "serpent_spear",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        3
+      ]
+    },
+    {
+      "answers_seq": 111,
+      "kind": "EndPhase"
+    },
+    {
+      "answers_seq": 128,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 130,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 132,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 134,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 136,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 157,
+      "cards": [
+        {
+          "attack_range": null,
+          "card_id": 121,
+          "color": "black",
+          "name": "白银狮子",
+          "rank": 1,
+          "slot": "armor",
+          "suit": "club",
+          "type": "silver_lion",
+          "virtual_sources": []
+        },
+        {
+          "attack_range": null,
+          "card_id": 7,
+          "color": "red",
+          "name": "五谷丰登",
+          "rank": 4,
+          "slot": null,
+          "suit": "heart",
+          "type": "harvest",
+          "virtual_sources": []
+        }
+      ],
+      "kind": "DiscardCards"
+    },
+    {
+      "answers_seq": 174,
+      "card": {
+        "attack_range": null,
+        "card_id": 93,
+        "color": "black",
+        "name": "乐不思蜀",
+        "rank": 6,
+        "slot": null,
+        "suit": "club",
+        "type": "indulgence",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        3
+      ]
+    },
+    {
+      "answers_seq": 186,
+      "card": {
+        "attack_range": 2,
+        "card_id": 29,
+        "color": "black",
+        "name": "雌雄双股剑",
+        "rank": 2,
+        "slot": "weapon",
+        "suit": "spade",
+        "type": "double_sword",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        0
+      ]
+    },
+    {
+      "answers_seq": 206,
+      "kind": "EndPhase"
+    },
+    {
+      "answers_seq": 225,
+      "card": {
+        "attack_range": null,
+        "card_id": 137,
+        "color": "black",
+        "name": "雷杀",
+        "rank": 4,
+        "slot": null,
+        "suit": "spade",
+        "type": "thunder_slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        2
+      ]
+    },
+    {
+      "answers_seq": 238,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 260,
+      "card": {
+        "attack_range": null,
+        "card_id": 110,
+        "color": "red",
+        "name": "火攻",
+        "rank": 3,
+        "slot": null,
+        "suit": "heart",
+        "type": "fire_attack",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        2
+      ]
+    },
+    {
+      "answers_seq": 273,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 275,
+      "card": {
+        "attack_range": null,
+        "card_id": 107,
+        "color": "black",
+        "name": "无懈可击",
+        "rank": 13,
+        "slot": null,
+        "suit": "club",
+        "type": "nullify",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": []
+    },
+    {
+      "answers_seq": 277,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 279,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 281,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 294,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 296,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 298,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 300,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 302,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 316,
+      "card": {
+        "attack_range": null,
+        "card_id": 50,
+        "color": "black",
+        "name": "过河拆桥",
+        "rank": 12,
+        "slot": null,
+        "suit": "spade",
+        "type": "dismantlement",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        3
+      ]
+    },
+    {
+      "answers_seq": 329,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 331,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 333,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 335,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 337,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 341,
+      "kind": "SelectCards",
+      "picks": [
+        4
+      ]
+    },
+    {
+      "answers_seq": 349,
+      "card": {
+        "attack_range": null,
+        "card_id": 85,
+        "color": "black",
+        "name": "仁王盾",
+        "rank": 2,
+        "slot": "armor",
+        "suit": "club",
+        "type": "renwang_shield",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 369,
+      "card": {
+        "attack_range": null,
+        "card_id": 122,
+        "color": "black",
+        "name": "藤甲",
+        "rank": 2,
+        "slot": "armor",
+        "suit": "club",
+        "type": "vine_armor",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 390,
+      "card": {
+        "attack_range": null,
+        "card_id": 0,
+        "color": "red",
+        "name": "桃园结义",
+        "rank": 1,
+        "slot": null,
+        "suit": "heart",
+        "type": "peach_garden",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "answers_seq": 412,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 414,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 416,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 418,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 420,
+      "kind": "Pass"
+    },
+    {
+      "answers_seq": 437,
+      "kind": "EndPhase"
+    },
+    {
+      "answers_seq": 456,
+      "card": {
+        "attack_range": null,
+        "card_id": 111,
+        "color": "red",
+        "name": "火杀",
+        "rank": 4,
+        "slot": null,
+        "suit": "heart",
+        "type": "fire_slash",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    },
+    {
+      "answers_seq": 465,
+      "choices": [],
+      "kind": "ActivateSkill",
+      "picks": [],
+      "skill_id": "hero.huangzhong.liegong"
+    },
+    {
+      "answers_seq": 491,
+      "kind": "EndPhase"
+    },
+    {
+      "answers_seq": 510,
+      "card": {
+        "attack_range": null,
+        "card_id": 81,
+        "color": "black",
+        "name": "决斗",
+        "rank": 1,
+        "slot": null,
+        "suit": "club",
+        "type": "duel",
+        "virtual_sources": []
+      },
+      "kind": "UseCard",
+      "targets": [
+        1
+      ]
+    }
+  ],
+  "timeout_seconds": 60,
+  "timeouts": 0,
+  "version": 1
+}
