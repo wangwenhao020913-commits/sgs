@@ -105,7 +105,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from types import MappingProxyType
 
 from sgs.effects import (
@@ -153,7 +154,7 @@ from sgs.state import (
     step_option_key,
 )
 
-__all__ = ["SKILL_VALUES", "HeuristicPlayer"]
+__all__ = ["SKILL_VALUES", "HeuristicPlayer", "Score"]
 
 # ---------------------------------------------------------------------------
 # 打分要素：只取可从 ``query.view`` 与 action **局部算出**的量（票 13 §打分要素）
@@ -1279,14 +1280,14 @@ _NULLIFIABLE_TRICKS = (
 """
 
 
-def _trick_expectation(query: Query, action: Action, score: float) -> float:
+def _trick_expectation(query: Query, action: Action, total: Score) -> float:
     """把"目标可能用【无懈可击】取消"折进这张锦囊的分（C2 的**唯一**落点）。
 
     只在 :func:`_score_card_use` 调用：``_score_attack`` 也被本模块别处直接调（测试 / 将来
     的单卡估值），锦囊的取消期望属于"出牌阶段用这张牌"这一步，不掺进纯伤害模型。
     """
     if not isinstance(action, UseCard) or action.card.type not in _NULLIFIABLE_TRICKS:
-        return score
+        return total.finish()
     view = query.view
     others = [
         seat
@@ -1294,8 +1295,16 @@ def _trick_expectation(query: Query, action: Action, score: float) -> float:
         if seat != view.seat and 0 <= seat < len(view.players)
     ]
     if len(others) != 1:
-        return score
-    return _expected_trick_score(score, _nullification_probability(view, others[0]))
+        return total.finish()
+    probability = _nullification_probability(view, others[0])
+    if probability is not None:
+        # ``_expected_trick_score`` 自己含两条"逐值不变"边界（``p`` 缺失 / 总分 ≤ 0）；
+        # 不改分时 ``transform`` 不记 0 增量项（见 :meth:`Score.transform`）。
+        total.transform(
+            "无懈可击的期望",
+            lambda value: _expected_trick_score(value, probability),
+        )
+    return total.finish()
 
 
 _RESCUE_CONSUMED_VALUE = 1.0
@@ -1407,6 +1416,137 @@ def _expected_lethal_score(view: PlayerView, seat: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# 分项打分（`ai-view` 票 02）：``Score`` 累加器
+#
+# 改写前每个 ``_score_*`` 把各项内联成 ``score += …``，总分是一个 float——"这一步加到了
+# 什么"只能回去读代码。``Score`` 把"算分"与"记分"收进同一份代码：**默认只累加**
+# （与内联加法逐浮点相同），**开 trace 才记明细**（``((项名, 值), …)``），供回放台
+# （票 03）直接展示。工具侧不复算分项——复算就是第二份真源，必然漂。
+# ---------------------------------------------------------------------------
+
+
+class Scored(float):
+    """一次打分的**结果**：float 值 + trace 打开时记下的分项（`ai-view` 票 02）。
+
+    ``float`` 子类 ⇒ 既有的比较 / 四则 / ``pytest.approx`` 全部照旧，``_score_*`` 的
+    "返回 float"契约不动。:meth:`Score.add` 认出它时**接住分项**（而不是再记一行聚合项），
+    于是嵌套打分器的明细在外层保留下来——``_score_play_phase → _score_card_use →
+    _score_attack`` 这条主路径上，玩家看到的仍是"伤害牌底价 / 目标数 / 期望伤害 / 敌我
+    关系"，不是一行"伤害牌 3.75"。
+    """
+
+    items: tuple[tuple[str, float], ...]
+
+    def __new__(
+        cls, value: float, items: tuple[tuple[str, float], ...]
+    ) -> "Scored":
+        result = super().__new__(cls, value)
+        result.items = items
+        return result
+
+
+class Score:
+    """候选分数的累加器：分项与总分由**同一份代码**产出（`ai-view` 票 02 / spec §2.1）。
+
+    **默认只累加**：:meth:`add` 就是一次 float 加法，与改写前内联的 ``score += …`` 逐
+    浮点相同，且不分配明细。**开启 trace**（:meth:`tracing`）后 :meth:`finish` 返回
+    :class:`Scored`（仍是 float），它的 ``items`` 就是这一层的分项。票 03 的用法：
+
+    ``with Score.tracing(): value = scorer(query, action); value.items``
+
+    分项是**扁平**的：被调用的打分器返回 :class:`Scored` 时，它的分项被接进外层，故
+    "分项之和 == 返回值"在每一层都成立（``transform`` 的增量项允许 1 ulp 误差）。不把
+    树形结构塞进 Score：票 03 要的是"这一步为什么这么打"的加法明细，不是另一套嵌套模型。
+
+    项名是**人话短语**（"伤害牌底价" / "斩杀"），不是变量名；一个打分器的项名集合是它的
+    解释契约——**改名 = 历史解释不可比**，只在改解释口径的票里动。
+
+    单线程：AI 决策是纯函数、引擎不并发，故 trace 用一个类级开关而不是 contextvar / 锁。
+    """
+
+    _tracing: bool = False
+
+    def __init__(self) -> None:
+        self._total = 0.0
+        self._items: list[tuple[str, float]] | None = (
+            [] if Score._tracing else None
+        )
+
+    def add(self, name: str, value: float) -> None:
+        """累加一项：``total += value``；trace 打开时记 ``(项名, 值)``。
+
+        ``value`` 若是另一个打分器刚返回的 :class:`Scored`，**接住它的分项**而不是再记一
+        行聚合项——这一项就是它那些分项的和，分项之和与总分因此不会差两份。
+        """
+        self._total += value
+        if self._items is None:
+            return
+        if isinstance(value, Scored):
+            self._items.extend(value.items)
+        else:
+            self._items.append((name, value))
+
+    def transform(self, name: str, change: Callable[[float], float]) -> None:
+        """对**已累加的总分**做一次变换（"被取消 / 被救回的期望"），记成一项**增量**分。
+
+        增量而不是"改写后每项"：分项之和仍等于总分（浮点允许 1 ulp 误差），且变换只写在
+        这一处（:func:`_trick_expectation` 是唯一使用者），不必把同一个算式抄进每一项。
+        **没改分**（``_expected_trick_score`` 的逐值不变边界）就不记 0 增量项——但分支
+        本身该有的 0 分项仍由 ``add`` 记，两者不是一回事。
+        """
+        before = self._total
+        after = change(before)
+        self._total = after
+        if self._items is not None and after != before:
+            self._items.append((name, after - before))
+
+    def finish(self) -> float:
+        """结束一层打分：trace 打开时返回带分项的 :class:`Scored`，否则就是 float。"""
+        if self._items is None:
+            return self._total
+        return Scored(self._total, tuple(self._items))
+
+    @classmethod
+    @contextmanager
+    def tracing(cls) -> Iterator[None]:
+        """打开 trace：``with Score.tracing(): value = scorer(query, action)``。"""
+        previous = cls._tracing
+        cls._tracing = True
+        try:
+            yield
+        finally:
+            cls._tracing = previous
+
+
+def _item_score(name: str, value: float) -> float:
+    """**单分项**分数的快捷写法（常量分支 / 委托分支用）。
+
+    与多分项打分器同一条 trace 契约：分支里也得有一个项名，否则票 03 只能对一条分支显示
+    空白解释。
+    """
+    total = Score()
+    total.add(name, value)
+    return total.finish()
+
+
+def _net_score(gain_name: str, gain: float, cost: float) -> float:
+    """**一收一付**两项的分数：``gain − cost``（"收益 − 牌价"的共用写法）。
+
+    技能打分器里重复出现的形状（回复 − 牌价 / 换牌收益 − 牌价 / 反间收益 − 牌价…）。项名
+    统一：收益用本技能的短语，代价一律叫 :data:`_PRICE_ITEM`（"牌价"是同一个概念：一张牌
+    离开我的手）。
+    """
+    total = Score()
+    total.add(gain_name, gain)
+    total.add(_PRICE_ITEM, -cost)
+    return total.finish()
+
+
+_PRICE_ITEM = "牌价"
+"""牌类代价的**唯一**项名（弃 / 给 / 付 出去的都是同一个概念：一张牌的价）。"""
+
+
+# ---------------------------------------------------------------------------
 # 每类询问一个 scorer：``(query, action) -> float``
 # ---------------------------------------------------------------------------
 
@@ -1442,8 +1582,10 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     救回来也消耗对方一张【桃】）。记牌关闭 ⇒ 逐值回到 :data:`_LETHAL_STRIKE_VALUE`。
     """
     targets = tuple(action.targets) if isinstance(action, UseCard) else ()
+    total = Score()
     if not targets:
-        return _DAMAGE_BASE
+        total.add("无目标", _DAMAGE_BASE)
+        return total.finish()
     me = view.seat
     others = [
         seat
@@ -1451,34 +1593,39 @@ def _score_attack(action: Action, view: PlayerView) -> float:
         if seat != me and 0 <= seat < len(view.players) and view.players[seat].alive
     ]
     if not others:
-        return -_SAVE_VALUE
+        total.add("只指向自己", -_SAVE_VALUE)
+        return total.finish()
     card = getattr(action, "card", None)
-    score = _DAMAGE_BASE + _TARGET_BONUS * len(others)
+    total.add("伤害牌底价", _DAMAGE_BASE)
+    total.add("目标数", _TARGET_BONUS * len(others))
     for seat in others:
         hand_defense = _HAND_DEFENSE_WEIGHT * min(
             view.players[seat].hand_count, _HAND_DEFENSE_CAP
         )
         damage = _damage_to(card, view, seat)
         if damage <= 0:
-            score -= _WASTED_ATTACK_PENALTY
-            score -= hand_defense
+            total.add("打不动（被防具挡下）", -_WASTED_ATTACK_PENALTY)
+            total.add("目标手牌防御", -hand_defense)
         else:
             dodge_probability = (
                 _dodge_probability(view, seat) if _defended_by_dodge(card) else None
             )
             if dodge_probability is None:
-                score += _DAMAGE_POINT_VALUE * (damage - 1)
-                score -= hand_defense
+                total.add("伤害点数", _DAMAGE_POINT_VALUE * (damage - 1))
+                total.add("目标手牌防御", -hand_defense)
             else:
-                score += _expected_attack_score(damage, dodge_probability)
+                total.add(
+                    "期望伤害",
+                    _expected_attack_score(damage, dodge_probability),
+                )
         # 关系项（`ai-view` 票 01）：``_RELATION_FOCUS × (P敌 − P友)``。票 21 的"打盟友
         # 没有额外惩罚"正是实机 seed 7032 里忠臣回头打主公的根因：主公是唯一合法目标
         # 时这张【杀】拿满底价 4.0，打得到就打。"主公"那一格另有规则级 veto
         # （:func:`_lord_veto_applies`），因为负分压不住斩杀项。
-        score += _relation_term(view, seat)
+        total.add("敌我关系", _relation_term(view, seat))
         if _lethal_to(card, view, seat):
-            score += _expected_lethal_score(view, seat)
-    return score
+            total.add("斩杀", _expected_lethal_score(view, seat))
+    return total.finish()
 
 
 def _slash_target_pairs(query: Query) -> list[tuple[UseCard, int]]:
@@ -1537,7 +1684,9 @@ def _score_wine(query: Query, view: PlayerView) -> float:
     "杀不掉也先来一口"在 AI 的估值里是**负分**（低于结束阶段），一条也不浪费。
     """
     del view
-    return _WINE_LETHAL_VALUE if _wine_enables_kill(query) else _WINE_WASTE_PENALTY
+    if _wine_enables_kill(query):
+        return _item_score("补刀酒", _WINE_LETHAL_VALUE)
+    return _item_score("白喝（这一口救不了自己）", _WINE_WASTE_PENALTY)
 
 
 def _elemental_ready(view: PlayerView) -> bool:
@@ -1571,24 +1720,32 @@ def _score_iron_chain(action: Action, view: PlayerView) -> float:
     """
     targets = tuple(action.targets) if isinstance(action, UseCard) else ()
     if not targets:
-        return 0.0
+        return _item_score("无目标", 0.0)
     elemental = _elemental_ready(view)
-    score = 0.0
+    total = Score()
     for seat in targets:
         if not 0 <= seat < len(view.players):
             continue
         enemy, ally = _identity_relation(view, seat)
         if view.players[seat].chained:
-            score += _IRON_CHAIN_RESET_FRIENDLY_VALUE * ally
+            total.add("重置盟友（脱离传导）", _IRON_CHAIN_RESET_FRIENDLY_VALUE * ally)
             # 常量名是 ``..._PENALTY``（M6 P0 之前这一行写成了不存在的 ``..._VALUE``：该分支
             # 在启用池 16 名时没被随机对局走到，扩到 19 名后第一次命中就 NameError；回归
             # 测试见 `tests/test_m5_ai_military.py`）。
-            score -= _IRON_CHAIN_RESET_ENEMY_PENALTY * enemy
+            total.add(
+                "重置敌人（替他拆引线）", -_IRON_CHAIN_RESET_ENEMY_PENALTY * enemy
+            )
         else:
-            score -= _IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY * ally
+            total.add(
+                "串上盟友（替对手接引线）",
+                -_IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY * ally,
+            )
             if elemental:
-                score += _IRON_CHAIN_CHAIN_ENEMY_VALUE * enemy
-    return score
+                total.add(
+                    "串上敌人（下一棒烧过去）",
+                    _IRON_CHAIN_CHAIN_ENEMY_VALUE * enemy,
+                )
+    return total.finish()
 
 
 def _score_fire_attack(action: Action, view: PlayerView) -> float:
@@ -1607,15 +1764,18 @@ def _score_fire_attack(action: Action, view: PlayerView) -> float:
     ]
     spare = len(view.self_hand) - 1
     if not others or spare <= 0:
-        return _FIRE_ATTACK_NO_SPARE_PENALTY
-    score = _FIRE_ATTACK_BASE + _FIRE_ATTACK_SPARE_WEIGHT * min(
-        spare, _FIRE_ATTACK_SPARE_CAP
+        return _item_score("没有同花色牌可弃", _FIRE_ATTACK_NO_SPARE_PENALTY)
+    total = Score()
+    total.add("火攻底价", _FIRE_ATTACK_BASE)
+    total.add(
+        "多余的手牌",
+        _FIRE_ATTACK_SPARE_WEIGHT * min(spare, _FIRE_ATTACK_SPARE_CAP),
     )
     for seat in others:
         if _wears(view.players[seat], _VINE_ARMOR):
-            score += _FIRE_ATTACK_VINE_BONUS
-        score += _relation_term(view, seat)
-    return score
+            total.add("藤甲（2 点伤害）", _FIRE_ATTACK_VINE_BONUS)
+        total.add("敌我关系", _relation_term(view, seat))
+    return total.finish()
 
 
 def _score_reforge(action: Action, view: PlayerView) -> float:
@@ -1635,7 +1795,10 @@ def _score_reforge(action: Action, view: PlayerView) -> float:
     """
     assert isinstance(action, Reforge)
     baseline = _CARD_VALUES["iron_chain"]
-    return _REFORGE_VALUE - (_card_value(action.card, view=view) - baseline)
+    total = Score()
+    total.add("重铸收益", _REFORGE_VALUE)
+    total.add("这张牌的代价", baseline - _card_value(action.card, view=view))
+    return total.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -1743,24 +1906,25 @@ def _score_card_use(query: Query, action: Action) -> float:
     assert isinstance(action, (UseCard, PlayCard))
     view = query.view
     card = action.card
+    total = Score()
     if _damage_card(card):
-        score = _score_attack(action, view)
+        total.add("伤害牌", _score_attack(action, view))
     elif card.type == "wine":
-        score = _score_wine(query, view)
+        total.add("酒", _score_wine(query, view))
     elif card.type == "peach":
-        score = _HEAL_VALUE if _wounded(view) else 0.0
+        total.add("回复", _HEAL_VALUE if _wounded(view) else 0.0)
     elif card.type == "iron_chain":
-        score = _score_iron_chain(action, view)
+        total.add("铁索连环", _score_iron_chain(action, view))
     elif card.type == "fire_attack":
-        score = _score_fire_attack(action, view)
+        total.add("火攻", _score_fire_attack(action, view))
     elif card.slot is not None:
-        score = _equip_setup_score(query, card)
+        total.add("装备先手", _equip_setup_score(query, card))
     else:
-        score = _TRICK_VALUES.get(card.type, _UNREGISTERED_TRICK_VALUE)
+        total.add("锦囊底价", _TRICK_VALUES.get(card.type, _UNREGISTERED_TRICK_VALUE))
         # 单体有害锦囊按**目标**过关系项（`ai-view` 票 01）：票面那条实机同样的缺口——
         # 忠臣手里有【过河拆桥】就拆主公。有益 / 自己 / 全体锦囊逐值不变。
-        score += _harmful_trick_relation(action, view)
-    return _trick_expectation(query, action, score)
+        total.add("敌我关系", _harmful_trick_relation(action, view))
+    return _trick_expectation(query, action, total)
 
 
 def _score_play_phase(query: Query, action: Action) -> float:
@@ -1779,27 +1943,27 @@ def _score_play_phase(query: Query, action: Action) -> float:
     """
     view = query.view
     if isinstance(action, EndPhase):
-        return 0.0
+        return _item_score("结束阶段", 0.0)
     if _lord_veto_applies(view, action):
-        return _LORD_VETO_PENALTY
+        return _item_score("主公 veto（规则级不可选）", _LORD_VETO_PENALTY)
     if isinstance(action, ActivateSkill):
         return _skill_value(query, action)
     if isinstance(action, Reforge):
         return _score_reforge(action, view)
     if isinstance(action, (UseCard, PlayCard)):
         return _score_card_use(query, action)
-    return 0.0
+    return _item_score("未知动作", 0.0)
 
 
 def _score_dodge(query: Query, action: Action) -> float:
     """``DODGE``：能抵消就抵消（响应牌不占使用次数）。"""
     if isinstance(action, Pass):
-        return 0.0
+        return _item_score("放弃", 0.0)
     if isinstance(action, ActivateSkill):
-        return _DODGE_SKILL_VALUE
+        return _item_score("技能抵消", _DODGE_SKILL_VALUE)
     if isinstance(action, (UseCard, PlayCard)) and action.card.type == "dodge":
-        return _DODGE_VALUE
-    return 0.0
+        return _item_score("抵消", _DODGE_VALUE)
+    return _item_score("不抵消", 0.0)
 
 
 _NULLIFY = "nullify"
@@ -1947,16 +2111,16 @@ def _score_respond(query: Query, action: Action) -> float:
     """
     luanwu = _luanwu_respond_value(query, action)
     if luanwu is not None:
-        return luanwu
+        return _item_score("乱武：按目标敌我给分", luanwu)
     if isinstance(action, Pass):
-        return 0.0
+        return _item_score("放弃响应", 0.0)
     if isinstance(action, (ActivateSkill, UseCard, PlayCard, SubstituteJudgeCard)):
         if _nullify_declares(query) is False:
-            return _NULLIFY_ABSTAIN_VALUE
+            return _item_score("无懈：这一宣对己方不利", _NULLIFY_ABSTAIN_VALUE)
         if isinstance(action, ActivateSkill):
-            return _DODGE_SKILL_VALUE
-        return _RESPOND_VALUE
-    return 0.0
+            return _item_score("技能抵消", _DODGE_SKILL_VALUE)
+        return _item_score("响应", _RESPOND_VALUE)
+    return _item_score("无响应", 0.0)
 
 
 def _peach_save_value(query: PeachQuery) -> float:
@@ -1988,27 +2152,32 @@ def _score_peach(query: Query, action: Action) -> float:
     """
     assert isinstance(query, PeachQuery)
     if isinstance(action, Pass):
-        return 0.0
+        return _item_score("放弃救援", 0.0)
     if isinstance(action, ActivateSkill):
-        return _peach_save_value(query)
+        return _item_score("救人", _peach_save_value(query))
     if not isinstance(action, (UseCard, PlayCard)) or action.card.type not in _RESCUE_CARD_TYPES:
-        return 0.0
-    return _peach_save_value(query)
+        return _item_score("不是救援牌", 0.0)
+    return _item_score("救人", _peach_save_value(query))
 
 
 def _score_discard(query: Query, action: Action) -> float:
     """``DISCARD``：弃价值最低（【桃】/【闪】最后弃，装备按槽位价值排序）。"""
     del query
     if not isinstance(action, DiscardCards):
-        return 0.0
-    return -sum(_card_value(card) for card in action.cards)
+        return _item_score("非法弃牌", 0.0)
+    total = Score()
+    # 保留内置 ``sum``：CPython 3.12 起它对 float 走**补偿求和**，逐张 ``+=`` 会在
+    # 末位差 1 ulp（票 02 的 parity 就是这样抓到的）——分项是一笔"弃牌成本之和"，
+    # 不是一个假的逐张明细。
+    total.add(_PRICE_ITEM, -sum(_card_value(card) for card in action.cards))
+    return total.finish()
 
 
 def _skill_value(query: Query, action: ActivateSkill) -> float:
     """技能收益查 :data:`SKILL_VALUES`；表里没有 ⇒ 保守（低于 Pass）。"""
     entry = SKILL_VALUES.get(action.skill_id)
     if entry is None:
-        return _UNKNOWN_SKILL_VALUE
+        return _item_score("未登记技能（保守）", _UNKNOWN_SKILL_VALUE)
     scorer, _note = entry
     return scorer(query, action, query.view)
 
@@ -2016,7 +2185,7 @@ def _skill_value(query: Query, action: ActivateSkill) -> float:
 def _score_skill_activation(query: Query, action: Action) -> float:
     """``SKILL_ACTIVATION``：查技能语义表，缺省 ``Pass``（拿不准就不发动）。"""
     if isinstance(action, Pass) or not isinstance(action, ActivateSkill):
-        return 0.0
+        return _item_score("放弃或不发动", 0.0)
     return _skill_value(query, action)
 
 
@@ -2129,29 +2298,38 @@ def _score_select_cards(query: Query, action: Action) -> float:
     """
     assert isinstance(query, SelectCardsQuery)
     if not isinstance(action, SelectCards):
-        return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+        penalty = _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+        return _item_score("不选（可能是撤销已发动的技能）", penalty)
     committed = _is_committed_skill_step(query)
     short = _step_skill_short(query) if committed else ""
     pindian = _is_pindian_pick(query)
     fire_attack_discard = not committed and _is_fire_attack_discard(query)
-    total = 0.0
+    total = Score()
+    if not action.picks:
+        total.add("什么都不选", 0.0)
     for index in action.picks:
         if not 0 <= index < len(query.slots):
-            return _ILLEGAL_PENALTY
+            return _item_score("非法选牌", _ILLEGAL_PENALTY)
         slot = query.slots[index]
         if pindian:
             # 拼点：按**点数**给分（A=1 … K=13），赢的那一侧收益远大于省一张贵牌。
-            total += float(slot.card.rank or 0)
+            total.add("拼点点数", float(slot.card.rank or 0))
             continue
         if fire_attack_discard:
-            total += _FIRE_ATTACK_DISCARD_VALUE - _card_value(slot.card)
+            total.add(
+                "火攻弃牌换 1 点伤害",
+                _FIRE_ATTACK_DISCARD_VALUE - _card_value(slot.card),
+            )
             continue
-        total += _step_card_score(
-            slot.card, slot.ref.seat, query.view.seat, short, view=query.view
+        total.add(
+            "选牌",
+            _step_card_score(
+                slot.card, slot.ref.seat, query.view.seat, short, view=query.view
+            ),
         )
     if short in _GIVE_STEPS and len(action.picks) >= 2 and _wounded(query.view):
-        total += _RENDE_RECOVER_VALUE
-    return total
+        total.add("仁德回复", _RENDE_RECOVER_VALUE)
+    return total.finish()
 
 
 _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
@@ -2853,9 +3031,9 @@ def _score_seat_option(
     try:
         seat = int(choice.removeprefix(_SEAT_PREFIX))
     except ValueError:  # pragma: no cover - 座位步的选项恒是 seat:N
-        return 0.0
+        return _item_score("不是座位选项", 0.0)
     if not 0 <= seat < len(view.players):
-        return 0.0
+        return _item_score("座位越界", 0.0)
     enemy, ally = _identity_relation(view, seat)
     skill = (
         str(skill_id)
@@ -2863,14 +3041,16 @@ def _score_seat_option(
         else str(getattr(query, "skill_id", "") or "")
     )
     if conversion or skill.startswith(_HOSTILE_SEAT_STEPS):
-        return _SEAT_TARGET_VALUE * enemy
+        return _item_score("敌对座位", _SEAT_TARGET_VALUE * enemy)
     if skill.startswith(_STOLEN_CARD_SEAT_STEPS):
-        return _STOLEN_CARD_SEAT_VALUE + (
-            _SEAT_TARGET_VALUE - _STOLEN_CARD_SEAT_VALUE
-        ) * enemy
+        return _item_score(
+            "偷牌座位",
+            _STOLEN_CARD_SEAT_VALUE
+            + (_SEAT_TARGET_VALUE - _STOLEN_CARD_SEAT_VALUE) * enemy,
+        )
     if skill.startswith(_YIJI_GIVE_STEP) and seat == view.seat:
-        return _YIJI_SELF_GIVE_VALUE
-    return _SEAT_TARGET_VALUE * (ally - enemy)
+        return _item_score("遗计交给自己", _YIJI_SELF_GIVE_VALUE)
+    return _item_score("帮助座位", _SEAT_TARGET_VALUE * (ally - enemy))
 
 
 def _score_hero_card_option(query: SelectOptionQuery, choice: str) -> float:
@@ -2889,10 +3069,10 @@ def _score_hero_card_option(query: SelectOptionQuery, choice: str) -> float:
     先查表、再回落到本函数），故一将一票可以改自己那几个 id 的相对次序。
     """
     if choice in query.disabled:
-        return _ILLEGAL_PENALTY
+        return _item_score("置灰（非法）选项", _ILLEGAL_PENALTY)
     if choice in query.option_texts:
-        return _HERO_CARD_EFFECT_VALUE
-    return _HERO_CARD_SKILL_VALUE
+        return _item_score("技能效果行", _HERO_CARD_EFFECT_VALUE)
+    return _item_score("武将牌上的一条技能", _HERO_CARD_SKILL_VALUE)
 
 
 def _score_select_option(query: Query, action: Action) -> float:
@@ -2909,15 +3089,16 @@ def _score_select_option(query: Query, action: Action) -> float:
     """
     assert isinstance(query, SelectOptionQuery)
     if not isinstance(action, SelectOption):
-        return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+        penalty = _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+        return _item_score("不选（可能是撤销已发动的技能）", penalty)
     if action.choice.startswith(_SEAT_PREFIX):
         return _score_seat_option(query, action.choice)
     registered = _OPTION_VALUES.get(action.choice)
     if registered is not None:
-        return registered
+        return _item_score("登记过的选项", registered)
     if query.hero_card is not None:
         return _score_hero_card_option(query, action.choice)
-    return 0.0
+    return _item_score("未登记选项（保守 0 分）", 0.0)
 
 
 def _option_choice_value(query: Query, choice: str) -> float:
@@ -2942,8 +3123,18 @@ def _score_select_options(query: Query, action: Action) -> float:
     """
     assert isinstance(query, SelectOptionsQuery)
     if not isinstance(action, SelectOptions):
-        return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
-    return sum(_option_choice_value(query, choice) for choice in action.choices)
+        penalty = _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+        return _item_score("不选（可能是撤销已发动的技能）", penalty)
+    total = Score()
+    # 见 `_score_discard`：``sum`` 的补偿求和与逐项累加在末位会差 1 ulp，parity 要求保留。
+    if action.choices:
+        total.add(
+            "选项",
+            sum(_option_choice_value(query, choice) for choice in action.choices),
+        )
+    else:
+        total.add("空集（什么都不做）", 0.0)
+    return total.finish()
 
 
 _DYNAMIC_POOL_SEAT_STEPS: frozenset[str] = frozenset(
@@ -3629,17 +3820,23 @@ def _score_arrange(query: Query, action: Action) -> float:
     """``ARRANGE``：最有用的牌留顶（按牌名价值表；越靠顶权重越高）。"""
     assert isinstance(query, ArrangeQuery)
     if not isinstance(action, ArrangeCards):
-        return 0.0
+        return _item_score("不是排版动作", 0.0)
     order = tuple(action.order)
     if sorted(order) != list(range(len(query.revealed))):
-        return _ILLEGAL_PENALTY
+        return _item_score("非法排版顺序", _ILLEGAL_PENALTY)
     if not 0 <= action.split <= len(order):
-        return _ILLEGAL_PENALTY
+        return _item_score("非法分界", _ILLEGAL_PENALTY)
     size = len(order)
-    return sum(
-        _card_value(query.revealed[order[index]]) * (size - index)
-        for index in range(action.split)
+    total = Score()
+    # 同上：保留 ``sum``（补偿求和）才能逐 float 不变。
+    total.add(
+        "置顶牌的用处",
+        sum(
+            _card_value(query.revealed[order[index]]) * (size - index)
+            for index in range(action.split)
+        ),
     )
+    return total.finish()
 
 
 def _score_distribute(query: Query, action: Action) -> float:
@@ -3651,19 +3848,21 @@ def _score_distribute(query: Query, action: Action) -> float:
     """
     assert isinstance(query, DistributeQuery)
     if not isinstance(action, Distribute):
-        return _ILLEGAL_PENALTY
+        return _item_score("不是分配动作", _ILLEGAL_PENALTY)
     view = query.view
-    total = 0.0
+    total = Score()
+    if not action.counts:
+        total.add("不分配（中性落点）", 0.0)
     for seat, count in action.counts:
         if not 0 <= seat < len(view.players) or count <= 0:
-            return _ILLEGAL_PENALTY
+            return _item_score("非法座位或张数", _ILLEGAL_PENALTY)
         if count > query.per_seat_max:
-            return _ILLEGAL_PENALTY
+            return _item_score("超过每座上限", _ILLEGAL_PENALTY)
         enemy, ally = _identity_relation(view, seat)
-        total += count * _SEAT_TARGET_VALUE * (enemy - ally)
+        total.add("分配点数", count * _SEAT_TARGET_VALUE * (enemy - ally))
     if sum(count for _, count in action.counts) > query.max_total:
-        return _ILLEGAL_PENALTY
-    return total
+        return _item_score("超过总上限", _ILLEGAL_PENALTY)
+    return total.finish()
 
 
 _SCORERS: Mapping[QueryKind, Callable[[Query, Action], float]] = MappingProxyType(
@@ -4011,7 +4210,7 @@ def _constant(value: float) -> Callable[[Query, Action, PlayerView], float]:
 
     def scorer(query: Query, action: Action, view: PlayerView) -> float:
         del query, action, view
-        return value
+        return _item_score("常量收益", value)
 
     return scorer
 
@@ -4058,12 +4257,12 @@ def _score_rende(query: Query, action: Action, view: PlayerView) -> float:
     del query
     if action.picks:
         bonus = _RENDE_RECOVER_VALUE if len(action.picks) >= 2 and _wounded(view) else 0.0
-        return bonus - _picked_value(view, action)
+        return _net_score("回复", bonus, _picked_value(view, action))
     if not view.self_hand:
-        return 0.0
+        return _item_score("空手", 0.0)
     if _wounded(view) and len(view.self_hand) >= 2:
-        return _RENDE_RECOVER_VALUE - _skeleton_cost(view, 2)
-    return -_skeleton_cost(view, 1)
+        return _net_score("回复", _RENDE_RECOVER_VALUE, _skeleton_cost(view, 2))
+    return _item_score(_PRICE_ITEM, -_skeleton_cost(view, 1))
 
 
 _JIE_RENDE_BASIC_VALUE = 6.0
@@ -4086,12 +4285,14 @@ def _score_jie_rende(query: Query, action: Action, view: PlayerView) -> float:
     del query
     if action.picks:
         bonus = _JIE_RENDE_BASIC_VALUE if len(action.picks) >= 2 else 0.0
-        return bonus - _picked_value(view, action)
+        return _net_score("视为使用一张基本牌", bonus, _picked_value(view, action))
     if not view.self_hand:
-        return 0.0
+        return _item_score("空手", 0.0)
     if len(view.self_hand) >= 2:
-        return _JIE_RENDE_BASIC_VALUE - _skeleton_cost(view, 2)
-    return -_skeleton_cost(view, 1)
+        return _net_score(
+            "视为使用一张基本牌", _JIE_RENDE_BASIC_VALUE, _skeleton_cost(view, 2)
+        )
+    return _item_score(_PRICE_ITEM, -_skeleton_cost(view, 1))
 
 
 def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:
@@ -4106,15 +4307,19 @@ def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:
     assert isinstance(action, ActivateSkill)
     del query
     if action.picks:
-        return _CYCLE_VALUE * len(action.picks) - _picked_value(view, action)
+        return _net_score(
+            "换牌收益", _CYCLE_VALUE * len(action.picks), _picked_value(view, action)
+        )
     mine = view.players[view.seat]
     values = sorted(_card_value(card) for card in (*view.self_hand, *mine.equip))
     count = sum(1 for value in values if value < _CYCLE_VALUE)
     if count == 0:
         # 没有值得换的牌，但 ``lo=1`` 仍逼着弃一张 ⇒ 发动只会白丢最便宜的那张。
         # 给**负分**（而不是 0.0）：否则与"结束阶段"打平，AI 会随机把限一次的机会浪费掉。
-        return _CYCLE_VALUE - values[0] if values else 0.0
-    return _CYCLE_VALUE * count - sum(values[:count])
+        if not values:
+            return _item_score("空手", 0.0)
+        return _net_score("换牌收益", _CYCLE_VALUE, values[0])
+    return _net_score("换牌收益", _CYCLE_VALUE * count, sum(values[:count]))
 
 
 def _score_keji(query: Query, action: Action, view: PlayerView) -> float:
@@ -4125,7 +4330,10 @@ def _score_keji(query: Query, action: Action, view: PlayerView) -> float:
     """
     del query, action
     me = view.players[view.seat]
-    return float(max(0, me.hand_count - me.hp)) * _unknown_card_value(view)
+    return _item_score(
+        "保住的超上限手牌",
+        float(max(0, me.hand_count - me.hp)) * _unknown_card_value(view),
+    )
 
 
 def _score_kurou(query: Query, action: Action, view: PlayerView) -> float:
@@ -4136,29 +4344,29 @@ def _score_kurou(query: Query, action: Action, view: PlayerView) -> float:
     """
     del query, action
     if view.players[view.seat].hp <= 1:
-        return -_unknown_card_value(view)
-    return 2.0 * _unknown_card_value(view)
+        return _item_score("1 体力再掉即濒死", -_unknown_card_value(view))
+    return _item_score("两张牌", 2.0 * _unknown_card_value(view))
 
 
 def _score_qingnang(query: Query, action: Action, view: PlayerView) -> float:
     """【青囊】：弃一张手牌令**已受伤**角色回复 1 点（= 3 点收益 − 牌价）。"""
     assert isinstance(action, ActivateSkill)
     del query
-    return 3.0 - _picked_value(view, action)
+    return _net_score("回复", 3.0, _picked_value(view, action))
 
 
 def _score_fanjian(query: Query, action: Action, view: PlayerView) -> float:
     """【反间】：交付一张牌，目标猜错花色则受伤（期望为正）。"""
     assert isinstance(action, ActivateSkill)
     del query
-    return 2.5 - _picked_value(view, action)
+    return _net_score("反间收益", 2.5, _picked_value(view, action))
 
 
 def _score_lijian(query: Query, action: Action, view: PlayerView) -> float:
     """【离间】：弃一张牌令两名男性角色决斗（把伤害转给别人）。"""
     assert isinstance(action, ActivateSkill)
     del query
-    return 3.0 - _picked_value(view, action)
+    return _net_score("让两人决斗", 3.0, _picked_value(view, action))
 
 
 def _score_jieyin(query: Query, action: Action, view: PlayerView) -> float:
@@ -4171,14 +4379,16 @@ def _score_jieyin(query: Query, action: Action, view: PlayerView) -> float:
     assert isinstance(action, ActivateSkill)
     del query
     bonus = 4.0 if _wounded(view) else 1.0
-    return bonus - _skill_cost(view, action, 2)
+    return _net_score("回复", bonus, _skill_cost(view, action, 2))
 
 
 def _score_liuli(query: Query, action: Action, view: PlayerView) -> float:
     """【流离】：弃一张牌把【杀】转移给合法新目标（候选存在即意味着有目标）。"""
     assert isinstance(action, ActivateSkill)
     del query
-    return 3.0 - 0.5 * _picked_value(view, action)
+    return _net_score(
+        "转移【杀】", 3.0, 0.5 * _picked_value(view, action)
+    )
 
 
 def _score_jie_kurou(query: Query, action: Action, view: PlayerView) -> float:
@@ -4190,8 +4400,12 @@ def _score_jie_kurou(query: Query, action: Action, view: PlayerView) -> float:
     assert isinstance(action, ActivateSkill)
     del query
     if view.players[view.seat].hp <= 1:
-        return -_unknown_card_value(view)
-    return 3.0 * _unknown_card_value(view) - _skill_cost(view, action, 1)
+        return _item_score("1 体力再掉即濒死", -_unknown_card_value(view))
+    return _net_score(
+        "两张牌 + 诈降",
+        3.0 * _unknown_card_value(view),
+        _skill_cost(view, action, 1),
+    )
 
 
 def _score_jie_guose(query: Query, action: Action, view: PlayerView) -> float:
@@ -4202,7 +4416,7 @@ def _score_jie_guose(query: Query, action: Action, view: PlayerView) -> float:
     """
     assert isinstance(action, ActivateSkill)
     del query, view
-    return 2.0
+    return _item_score("二选一 + 摸一张", 2.0)
 
 
 def _score_jie_jieyin(query: Query, action: Action, view: PlayerView) -> float:
@@ -4214,7 +4428,7 @@ def _score_jie_jieyin(query: Query, action: Action, view: PlayerView) -> float:
     assert isinstance(action, ActivateSkill)
     del query
     bonus = 4.0 if _wounded(view) else 1.0
-    return bonus - _skill_cost(view, action, 1)
+    return _net_score("回复", bonus, _skill_cost(view, action, 1))
 
 
 def _score_jie_jiuyuan(query: Query, action: Action, view: PlayerView) -> float:
@@ -4225,7 +4439,7 @@ def _score_jie_jiuyuan(query: Query, action: Action, view: PlayerView) -> float:
     """
     assert isinstance(action, ActivateSkill)
     del query, view
-    return 2.0
+    return _item_score("摸一张 + 回复转给主公", 2.0)
 
 
 def _score_chuli(query: Query, action: Action, view: PlayerView) -> float:
@@ -4235,7 +4449,7 @@ def _score_chuli(query: Query, action: Action, view: PlayerView) -> float:
     """
     assert isinstance(action, ActivateSkill)
     del query
-    return 2.0 - 0.5 * _skeleton_cost(view, 1)
+    return _net_score("拆掉对手若干张", 2.0, 0.5 * _skeleton_cost(view, 1))
 
 
 def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
@@ -4248,13 +4462,15 @@ def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
     del query
     me = view.players[view.seat]
     if me.hp <= 1:
-        return -_unknown_card_value(view)
+        return _item_score("1 体力不赌决斗", -_unknown_card_value(view))
     slashes = sum(
         1
         for card in view.self_hand
         if _is_slash_card(card)
     )
-    return 1.0 if slashes else -_unknown_card_value(view)
+    if slashes:
+        return _item_score("手里有【杀】", 1.0)
+    return _item_score("手里没【杀】", -_unknown_card_value(view))
 
 
 def _score_shensu(query: Query, action: Action, view: PlayerView) -> float:
@@ -4271,8 +4487,8 @@ def _score_shensu(query: Query, action: Action, view: PlayerView) -> float:
             continue
         enemy, _ally = _identity_relation(view, player.seat)
         if player.hp <= 1 and enemy >= 0.5:
-            return 3.0
-    return -1.0
+            return _item_score("能补刀", 3.0)
+    return _item_score("常态不划算", -1.0)
 
 
 def _score_qimou(query: Query, action: Action, view: PlayerView) -> float:
@@ -4287,10 +4503,10 @@ def _score_qimou(query: Query, action: Action, view: PlayerView) -> float:
     del query
     me = next((player for player in view.players if player.seat == view.seat), None)
     if me is None or not me.alive:
-        return _UNKNOWN_SKILL_VALUE
+        return _item_score("读不到自己（保守）", _UNKNOWN_SKILL_VALUE)
     if me.hp <= 1:
-        return -1.0
-    return 1.0
+        return _item_score("1 体力再用即濒死", -1.0)
+    return _item_score("限定技值得用", 1.0)
 
 
 def _score_qiangxi(query: Query, action: Action, view: PlayerView) -> float:
@@ -4308,20 +4524,20 @@ def _score_qiangxi(query: Query, action: Action, view: PlayerView) -> float:
     del query
     me = next((player for player in view.players if player.seat == view.seat), None)
     if me is None or not me.alive:
-        return _UNKNOWN_SKILL_VALUE
+        return _item_score("读不到自己（保守）", _UNKNOWN_SKILL_VALUE)
     if me.hp <= 1:
-        return -1.0
+        return _item_score("1 体力自伤即濒死", -1.0)
     weapons = [card for card in view.self_hand if card.slot is SlotKind.WEAPON]
     weapons.extend(card for card in me.equip if card.slot is SlotKind.WEAPON)
     if weapons:
-        return 1.5
+        return _item_score("有武器牌可弃", 1.5)
     for player in view.players:
         if player.seat == view.seat or not player.alive:
             continue
         enemy, _ally = _identity_relation(view, player.seat)
         if player.hp <= 1 and enemy >= 0.5:
-            return 2.0
-    return 0.5
+            return _item_score("能补刀", 2.0)
+    return _item_score("只能失去体力（保守）", 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -4393,10 +4609,10 @@ def _score_jushou(query: Query, action: Action, view: PlayerView) -> float:
     del query
     me = view.players[view.seat]
     if me.flipped:
-        return _JUSHSOU_FLIPPED_VALUE
+        return _item_score("翻回正面 + 三张牌", _JUSHSOU_FLIPPED_VALUE)
     if me.hp <= 1:
-        return _JUSHSOU_LAST_STAND_VALUE
-    return _JUSHSOU_FACE_UP_VALUE
+        return _item_score("1 体力跳回合等死", _JUSHSOU_LAST_STAND_VALUE)
+    return _item_score("三张牌 vs 跳过下回合", _JUSHSOU_FACE_UP_VALUE)
 
 
 def _salvage_targets(view: PlayerView) -> tuple[int, ...]:
@@ -4436,8 +4652,10 @@ def _score_axe(query: Query, action: Action, view: PlayerView) -> float:
     assert isinstance(action, ActivateSkill)
     del query
     if any(view.players[seat].hp <= 1 for seat in _salvage_targets(view)):
-        return _AXE_KILL_VALUE
-    return _AXE_SALVAGE_VALUE - _skill_cost(view, action, 2)
+        return _item_score("可能的斩杀（不扣牌价）", _AXE_KILL_VALUE)
+    return _net_score(
+        "捞回 1 点非致命伤害", _AXE_SALVAGE_VALUE, _skill_cost(view, action, 2)
+    )
 
 
 def _score_qianxun(query: Query, action: Action, view: PlayerView) -> float:
@@ -4452,8 +4670,8 @@ def _score_qianxun(query: Query, action: Action, view: PlayerView) -> float:
     if me.hp <= 1 and any(
         card.type in _SELF_PRESERVATION_CARD_TYPES for card in view.self_hand
     ):
-        return _QIANXUN_LAST_STAND_VALUE
-    return _QIANXUN_VALUE
+        return _item_score("1 体力扣住保命牌", _QIANXUN_LAST_STAND_VALUE)
+    return _item_score("躲开拆 / 顺", _QIANXUN_VALUE)
 
 
 _HAND_REQUIRED_SEAT_STEPS: frozenset[tuple[str, str]] = frozenset(
@@ -4493,11 +4711,11 @@ def _score_huangtian(query: Query, action: Action, view: PlayerView) -> float:
     del query, action
     lord = _huangtian_lord_seat(view)
     if lord is None:
-        return 0.0
+        return _item_score("没有主公", 0.0)
     enemy, _ally = _identity_relation(view, lord)
     if enemy >= 1.0:
-        return -1.0
-    return 2.0 * (1.0 - enemy)
+        return _item_score("主公是已明敌人", -1.0)
+    return _item_score("把牌交给主公", 2.0 * (1.0 - enemy))
 
 
 def _score_jiuchi(query: Query, action: Action, view: PlayerView) -> float:
@@ -4510,7 +4728,9 @@ def _score_jiuchi(query: Query, action: Action, view: PlayerView) -> float:
     濒死那一侧由 :func:`_score_peach` 按"回复 1 点"计价（``_RESCUE_CARD_TYPES`` 含 wine）。
     """
     del action
-    return _score_wine(query, view)
+    total = Score()
+    total.add("酒（与真【酒】同一条估值）", _score_wine(query, view))
+    return total.finish()
 
 
 def _score_baonue(query: Query, action: Action, view: PlayerView) -> float:
@@ -4526,11 +4746,13 @@ def _score_baonue(query: Query, action: Action, view: PlayerView) -> float:
     del query, action
     lord = _huangtian_lord_seat(view)
     if lord is None:
-        return 0.0
+        return _item_score("没有主公", 0.0)
     mine = _me(view).identity
     if mine is None:
-        return 0.0
-    return 1.5 if "lord" in _ally_identities(mine) else -1.0
+        return _item_score("读不到自己的身份", 0.0)
+    if "lord" in _ally_identities(mine):
+        return _item_score("帮主公回血", 1.5)
+    return _item_score("帮敌人回血", -1.0)
 
 
 def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
@@ -4551,7 +4773,7 @@ def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
     del query
     me = next((player for player in view.players if player.seat == view.seat), None)
     if me is None or not me.alive:
-        return _UNKNOWN_SKILL_VALUE
+        return _item_score("读不到自己（保守）", _UNKNOWN_SKILL_VALUE)
     gains = sum(
         1
         for player in view.players
@@ -4560,10 +4782,16 @@ def _score_guixin(query: Query, action: Action, view: PlayerView) -> float:
         and (player.hand_count or player.equip or player.judge)
     )
     if me.flipped:
-        return float(gains) + 1.0
+        total = Score()
+        total.add("各拿一张", float(gains))
+        total.add("翻回正面", 1.0)
+        return total.finish()
     if not gains:
-        return -1.0
-    return float(gains) - 1.5
+        return _item_score("翻面没有收益", -1.0)
+    total = Score()
+    total.add("各拿一张", float(gains))
+    total.add("翻面（跳过下个回合）", -1.5)
+    return total.finish()
 
 
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {

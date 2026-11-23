@@ -3,7 +3,7 @@
 公开接口只在此再导出，外部不得 import 本子包的深层路径。
 """
 
-from .heuristic import SKILL_VALUES, HeuristicPlayer
+from .heuristic import SKILL_VALUES, HeuristicPlayer, Score
 from .participants import (
     Participant,
     RandomPlayer,
@@ -21,6 +21,7 @@ __all__ = (
     "Participant",
     "RandomPlayer",
     "SKILL_VALUES",
+    "Score",
     "TapeError",
     "TapePlayer",
     "is_designation_use",

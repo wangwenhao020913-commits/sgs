@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import math
 import os
 import subprocess
@@ -84,6 +86,9 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     DiscardQuery,
+    Distribute,
+    DistributeContext,
+    DistributeQuery,
     DodgeQuery,
     EndPhase,
     FrameKind,
@@ -2554,6 +2559,260 @@ def test_a_heuristic_game_replays_from_its_tape():
     replay.run([player, player])
 
     assert replay.journal() == played.journal()
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 可解释打分（`ai-view` 票 02）：`Score` 累加器 / 逐 float parity / 源码扫描
+# ---------------------------------------------------------------------------
+
+HEURISTIC_SOURCE = ROOT / "src" / "sgs" / "agents" / "heuristic.py"
+
+PARITY_SEEDS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+"""parity 批次：5 人全启发式、开武将池。8 个种子实测覆盖九类询问（``DISTRIBUTE`` 除外）。"""
+
+PARITY_CANDIDATES = 5319
+PARITY_DIGEST = "9266db83fa35034b5872f59127e34070e45494a07f6f54f406ad2d4ad69e0129"
+"""**分项改写之前**（``master@b65b75f``）在同一批次上录下的（候选数, sha256）。
+
+逐行 = ``kind|actor|seq|action repr|score repr``：**分数是 float**，改写只许改内部结构、
+不许动任何一个数（票面"逐询问同一 float"）。改权重的票会正当地改这个摘要——那时按新读数
+重录，并在票面写清"这是行为改动，不是重构"；重构让摘要变了就是回归。
+"""
+
+
+@pytest.fixture(scope="module")
+def _scored_batch() -> tuple[list[str], list[str]]:
+    """固定批次跑**一次**（trace 打开）：逐候选分数行 + 分项自洽违规。
+
+    观察点 = 模块自己的**候选打分派发表**（``_SCORERS``）：``respond`` 只交出赢家、看不到
+    "逐候选的 float"，而票面要的正是后者。包一层不重写候选组装、不复制打分器——分数仍由
+    生产代码算出（与回放台将来读 `_SCORERS` 同一条路）。两条用例共读这一次运行，票档
+    （engine 片）只为它付一遍 8 局的钱。
+    """
+    lines: list[str] = []
+    violations: list[str] = []
+    original = heuristic_scoring._SCORERS
+
+    def wrap(kind, scorer):
+        def recorded(query, action):
+            with heuristic_scoring.Score.tracing():
+                value = scorer(query, action)
+            items = getattr(value, "items", None)
+            if items is None:
+                violations.append(
+                    f"{kind.name}@{query.actor}#{query.seq}: 返回了裸 float，没有分项"
+                )
+            else:
+                total = sum(item for _, item in items)
+                if not items:
+                    violations.append(
+                        f"{kind.name}@{query.actor}#{query.seq}: 这个候选没有分项"
+                    )
+                elif not math.isclose(total, value, rel_tol=1e-12, abs_tol=1e-12):
+                    violations.append(
+                        f"{kind.name}@{query.actor}#{query.seq}: {value!r} != {items!r}"
+                    )
+            lines.append(
+                f"{kind.name}|{query.actor}|{query.seq}|{action!r}|{value!r}"
+            )
+            return value
+
+        return recorded
+
+    heuristic_scoring._SCORERS = MappingProxyType(
+        {kind: wrap(kind, scorer) for kind, scorer in original.items()}
+    )
+    try:
+        for seed in PARITY_SEEDS:
+            engine = Engine.new_game(
+                seed=seed,
+                rule_config=RuleConfig(player_count=5),
+                pack=PACK,
+                hero_pool=(),
+            )
+            engine.run(
+                [HeuristicPlayer(_stream(seed, seat)) for seat in range(5)]
+            )
+    finally:
+        heuristic_scoring._SCORERS = original
+    return lines, violations
+
+
+def test_the_score_refactor_keeps_every_candidate_score_float_for_float(_scored_batch):
+    """parity：分项改写前后，同一批询问逐条返回**同一 float**（不是"同一决策"）。"""
+    lines, _ = _scored_batch
+
+    assert len(lines) == PARITY_CANDIDATES
+    digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    assert digest == PARITY_DIGEST, (
+        "分项改写改了分数：先查 Score 的累加次序（整段一次加 vs 逐项加），不要重录摘要"
+    )
+
+
+def test_every_candidate_score_is_the_sum_of_its_own_items(_scored_batch):
+    """trace 打开时，每个候选都有分项、且**分项之和 == 返回值**（同一份代码产出）。"""
+    _, violations = _scored_batch
+
+    assert not violations, "；".join(violations[:5])
+
+
+def test_the_attack_breakdown_survives_the_real_dispatch_path():
+    """票面点名的自洽断言，走**真实产出路径**：``_SCORERS[PLAY_PHASE]`` 打到一张【杀】上。
+
+    玩家看到的分项必须就是 ``_score_attack`` 那几项——``_score_play_phase → _score_card_use
+    → _score_attack`` 这条链上，外层的 ``add`` 接住内层的 :class:`Scored`，不许把明细抹成
+    一行 "伤害牌 3.75"（Standards 轴 2026-11-23 抓到的正是这一格）。项**顺序**是展示顺序，
+    故断言序列而不是集合。
+    """
+    state = _attack_state(defender_card=_ids("dodge")[0])
+    query = _play_phase_query(state)
+    slash = next(
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    )
+
+    with heuristic_scoring.Score.tracing():
+        value = heuristic_scoring._SCORERS[QueryKind.PLAY_PHASE](query, slash)
+
+    names = [name for name, _ in value.items]
+    assert names == ["伤害牌底价", "目标数", "伤害点数", "目标手牌防御", "敌我关系"]
+    assert sum(item for _, item in value.items) == value
+    # 直接调 `_score_attack` 与经派发表得到的是同一份数值与同一组分项。
+    with heuristic_scoring.Score.tracing():
+        direct = heuristic_scoring._score_attack(slash, query.view)
+    assert float(direct) == float(value) and direct.items == value.items
+
+
+def test_the_distribute_scorer_exports_items_too():
+    """``DISTRIBUTE`` 在 8 种子批里出现 0 次，故补一条**构造局面**。
+
+    "每个打分器一条自洽断言"的兜底：``_score_distribute`` 的累加方式也改了，不能只靠批次
+    抽样；判据与批次同一条——分项非空、**分项之和 == 返回值**。
+    """
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=[
+            SeatSpec(identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+        ],
+        deck=(),
+        turn_seat=0,
+    )
+    for seat in (1, 3):
+        state.players[seat].identity_visible = True
+    payload = DistributeContext(
+        skill_id="hero.shen_zhouyu.yeyan",
+        seats=(0, 1),
+        max_total=2,
+        per_seat_max=2,
+    )
+    query = DistributeQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请为角色分配点数。",
+        legal_actions=legal_actions_for(
+            state, 0, QueryKind.DISTRIBUTE, answers_seq=1, payload=payload
+        ),
+        view=project(state, 0),
+        skill_id=payload.skill_id,
+        seats=payload.seats,
+        max_total=payload.max_total,
+        per_seat_max=payload.per_seat_max,
+    )
+
+    with heuristic_scoring.Score.tracing():
+        value = heuristic_scoring._SCORERS[QueryKind.DISTRIBUTE](
+            query, Distribute(counts=((1, 2),), answers_seq=1)
+        )
+
+    assert value.items == (("分配点数", 4.0),)
+    assert sum(amount for _, amount in value.items) == value
+
+
+def test_the_score_accumulator_is_on_the_public_agents_surface():
+    """外部（回放台 / 票 03）只从 ``sgs.agents`` 再导出取公开名，不深导子模块。"""
+    from sgs.agents import Score
+
+    assert Score is heuristic_scoring.Score
+
+
+def test_no_scorer_mutates_its_total_outside_the_score_accumulator():
+    """源码扫描：``_score_*`` 体内不许裸 ``total +=`` / ``score = …``，只许经 ``Score.add``。
+
+    三条机械判据：① 没有裸的 ``+=`` / ``-=``；② ``total`` 只赋值一次（``= Score()``）；
+    ③ 每条 ``return`` 都经 :meth:`Score.finish`（或单分项 / 一收一付的 `_item_score` /
+    `_net_score` / 另一个打分器的委托），否则那条路径的分项不会交给 trace。先例是
+    ``tests/test_card_family_sites.py`` 的同一种机械纪律：分项若还能绕过累加器，
+    "分项之和 == 返回值"就只是在抽样上成立。
+    """
+    tree = ast.parse(HEURISTIC_SOURCE.read_text(encoding="utf-8"))
+    scorers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_score_")
+    ]
+    offenders: list[str] = []
+    unconverted: list[str] = []
+    building = {"Score", "_item_score", "_net_score"}
+    delegated = {"_trick_expectation", "_skill_value"}
+    for scorer in scorers:
+        found = {
+            inner.func.id
+            for inner in ast.walk(scorer)
+            if isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id in building
+        }
+        if not found:
+            unconverted.append(scorer.name)
+        for inner in ast.walk(scorer):
+            if (
+                isinstance(inner, ast.AugAssign)
+                and isinstance(inner.target, ast.Name)
+                and inner.target.id in {"score", "total"}
+            ):
+                offenders.append(f"{scorer.name}:{inner.lineno}")
+            if isinstance(inner, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in {"score", "total"}
+                for target in inner.targets
+            ):
+                builds = (
+                    isinstance(inner.value, ast.Call)
+                    and isinstance(inner.value.func, ast.Name)
+                    and inner.value.func.id == "Score"
+                )
+                if not builds:
+                    offenders.append(f"{scorer.name}:{inner.lineno}")
+            if isinstance(inner, ast.Return):
+                value = inner.value
+                finished = isinstance(value, ast.Call) and (
+                    (
+                        isinstance(value.func, ast.Attribute)
+                        and value.func.attr == "finish"
+                    )
+                    or (
+                        isinstance(value.func, ast.Name)
+                        and (
+                            value.func.id.startswith("_score_")
+                            or value.func.id in building
+                            or value.func.id in delegated
+                        )
+                    )
+                )
+                if not finished:
+                    offenders.append(f"{scorer.name}:{inner.lineno} 的返回没有 finish")
+
+    assert not offenders, "这些行绕过了 Score.add / finish：" + "、".join(offenders)
+    assert not unconverted, "这些打分器还没接进 Score：" + "、".join(unconverted)
+    # 票面写"40 个"是陈数；改写当天实测 **45** 个 `_score_*`（`_item_score` 等不算打分器）。
+    # 只钉下限：新武将加打分器不该让这条红，但它必须也走累加器（上面两条已经逐个数过）。
+    assert len(scorers) >= 45
 
 
 # ---------------------------------------------------------------------------

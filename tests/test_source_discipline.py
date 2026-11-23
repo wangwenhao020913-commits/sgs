@@ -531,7 +531,10 @@ HEURISTIC = SOURCE_ROOT / "agents" / "heuristic.py"
 
 HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "__future__": frozenset({"annotations"}),
-    "collections.abc": frozenset({"Callable", "Mapping", "Sequence"}),
+    # ai-view 票 02：``Score.tracing`` 的上下文管理与 trace 的类型标注——两个都是纯标准库，
+    # 不碰任何游戏状态（与本扫描要拦的"全知面"无关）。
+    "collections.abc": frozenset({"Callable", "Iterator", "Mapping", "Sequence"}),
+    "contextlib": frozenset({"contextmanager"}),
     "types": frozenset({"MappingProxyType"}),
     # W7-03（D5）：目标集合比较与确认解析器共用一份（纯函数，不碰状态 / 规则）。
     # M5-07：AI 按**行为表**认【杀】族（火 / 雷 / 转化与虚拟产物），不抄牌名集合。
