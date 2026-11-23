@@ -292,11 +292,15 @@ ini 不静默改时长）；`descriptions.json` 有 6 处「以牌面逐字开�
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。
-- **已知偶发（不是判据）**：`ui_smoke.mjs` 开局段的 `settleOpening` 会偶发 60 s 停滞，
-  报错串形如 `开局批播完之后没有拿到下一份视图……4xxx 轮 / 6000x ms`。2026-11-14 起的门禁
-  日志里出现过约十次（≈12% 的全量档），与具体武将 / 改动无关（同一条请求体用真 HTTP 复跑
-  0.5 s 内即停在人类询问上）。处置：**原地重跑门禁 / 重跑 CI**，不要为它改前端——真卡死会在
-  别的断言先红。
+- **`settleOpening` 的 60 s 停滞已收口（settle-opening-race 票 01，2026-11-23）**：根因不在
+  前端——`GET /api/sessions/<id>` 会推进引擎，而 `finishPlayback` 的立即 `refresh()` 不 await，
+  `settleOpening` 又补一条取增量；两条请求并发 `engine.run`（接入层是 `ThreadingHTTPServer`，
+  注册表原先不加锁）会把会话打坏，之后每条请求都错，烟测就在那 60 s 空转（报错串形如
+  `开局批播完之后没有拿到下一份视图……4xxx 轮 / 6000x ms`）。现在
+  `serve.py:GameRegistry.request_scope()` 把「读会话 → 推进 → 落盘 → 出视图」串行化（取增量 /
+  应答 / 预览 / 建局同一把锁），烟测这条重复取增量**保留**——它就是这条保证的压力样本。
+  若再见同一条报错串：按回归处理，先看
+  `tests/test_web.py::test_two_concurrent_increments_on_one_session_are_serialized`。
 - `tests/smoke-web.sh`：临时服务 + `ui_smoke.mjs` + 收尾（实测 60–70 s）。**给人用的快回路**，
   不在 `tests/run_all.sh` 里。
 - `tests/test_web_static.py`：静态清单（脚本顺序 / strict）、身份配比副本、CSS 设计单位，

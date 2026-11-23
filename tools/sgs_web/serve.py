@@ -64,8 +64,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Final
@@ -445,6 +447,11 @@ class GameRegistry:
         self.presets_path = self.runs_dir / HERO_PRESETS_FILENAME
         self._counter = 0
         self._finished_order: list[str] = []
+        # 会话请求锁（settle-opening-race 票 01）：**一次会话请求 = 一个原子步骤**。
+        # 见 :meth:`request_scope` 的 docstring——取增量不是只读的，两条并发请求会同时
+        # 推进引擎。可重入（与 `ScriptRuns` 的锁同姿态）：锁内的调用链以后若再取一次锁
+        # （例如从某个请求路径里调 `create`），不该自锁。
+        self._lock = threading.RLock()
         # 剧本模式接入层（M7 票 19）：存档 I/O / 端点语义 / 战斗会话 / 进程内锁。
         # 它**复用本注册表的会话表**（``sessions``）：剧本的战斗就是一局 PvE 会话，
         # 录像与轮询走同一批既有入口，不另建第二套注册表。
@@ -453,6 +460,31 @@ class GameRegistry:
         # 校验面板 / D30 删除规则。与 ``script`` 分住两个模块：一个是运行期存档，
         # 一个是编辑器库文件，只是都落在同一个 ``runs/``。
         self.editor = ScriptLibraryStore(runs_dir=self.runs_dir)
+
+    # -- 请求锁（settle-opening-race 票 01） --------------------------------
+
+    @contextmanager
+    def request_scope(self) -> Iterator[None]:
+        """一次会话请求的互斥区：同一注册表同一时刻只有一个请求在推进会话。
+
+        **为什么需要**：``GET /api/sessions/<id>`` 不是只读的——它 ``advance_clock``（驱动
+        引擎到下一个暂停点 / 超时代答）再出视图，一次请求就是一个推进步（D16）。接入层是
+        :class:`ThreadingHTTPServer`，而客户端**会**在同一刻发两条：开局收口时
+        ``finishPlayback`` 的立即 ``refresh()`` 不 await，烟测 ``settleOpening`` 又紧接着补
+        一条；真实浏览器里 2 s 轮询也可能撞上一条还没回包的 refresh / 提交。两条请求同时
+        ``engine.run`` 会把引擎打坏（实测：``当前没有待应答的询问`` / ``KeyError`` /
+        ``ValueError``——之后每条请求都错，烟测就停在 60 s 的 ``settleOpening`` 上）。
+
+        **为什么是注册表级的一把锁**：这是单用户自用服务，要的不是吞吐，而是"同一步不被打
+        两遍"；按会话分锁要多管一张锁表（会话回收时摘锁）而换不来可测的收益。锁只包住
+        "读会话 → 推进 → 落盘 → 出视图"，**响应体在锁外发**（慢客户端不占着锁）。
+
+        **锁序**：剧本模式的 :class:`ScriptRuns` 有自己的进程内锁，它会在持锁时调
+        :meth:`create_battle_session`（先剧本锁、后本锁）；本锁包住的路径**从不**回头调
+        :class:`ScriptRuns`，故没有反向的获取顺序。
+        """
+        with self._lock:
+            yield
 
     # -- 将池存档（M6 票 13） ----------------------------------------------
 
@@ -478,7 +510,12 @@ class GameRegistry:
         # 未知档位在这里抛 DataLoadError，由 HTTP 层映射成 400——**先加载、后登记**，
         # 故失败的请求不会在 registry 里留下半局会话。
         pack = load_content_pack(deck_profile=deck_profile)
-        self._counter += 1
+        # 会话表的**读改**（编号 / 登记 / 回收）与请求路径共用一把锁（settle-opening-race
+        # 票 01）：`_prune_abandoned` 会遍历 `sessions`，与并发建局的写入撞上就是
+        # "dictionary changed size during iteration"（同样会把连接打掉）。引擎初始化不占锁。
+        with self._lock:
+            self._counter += 1
+            session_number = self._counter
         session = create_session(
             seed=body.get("seed"),
             player_count=int(body.get("player_count", 8)),
@@ -493,7 +530,7 @@ class GameRegistry:
             # 引擎缺省 OFF 的旧口径由"字段缺席"以外的一切调用方保持，见 AskPolicy。
             ask_policy=parse_ask_policy(body.get("ask_policy")),
             pack=pack,
-            session_id=f"s{self._counter}",
+            session_id=f"s{session_number}",
             # L0 边界（table-ux-overhaul 票 14）：建局响应止于"游戏开始时"派发完——
             # 这是**接入层的建局口径**，故只在这一条生产路径上打开；库层（单测 / 构造
             # 局面夹具）缺省仍是一路驱动到人类第一问。
@@ -504,11 +541,12 @@ class GameRegistry:
             track_display=True,
         )
         session.mark_pending(time.monotonic())
-        self.sessions[session.session_id] = session
-        # **先登记、再回收**（table-ux-overhaul 票 01）：建局这一刻是回收"中途放弃的局"的
-        # 时机——它们不会因为不再有人访问而自己消失。新局刚刚打了"此刻"的访问戳，永远排在
-        # "最近 N 局"里，不会被这一趟误收。
-        self._prune_abandoned(time.monotonic())
+        with self._lock:
+            self.sessions[session.session_id] = session
+            # **先登记、再回收**（table-ux-overhaul 票 01）：建局这一刻是回收"中途放弃的局"的
+            # 时机——它们不会因为不再有人访问而自己消失。新局刚刚打了"此刻"的访问戳，永远排在
+            # "最近 N 局"里，不会被这一趟误收。
+            self._prune_abandoned(time.monotonic())
         return session
 
     def get(self, session_id: str) -> Session:
@@ -535,7 +573,10 @@ class GameRegistry:
         if not isinstance(rule_config, RuleConfig):  # pragma: no cover - 调用方恒传模型
             raise ValueError(f"战斗会话要一份 RuleConfig：{rule_config!r}")
         pack = load_content_pack()
-        self._counter += 1
+        # 与 :meth:`create` 同一条口径：编号 / 登记 / 回收都在会话表的锁里，引擎初始化不占锁。
+        with self._lock:
+            self._counter += 1
+            session_number = self._counter
         session = create_session(
             seed=seed,
             rule_config=rule_config,
@@ -543,13 +584,14 @@ class GameRegistry:
             ai="heuristic",
             timeout_seconds=timeout_seconds,
             pack=pack,
-            session_id=f"s{self._counter}",
+            session_id=f"s{session_number}",
             pause_after_game_start=True,
             track_display=True,
         )
         session.mark_pending(time.monotonic())
-        self.sessions[session.session_id] = session
-        self._prune_abandoned(time.monotonic())
+        with self._lock:
+            self.sessions[session.session_id] = session
+            self._prune_abandoned(time.monotonic())
         return session
 
     # -- 取增量（**超时判定的唯一触发点**） ---------------------------------
@@ -1053,18 +1095,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, load_run(self.registry.runs_dir, name))
                 return
             if parsed.path.startswith("/api/sessions/"):
-                session = self.registry.get(parsed.path[len("/api/sessions/") :])
-                self.registry.advance_clock(session)
-                self.registry.save_if_finished(session)
-                self._send_json(
-                    200,
-                    self.registry.view(
+                # 一次取增量 = 一个原子步骤（settle-opening-race 票 01）：读会话 → 推进 /
+                # 超时代答 → 落盘 → 出视图都在 `request_scope` 里；响应体在锁外发。
+                with self.registry.request_scope():
+                    session = self.registry.get(parsed.path[len("/api/sessions/") :])
+                    self.registry.advance_clock(session)
+                    self.registry.save_if_finished(session)
+                    payload = self.registry.view(
                         session,
                         after=self._after(query),
                         logs_after=self._logs_after(query),
                         display_after=self._display_after(query),
-                    ),
-                )
+                    )
+                self._send_json(200, payload)
                 return
         except KeyError:
             self._send_json(404, {"error": "未知会话"})
@@ -1113,19 +1156,24 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/preview"):
                 session_id = parsed.path[len("/api/sessions/") : -len("/preview")]
-                self._send_json(200, self.registry.preview(self.registry.get(session_id), body))
+                with self.registry.request_scope():
+                    payload = self.registry.preview(self.registry.get(session_id), body)
+                self._send_json(200, payload)
                 return
             if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/answer"):
                 session_id = parsed.path[len("/api/sessions/") : -len("/answer")]
-                session = self.registry.get(session_id)
-                payload = self.registry.answer(
-                    session,
-                    body,
-                    after=self._after(query),
-                    logs_after=self._logs_after(query),
-                    display_after=self._display_after(query),
-                )
-                self.registry.save_if_finished(session)
+                # 提交与在飞的取增量是同一对风险（settleOpening 60 s 偶发的第二面）：
+                # 两条都会推进引擎，故与 GET 走同一把请求锁。
+                with self.registry.request_scope():
+                    session = self.registry.get(session_id)
+                    payload = self.registry.answer(
+                        session,
+                        body,
+                        after=self._after(query),
+                        logs_after=self._logs_after(query),
+                        display_after=self._display_after(query),
+                    )
+                    self.registry.save_if_finished(session)
                 self._send_json(200, payload)
                 return
         except KeyError:

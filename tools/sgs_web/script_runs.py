@@ -1009,7 +1009,10 @@ class ScriptRuns:
             if session is not None:
                 # 打完的这一场照常是一份录像（票 04 §4.3 只豁免**被放弃**的战斗）。
                 # 客户端的最后一拍轮询通常已经写过；这里补一次幂等落盘（``_SAVED`` 去重）。
-                self._sessions.save_if_finished(session)
+                # 会话表的读改在注册表的请求锁里（settle-opening-race 票 01）：这一拍可能与
+                # 牌桌的最后一次轮询同时在跑，``_finished_order`` / ``sessions`` 都是共享表。
+                with self._sessions.request_scope():
+                    self._sessions.save_if_finished(session)
             self._kill_battle(run_id)
             events = [event.model_dump(mode="json") for event in result.events]
             if result.run is None:

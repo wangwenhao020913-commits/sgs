@@ -1,4 +1,4 @@
-"""M4 接入层的纯函数与机制单测（票 01 起；不 serve_forever、不连网、**不 import threading**）。
+"""M4 接入层的纯函数与机制单测（票 01 起；不 serve_forever、不连网；只有并发一节起线程）。
 
 本文件刻意不住在 ``src/sgs/`` 的测试域里——它测的是 ``tools/sgs_web/``。
 ``sys.path`` 引导只做一次（见 :func:`_bootstrap`），让 ``sgs`` 与 ``sgs_web`` 都可导入。
@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -950,12 +952,16 @@ def _raw_response_from_the_real_handler(handler_cls, raw: bytes) -> bytes:
     return socket._writer.getvalue()
 
 
-def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, dict]:
+def _post_with_the_real_handler(
+    registry, path: str, body: dict, *, quiet: bool = False
+) -> tuple[int, dict]:
     """把一条 POST 交给**真的** ``serve._Handler``（进程内；不开端口、不起线程）。
 
     未知档位的 400 是 **HTTP 层**的判据，只能从 handler 的响应里读。假 socket 只补
     stdlib handler 需要的两个动作（``makefile`` / ``sendall``）：请求 / 响应仍按 HTTP
     报文走，解析、路由、状态码与 JSON 都是产品代码给出的。
+
+    ``quiet=True`` 只关访问日志（并发用例在同一进程里连打几条，别把日志混进 pytest 输出）。
     """
 
     from sgs_web.serve import _Handler
@@ -965,19 +971,22 @@ def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, d
         f"POST {path} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\n"
         f"Content-Length: {len(payload)}\r\n\r\n"
     ).encode("ascii") + payload
-    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
+    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry, "quiet": quiet})
     response = _raw_response_from_the_real_handler(handler_cls, raw)
     head, _, response_body = response.partition(b"\r\n\r\n")
     status = int(head.split(b" ", 2)[1])
     return status, json.loads(response_body.decode("utf-8"))
 
 
-def _get_with_the_real_handler(registry, path: str) -> tuple[int, dict]:
-    """GET 版：同 :func:`_post_with_the_real_handler`，报文与解析都走真的处理器。"""
+def _get_with_the_real_handler(registry, path: str, *, quiet: bool = False) -> tuple[int, dict]:
+    """GET 版：同 :func:`_post_with_the_real_handler`，报文与解析都走真的处理器。
+
+    ``quiet=True`` 只关访问日志（并发用例在同一进程里连打几条，别把日志混进 pytest 输出）。
+    """
     from sgs_web.serve import _Handler
 
     raw = f"GET {path} HTTP/1.1\r\nHost: test\r\n\r\n".encode("ascii")
-    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
+    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry, "quiet": quiet})
     response = _raw_response_from_the_real_handler(handler_cls, raw)
     head, _, response_body = response.partition(b"\r\n\r\n")
     status = int(head.split(b" ", 2)[1])
@@ -17660,4 +17669,157 @@ def test_the_auto_start_key_is_absent_for_a_skill_without_a_second_event() -> No
     assert payload is not None and payload["kind"] == "PLAY_PHASE"
     assert "auto_start" not in payload, (
         f"没有两个事件的技能不带自动展开键：{sorted(payload)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 接入层并发（settle-opening-race 票 01）：一次会话请求 = 一个原子步骤
+#
+# 背景：`GET /api/sessions/<id>` **不是只读的**——它会 `advance_clock`（驱动引擎 / 超时代答），
+# 而接入层是 `ThreadingHTTPServer`。开局收口时前端 `finishPlayback` 的立即 refresh 不 await，
+# 烟测 `settleOpening` 紧接着又补一条取增量 ⇒ 两条请求同时 `engine.run`，实测能把引擎打坏
+# （`RuntimeError: 当前没有待应答的询问` 被当成连接丢失 / KeyError 404 / ValueError 400），
+# 之后每条请求都错，烟测就停在那 60 s。这两条用例钉的是**两条请求的先后**，替身只负责把
+# 竞争窗口拉开，不替引擎做任何决定。
+# ---------------------------------------------------------------------------
+
+
+def _create_two_player_session_via_handler(registry) -> dict:
+    """走真的 ``POST /api/sessions`` 建一局 2 人局（与前端 ``startGame`` 同一条路）。"""
+    status, created = _post_with_the_real_handler(
+        registry,
+        "/api/sessions",
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261123,
+            "timeout_seconds": None,
+        },
+        quiet=True,
+    )
+    assert status == 200, (status, created)
+    return created
+
+
+def _increment_path(created: dict) -> str:
+    """真客户端那一条取增量 URL（游标三件套原样带回）。"""
+    return (
+        f"/api/sessions/{created['session_id']}?after={created['cursor']}"
+        f"&logs={created['log_seq']}&display={created.get('display_seq', 0)}"
+    )
+
+
+def _run_two_serialized_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    registry,
+    requests: dict[str, Callable[[], tuple[int, dict]]],
+) -> dict[str, tuple[int, dict]]:
+    """跑两条会话请求并断言它们**串行**：第一条卡在 ``advance_clock`` 里时，第二条不许进同一步。
+
+    替身只把竞争窗口拉开（第一条进到 ``advance_clock`` 就停住），不替引擎做任何决定；放行之
+    后断言进入顺序 = 发起顺序，两条都 200。红 = 两条请求同时推进引擎（把状态打坏的那个交错）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    names = list(requests)
+    assert len(names) == 2, f"只用来跑一对请求：{names}"
+    first_inside = threading.Event()
+    second_inside = threading.Event()
+    release = threading.Event()
+    entries: list[str] = []
+    original = GameRegistry.advance_clock
+
+    def instrumented(self, session, *, drive=True):  # noqa: ANN001, ANN202
+        entries.append(threading.current_thread().name)
+        if len(entries) == 1:
+            first_inside.set()
+            assert release.wait(10), "第一条请求没有被放行"
+        else:
+            second_inside.set()
+        return original(self, session, drive=drive)
+
+    monkeypatch.setattr(GameRegistry, "advance_clock", instrumented)
+
+    responses: dict[str, tuple[int, dict]] = {}
+
+    def hit(name: str) -> None:
+        responses[name] = requests[name]()
+
+    threads = [threading.Thread(target=hit, args=(names[0],), name=names[0], daemon=True)]
+    threads[0].start()
+    assert first_inside.wait(10), f"第一条请求（{names[0]}）没有进到取增量"
+    threads.append(threading.Thread(target=hit, args=(names[1],), name=names[1], daemon=True))
+    threads[1].start()
+    try:
+        # 第一条还卡在 advance_clock 里：第二条若也进来，就是两条请求同时推进引擎（红）。
+        assert not second_inside.wait(1.0), f"两条请求同时推进了引擎：{entries}"
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(10)
+    assert not any(thread.is_alive() for thread in threads), "请求没有在预算内收尾"
+    assert entries == names, f"第二条必须在第一条放行之后才进（串行）：{entries}"
+    for name in names:
+        status, body = responses[name]
+        assert status == 200, f"{name} 没有拿到视图：{status} {body}"
+    return responses
+
+
+def test_two_concurrent_increments_on_one_session_are_serialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两条取增量同时到：第二条必须等第一条落地，不许一起推进引擎。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    created = _create_two_player_session_via_handler(registry)
+    path = _increment_path(created)
+    responses = _run_two_serialized_requests(
+        monkeypatch,
+        registry,
+        {
+            "first": lambda: _get_with_the_real_handler(registry, path, quiet=True),
+            "second": lambda: _get_with_the_real_handler(registry, path, quiet=True),
+        },
+    )
+    for name, (_, body) in responses.items():
+        assert body["pending"] is not None, (
+            f"{name} 没有停在人类的第一个询问上：{body['pending']!r}"
+        )
+
+
+def test_an_answer_waits_for_the_in_flight_increment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """轮询撞提交：应答也要排在在飞的取增量之后（只锁取增量是不够的）。
+
+    真实浏览器里，玩家的「提交」与还没回包的 2 s 轮询就是这一对请求——两条都会推进引擎
+    （``submit_answer`` → ``drive`` 与 ``advance_clock``），交错同样能把状态打坏。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    created = _create_two_player_session_via_handler(registry)
+    status, first_view = _get_with_the_real_handler(
+        registry, _increment_path(created), quiet=True
+    )
+    assert status == 200 and first_view["pending"] is not None, first_view
+    pending = first_view["pending"]
+    assert pending["legal_actions"], "人类第一问必须带候选（提交要原样取自它）"
+    answer_path = (
+        f"/api/sessions/{created['session_id']}/answer"
+        f"?after={first_view['cursor']}&logs={first_view['log_seq']}"
+        f"&display={first_view.get('display_seq', 0)}"
+    )
+    _run_two_serialized_requests(
+        monkeypatch,
+        registry,
+        {
+            "poll": lambda: _get_with_the_real_handler(
+                registry, _increment_path(created), quiet=True
+            ),
+            "answer": lambda: _post_with_the_real_handler(
+                registry, answer_path, {"action": pending["legal_actions"][0]}, quiet=True
+            ),
+        },
     )
