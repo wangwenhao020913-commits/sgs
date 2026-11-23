@@ -4,8 +4,13 @@
  */
 "use strict";
 
+/** 身份 → 中文（回放页用；牌桌的身份标签走服务端下发的 `identity_label`）。
+ *
+ * 键必须与 `sgs.data.Identities` 的**英文值**逐字一致：内奸是 `renegade`——早先这里写的是
+ * `traitor`，那一格从来没被发到过，于是回放页把内奸印成 `renegade`（`endgame-identities`
+ * 票 01 做终局亮身份时才发现）。查不到就原样印，不猜。 */
 function identityLabel(identity) {
-  return { lord: "主公", loyalist: "忠臣", rebel: "反贼", traitor: "内奸" }[identity] || identity;
+  return { lord: "主公", loyalist: "忠臣", rebel: "反贼", renegade: "内奸" }[identity] || identity;
 }
 
 /** 一张卡片的节点：U1-02 起是**完整卡面**（88×124，`card-view.js` 的 `cardFaceNode`）。

@@ -977,7 +977,8 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .identity-badge.lord { color: #fff; background: #b8860b; border-color: #b8860b; }
 .identity-badge.loyalist { color: #fff; background: #2f5d8a; border-color: #2f5d8a; }
 .identity-badge.rebel { color: #fff; background: var(--accent); border-color: var(--accent); }
-.identity-badge.traitor { color: #fff; background: #6b5b4b; border-color: #6b5b4b; }
+/* 内奸：引擎发的是 `.renegade`；`.traitor` 是早先拼错的老类名，留着不伤（没有代码再发它）。 */
+.identity-badge.renegade, .identity-badge.traitor { color: #fff; background: #6b5b4b; border-color: #6b5b4b; }
 .identity-badge.hidden { color: #a89780; background: #f4eee2; border-style: dashed; }
 .identity-badge.none { display: none; }
 

@@ -3135,6 +3135,18 @@ setSelect("r-log-mode", "all");
 ui.state.replay.index = ui.state.replay.records.length - 1;
 ui.renderReplay();
 check(`回放页渲染出 ${seats} 个座位`, $("r-seats").children.length === seats, `${$("r-seats").children.length}`);
+// 回放是**上帝视角**（`06` §5 账本）：座位行直接写出身份，不是「—」。这条钉住用户
+// 2026-11-23 那条诉求在回放面的答案——牌桌**终局**亮身份（`endgame-identities` 票 01），
+// 回放本来就一直亮着（同一份 `identity_deal` 记录，回放不按查看者裁）。
+// 读 `text()` 而不是 `textContent`：座位行是 `innerHTML` 铺的，垫片的 `textContent`
+// 只拼子节点、不剥 `_html` 里的标签（`text()` 才剥）。
+const replaySeatLines = Array.from($("r-seats").children).map((node) => node.text());
+// 身份标签必须是**中文四值**之一：早先 `identityLabel` 把内奸的键写成 `traitor`（引擎发的是
+// `renegade`），回放页便把内奸原样印成 `renegade`——这条同时钉住那个错。
+check("回放页座位行亮出身份（中文四值，不是「—」/ 英文值）",
+  replaySeatLines.length === seats
+    && replaySeatLines.every((text) => /身份 (主公|忠臣|反贼|内奸)/.test(text)),
+  replaySeatLines.map((text) => (text.match(/身份 \S+/) || ["?"])[0]).join(" / "));
 check("回放页显示逐座位武将（侧车 meta）", $("r-heroes").textContent.split("  ").length === seats, $("r-heroes").textContent.slice(0, 70));
 check("回放页事件流有内容", $("r-log").children.length > 0, `${$("r-log").children.length} 条`);
 check("回放位置指示到末尾", $("r-pos").textContent.includes(String(ui.state.replay.records.length)), $("r-pos").textContent);
