@@ -65,6 +65,7 @@ from sgs.state import (
     ActivateSkill,
     CardRef,
     CardTag,
+    Cause,
     ChainedChangeDelta,
     FlippedChangeDelta,
     FrameKind,
@@ -1428,11 +1429,63 @@ def timing_hooks_present(state: GameState, timing: Timing) -> bool:
     )
 
 
+ACTIVATE_TRIGGER = "activate"
+"""**无流水线主动技**的触发点名（ai-view 票 04 / spec §2.5）。
+
+效果编号的触发点对主动技 = 它的 ``SkillFlow.name``；但 A 族里仍有一批技能只有手写
+发动回调（:data:`~sgs.skills.ACTIVATIONS`）、没有流水线。它们的"效果"就是 SKILL 帧的
+唯一步骤（:func:`sgs.engine.steps.skill_activate`），故触发点取这个**机械常量**——
+不是一张手写效果名表：名字只区分"有流水线 / 没有流水线"两种形状。
+"""
+
+
+def source_key(source: SkillSource) -> str:
+    """技能来源的规范文本 ``<来源种类>:<牌 id / 技能 id>``（ai-view 票 04）。
+
+    它是 :func:`instance_key` 的**第三四段**：两张同名装备挂在同一座位上是两个实例，
+    只按 ``skill_id`` 折叠会把它们的公开事实归成一条。武将牌 / 获得 / 遗物一类不是牌的
+    来源只带 ``skill_id``，**绝不**造 ``card_id``（同 :class:`SkillSource` 的纪律）。
+    """
+    ref = source.card_id if source.card_id is not None else source.skill_id
+    return f"{source.kind.value}:{ref}"
+
+
+def cause_for_hook(instance: SkillInstance, item: Hook | Seam) -> Cause:
+    """一条钩子 / 接缝的**起因**（ai-view 票 04）：效果编号由声明机械派生。
+
+    触发点：钩子 = ``Hook.timing``；接缝 = ``seam:<kind>``。序 = **同一触发点**里的第几条
+    （按声明顺序、对象身份）。不手写效果名表：语义住在声明里，不住在位置里。
+
+    回调只能来自本实例的声明（:func:`_matching_hooks` / :func:`_matching_seams` 的唯一
+    产出）；传错对象时**直接炸**，不静默按"第 0 条"记账（那会把两条效果并成一条）。
+    """
+    definition = instance.definition
+    if isinstance(item, Hook):
+        trigger = item.timing.value
+        peers: tuple[Hook | Seam, ...] = tuple(
+            hook for hook in definition.hooks if hook.timing is item.timing
+        )
+    else:
+        trigger = f"seam:{item.kind.value}"
+        peers = tuple(seam for seam in definition.seams if seam.kind is item.kind)
+    order = next((index for index, peer in enumerate(peers) if peer is item), None)
+    if order is None:
+        raise RuntimeError(
+            f"钩子 {item!r} 不在技能 {instance.skill_id!r} 的声明里"
+            "（触发点是从声明派生的，传错对象会让效果编号失真）"
+        )
+    return Cause(
+        owner=instance.owner,
+        skill_id=instance.skill_id,
+        source=source_key(instance.source),
+        trigger=trigger,
+        order=order,
+    )
+
+
 def instance_key(instance: SkillInstance) -> str:
     """实例键的规范文本（``GameState.skill_state`` 的键）。"""
-    source = instance.source
-    ref = source.card_id if source.card_id is not None else source.skill_id
-    return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
+    return f"{instance.owner}:{instance.skill_id}:{source_key(instance.source)}"
 
 
 def round_limit_present(state: GameState, catalog: Mapping[str, SkillDef] | None = None) -> bool:
@@ -2876,20 +2929,36 @@ def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timin
     ``data["source"]`` 是**伤害来源**（【反馈】）/ 牌的使用者（【流离】），不是技能持有者；
     ``timing`` 取派发环当前持有的那个（``dispatch_seam`` 传的是**接缝语境**的时机）。
     二者都不是执行器里的特判，而是"谁在跑、在哪个时机跑"这两条事实的显式传递。
+
+    **起因作用域**（ai-view 票 04）：整条回调套在 ``host.enter_hook_cause`` /
+    ``leave_hook_cause`` 之间——被动技跑在别人的帧里，帧不换、起因换。``"stay"`` 也走
+    ``finally``：挂起后重入会按同一份声明重新压同一层，效果编号因此稳定。宿主不支持这个
+    能力时（测试替身）静默跳过，与 ``_note_activation`` 同一姿态。
     """
-    if item.flow is not None:
-        # 被动侧的持有者**显式**传：帧里的 ``source`` 是伤害来源（【反馈】）/ 使用者
-        # （【流离】），不是技能持有者。``owner=None``（未指定）时执行器才读 ``source``。
-        # 共享技（feng-yujin 票 02）：效果里的"你" = **被问的那个座位**（``ASK_SEAT_KEY``），
-        # 不是实例持有者——否则"每名角色各发动一次"会全算到持有者头上。
-        owner = instance.owner
-        if instance.definition.shared:
-            asker = frame.data.get(ASK_SEAT_KEY)
-            if asker is not None:
-                owner = int(asker)
-        return run_flow(host, frame, item.flow, owner=owner, timing=timing)
-    assert item.handler is not None  # __post_init__ 已保证恰有其一
-    return item.handler(host, frame)
+    # 两个入口**同开同关**：只有 enter 没有 leave 的宿主会漏掉一层作用域（来源与守卫都会
+    # 指向它），故缺一个就当这个能力不存在，与 `_note_activation` 的"能力探测"同一姿态。
+    enter = getattr(host, "enter_hook_cause", None)
+    leave = getattr(host, "leave_hook_cause", None)
+    scoped = enter is not None and leave is not None
+    if scoped:
+        enter(cause_for_hook(instance, item))
+    try:
+        if item.flow is not None:
+            # 被动侧的持有者**显式**传：帧里的 ``source`` 是伤害来源（【反馈】）/ 使用者
+            # （【流离】），不是技能持有者。``owner=None``（未指定）时执行器才读 ``source``。
+            # 共享技（feng-yujin 票 02）：效果里的"你" = **被问的那个座位**（``ASK_SEAT_KEY``），
+            # 不是实例持有者——否则"每名角色各发动一次"会全算到持有者头上。
+            owner = instance.owner
+            if instance.definition.shared:
+                asker = frame.data.get(ASK_SEAT_KEY)
+                if asker is not None:
+                    owner = int(asker)
+            return run_flow(host, frame, item.flow, owner=owner, timing=timing)
+        assert item.handler is not None  # __post_init__ 已保证恰有其一
+        return item.handler(host, frame)
+    finally:
+        if scoped:
+            leave()
 
 
 _SKILL_KEYS_PRIOR = "_skill_keys_prior"

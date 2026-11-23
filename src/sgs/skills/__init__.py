@@ -61,6 +61,7 @@ from sgs.effects import (
 )
 from sgs.state import GameState, RejudgeOffer, Zone
 from .catalog import (
+    ACTIVATE_TRIGGER,
     ACTIVATION_PLANS,
     CARD_REQUEST_WINDOWS,
     CATALOG,
@@ -92,6 +93,7 @@ from .catalog import (
     SkillSourceKind,
     StateChange,
     activation_plan,
+    cause_for_hook,
     awakening_condition_satisfied,
     awakening_skill_awakened,
     damage_point_index,
@@ -99,6 +101,7 @@ from .catalog import (
     dispatch_timing,
     hero_card_zone_key,
     instance_key,
+    source_key,
     is_equipped,
     limited_skill_used,
     lord_skill_allowed,
@@ -392,6 +395,7 @@ REJUDGE_SKILL_IDS: frozenset[str] = rejudge_skill_ids()
 
 __all__ = (
     "ACTIVATIONS",
+    "ACTIVATE_TRIGGER",
     "ACTIVATION_PLANS",
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
@@ -532,6 +536,7 @@ __all__ = (
     "life_after_skill_definitions",
     "activate_skill",
     "activation_plan",
+    "cause_for_hook",
     "advance_provider",
     "apply_modifiers",
     "arrange_activation_plans",
@@ -561,6 +566,7 @@ __all__ = (
     "hero_card_zone_key",
     "hero_zone_skill_definitions",
     "instance_key",
+    "source_key",
     "is_equipped",
     "is_forced_conversion",
     "is_transformed_action",

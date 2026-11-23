@@ -23,9 +23,12 @@ from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 __all__ = [
     "ARMOR_CAP",
     "CardRef",
+    "Cause",
     "DAMAGE_REPLACEMENT_AMOUNT_KEY",
     "DAMAGE_REWRITTEN_KEY",
+    "ENGINE_LEVEL_FACT_CLASSES",
     "CardTag",
+    "FactKind",
     "FrameKind",
     "GameState",
     "HeroCardZone",
@@ -33,8 +36,12 @@ __all__ = [
     "LIFE_DECREASE_HP_LOSS_KEY",
     "Marker",
     "MoveReason",
+    "PUBLIC_SURFACE_RECENT_LIMIT",
     "Phase",
     "Player",
+    "PublicCount",
+    "PublicFact",
+    "PublicSurface",
     "RESPONSE_SUITS_KEY",
     "SEALED_ZONE_EQUIP",
     "SEALED_ZONE_IDS",
@@ -46,6 +53,8 @@ __all__ = [
     "Zone",
     "ZoneRef",
     "ZoneRefField",
+    "delta_subject_seats",
+    "fact_class",
     "zone_sealed",
 ]
 
@@ -1288,6 +1297,329 @@ class Player(BaseModel):
     """
 
 
+# ---------------------------------------------------------------------------
+# 公开面缓冲（ai-view 票 04）：有界的事实流水 + 每座位聚合计数
+# ---------------------------------------------------------------------------
+
+PUBLIC_SURFACE_RECENT_LIMIT = 32
+"""公开面缓冲保留的**最近事实**条数上限（ai-view 票 04；``K ≤ 32``）。
+
+「有界」是硬约束，不是优化：``project()`` 是纯函数、每次询问现算、一局约 340 次
+（``ai-tier2/spec.md:81-83``），历史若是全量事件表就会随局变长。故缓冲只有两份有界数据：
+**最近 K 条**（本常量）与**按（发起座位, 承受座位, 事实类）的聚合计数**（见
+:meth:`PublicSurface.record`）。旧的条目在越过 K 之后被丢弃，计数替它保留长期信号。
+"""
+
+class FactKind(str, Enum):
+    """公开面事实的**两个写入点**（ai-view 票 04 / spec §2.3）。"""
+
+    DELTA = "delta"
+    """变化事实：``Engine.emit_delta`` 落一条 delta 记录的同时盖一条。"""
+
+    ANSWER = "answer"
+    """步骤答案：``Engine.submit`` 接受一条真实动作时盖一条（不是按 ``legal_actions`` 统计）。"""
+
+
+class Cause(_FrozenModel):
+    """一条公开事实的**起因**（ai-view 票 04；``GLOSSARY.md``「起因」）。
+
+    = **发出时的所有者** + 技能实例 + 效果编号。三段缺一不可：
+
+    - ``owner`` 是压**作用域那一刻**的所有者，不是事后折叠时再查的座位："发出时"堵住
+      "技能改座位"——效果中途换了座位，已经发出去的事实仍归**原来那个人**；
+    - ``skill_id`` / ``source`` 一起构成**技能实例**（与 ``skills.instance_key`` 同一口径：
+      ``技能实例 id`` + 实例来源）。来源不能省：两张同名装备挂在同一座位上是两个实例；
+    - ``trigger`` / ``order`` 是**效果编号** ``(技能, 触发点, 序)`` 的后两段（触发点的
+      两档口径见 :data:`sgs.skills.ACTIVATE_TRIGGER`）。
+
+    它**不写语义**：不记"这意味着什么"，也不带任何提示文本——语义归 AI 学（spec §2.3）。
+    """
+
+    owner: int
+    """发出时的所有者（座位号）。"""
+
+    skill_id: str
+    """技能实例 id（全限定 ``skill_id``，如 ``hero.maliang.zishu``）。"""
+
+    source: str
+    """实例来源的规范文本：``<来源种类>:<牌 id / 技能 id>``（与 ``skills.instance_key``
+    的第三四段同源，由 :func:`sgs.skills.source_key` 从 ``SkillSource`` 派生）。"""
+
+    trigger: str
+    """触发点：主动技 = 流水线名（无流水线 = ``sgs.skills.ACTIVATE_TRIGGER``）；被动技 =
+    时机名（``Timing.value``）；帧内接缝 = ``seam:<kind>``。"""
+
+    order: int
+    """该触发点内的第几条（同一时机的第 N 条钩子 / 同一种接缝的第 N 条；主动技恒 0）。"""
+
+    @property
+    def instance_key(self) -> str:
+        """技能实例的规范键（与 ``skills.instance_key`` 逐字同形；测试逐条核这条等式）。"""
+        return f"{self.owner}:{self.skill_id}:{self.source}"
+
+
+class PublicFact(_FrozenModel):
+    """公开面上的一条**事实**（ai-view 票 04 / spec §2.3）。
+
+    两个来源，同一个形状：
+
+    - :attr:`FactKind.DELTA`：``payload`` = 刚落账的 delta 记录（``seq`` / ``frame_id`` /
+      ``depth`` 与牌 / 区域 / 变化量一并保留）——"谁在什么时机做了什么"的**变化**那一半。
+      搬牌的 ``from_zone`` / ``to_zone`` 原样带着，故"拆掉判定区的【乐】"与"拆掉手牌"
+      是本条载荷里两个不同的区（票 04 追加要求 1）；
+    - :attr:`FactKind.ANSWER`：``payload`` = **真实动作**（``UseCard`` / ``Pass`` /
+      ``ActivateSkill`` …），不是 ``legal_actions`` 里的候选——转化 / 预发动 / 借刀附带指定
+      这些复合动作由参与者自建，按候选统计会整类漏掉。多目标牌的 ``targets`` 一并带着，
+      于是"这一发打到了谁"是事实（票 04 追加要求 2；各点伤害另有逐目标的 ``hp_change``
+      事实）。
+
+    它不是一个新记录类型：只住 ``GameState.public_surface``（同 ``Engine.card_events`` /
+    ``life_loss_events`` 的姿态——只 append、不进记录流），故 47 条冻结金录像逐字节不变。
+    **不写语义**：没有 ``meaning`` / ``hint`` / 提示文本类字段。
+    """
+
+    seq: int
+    """锚点 = 这条事实对应的**记录流序号**（delta / action 记录），与记录流同源坐标。"""
+
+    kind: FactKind
+    """这条事实来自哪个写入点。"""
+
+    actor: int | None
+    """这条事实的**发起座位**：有起因 = 起因的发出时所有者；步骤答案 = 应答者；其余取
+    所在帧的 ``source``（帧上没有座位来源 ⇒ ``None``，例如终局收尾 / 无帧的引擎事件）。"""
+
+    targets: tuple[int, ...]
+    """这条事实**涉及**的座位（载荷里本来就有的座位字段；没有单一落点 = 空元组）。
+
+    变化事实取载荷里的座位字段（搬牌取区坐标的座位、体力变化取 ``seat``…）；
+    步骤答案取**动作自己**的 ``targets`` / ``designations``（不掺窗口主体——那是
+    ``window`` 回答的"在什么窗口"）。同一个座位只出现一次。
+    """
+
+    window: str | None = None
+    """步骤答案所属的询问种类（``QueryKind.value``）；变化事实恒 ``None``。
+
+    公开事实不只是一条动作，还包含"这一问是在哪个窗口里问的"——濒死求桃 / 无懈窗口的
+    **未应答**因此也读得出是哪个窗口（``GLOSSARY.md``「公开面」的"在什么时机"）。
+    """
+
+    payload: Any
+    """载荷：delta 记录（变化事实）或动作（步骤答案），原样保存、**不做第二份裁剪**。
+
+    缓冲是**引擎侧事实面**：可见性裁剪的唯一真源是票 05 的可见性表 + 既有的区域可见性
+    规则，票 06 投影视图时才读那一份。本字段在进视图之前不出引擎，故不构成泄露面；
+    在这里先裁一遍只会让"哪份规则算数"变成两处。
+    """
+
+    cause: Cause | None = None
+    """起因；``None`` = **引擎级事件**（摸牌 / 回合切换 / 开局一类，见
+    :data:`ENGINE_LEVEL_FACT_CLASSES`）。技能结算内的事实**不许**缺起因（引擎直接 raise）。"""
+
+
+class PublicCount(_FrozenModel):
+    """公开面的**聚合计数**一格：``(发起座位, 涉及座位, 事实类) -> 次数``（ai-view 票 04）。"""
+
+    owner: int | None
+    """发起座位（口径同 :attr:`PublicFact.actor`）；``None`` = 无单一发起者。"""
+
+    seat: int | None
+    """这条事实**涉及**的那一个座位（发起方 / 接收方 / 被作用方都算，按区坐标或载荷里的
+    座位字段机械取值）；``None`` = 没有单一座位（洗牌、无落点的动作）。"""
+
+    kind: str
+    """事实类（机械派生，见 :func:`fact_class`）——不是语义分类。"""
+
+    count: int
+    """出现次数。"""
+
+
+class _DeltaSubject(str, Enum):
+    """``_DELTA_SUBJECT_FIELD`` 里**不是字段名**的两档（闭集）。"""
+
+    NONE = "none"
+    """这条 delta 没有单一**涉及**座位（洗牌）。"""
+
+    ZONE_COORDS = "zone_coords"
+    """座位**分住两个区坐标**（``card_move`` 的 ``from_zone`` / ``to_zone``）。"""
+
+
+_DELTA_SUBJECT_FIELD: dict[str, str | _DeltaSubject] = {
+    "card_move": _DeltaSubject.ZONE_COORDS,
+    "hp_change": "seat",
+    "armor_change": "seat",
+    "hp_max_change": "seat",
+    "chained_change": "seat",
+    "flipped_change": "seat",
+    "marker_change": "seat",
+    "wine_change": "seat",
+    "card_reveal": "seat",
+    "pindian": "targets",
+    "deck_shuffle": _DeltaSubject.NONE,
+    "identity_deal": "seat",
+    "identity_reveal": "seat",
+    "skill_gain": "seat",
+    "skill_lose": "seat",
+    "skill_suppress": "seat",
+    "tag_add": "owner",
+    "tag_remove": "owner",
+    "turn_change": "seat",
+}
+"""``delta_type -> 载荷里那个**座位**字段``（ai-view 票 04 的聚合计数用）。
+
+这是**结构**登记（哪个字段是座位），不是语义登记（这个字段意味着敌意 / 有利）。新增
+delta 类型必须在这里登记（``tests/test_public_surface.py`` 与 ``deltas`` 的模型集**双向**
+核对）。三档取值：字段名 / :attr:`_DeltaSubject.NONE`（没有落点）/ :attr:`_DeltaSubject.ZONE_COORDS`
+（两个区坐标各带一个座位，见 :func:`delta_subject_seats`）。
+"""
+
+
+def delta_subject_seats(delta: Any) -> tuple[int, ...]:
+    """一条变化事实**涉及**的座位（机械派生，只读 :data:`_DELTA_SUBJECT_FIELD`）。
+
+    ``card_move`` 特殊一档：它有两个区，"谁的区域被动了"由**区坐标自己的座位**回答
+    （取牌的一方 / 接牌的一方，按来源区在前、目标区在后去重）；两个区都没有座位
+    （牌堆 → 处理区一类的公共区）才退回 ``owner``（这条移动的归属角色：判定牌 = 被判定者）。
+    其余类型只读载荷里那一个座位字段。未登记的类型 ``KeyError``（fail-closed：新 delta
+    必须先登记，不许静默没有落点）。
+    """
+    delta_type = str(getattr(delta, "delta_type"))
+    field = _DELTA_SUBJECT_FIELD[delta_type]
+    if field is _DeltaSubject.ZONE_COORDS:
+        seats: list[int] = []
+        for zone in (delta.from_zone, delta.to_zone):
+            seat = zone.seat
+            if seat is not None and int(seat) not in seats:
+                seats.append(int(seat))
+        if seats:
+            return tuple(seats)
+        owner = delta.owner
+        return () if owner is None else (int(owner),)
+    if field is _DeltaSubject.NONE:
+        return ()
+    value = getattr(delta, field)
+    if isinstance(value, tuple):
+        return tuple(int(seat) for seat in value)
+    return () if value is None else (int(value),)
+
+
+def fact_class(fact: PublicFact) -> str:
+    """一条公开事实的**机械类别**（聚合计数的第三维）。
+
+    - 变化事实：``move:<原因>``（搬牌）/ ``delta:<类型>``（其余）；
+    - 步骤答案：``answer:<行动构造子>``。
+
+    它只回答"这是哪一种事实"，**不**回答"这是敌意还是有利"——后者由读方自己定
+    （spec §2.3 的"不写语义"；身份推断是票 07 的事）。
+    """
+    if fact.kind is FactKind.ANSWER:
+        return f"answer:{getattr(fact.payload, 'kind', '?')}"
+    if str(getattr(fact.payload, "delta_type", "")) == "card_move":
+        return f"move:{fact.payload.reason.value}"
+    return f"delta:{getattr(fact.payload, 'delta_type', '?')}"
+
+
+ENGINE_LEVEL_FACT_CLASSES: frozenset[str] = frozenset(
+    {
+        "delta:armor_change",
+        "delta:card_reveal",
+        "delta:chained_change",
+        "delta:deck_shuffle",
+        "delta:flipped_change",
+        "delta:hp_change",
+        "delta:hp_max_change",
+        "delta:identity_deal",
+        "delta:identity_reveal",
+        "delta:marker_change",
+        "delta:pindian",
+        "delta:skill_gain",
+        "delta:skill_lose",
+        "delta:skill_suppress",
+        "delta:tag_add",
+        "delta:tag_remove",
+        "delta:turn_change",
+        "delta:wine_change",
+        "move:DISCARD",
+        "move:DRAW",
+        "move:JUDGE",
+        "move:LOSE",
+        "move:PINDIAN",
+        "move:PUT",
+        "move:REFORGE",
+        "move:USE",
+        "answer:ActivateSkill",
+        "answer:ArrangeCards",
+        "answer:Distribute",
+        "answer:DiscardCards",
+        "answer:EndPhase",
+        "answer:Pass",
+        "answer:PlayCard",
+        "answer:Reforge",
+        "answer:SelectCards",
+        "answer:SelectOption",
+        "answer:SelectOptions",
+        "answer:SubstituteJudgeCard",
+        "answer:UseCard",
+    }
+)
+"""**引擎级事实**的封闭清单（ai-view 票 04 的验收「未登记即红」）。
+
+``cause is None`` 只允许出现在这些**事实类**上：摸牌 / 阶段与回合切换 / 开局发牌 /
+玩家自己发起的使用与应答一类核心规则事实。清单的粒度取"事实类"（:func:`fact_class`）
+而不是源码行：事实自己携带的只有这一层身份，行号会漂。新增一种无起因的事实类 ⇒
+``tests/test_public_surface.py`` 判红；技能结算内的事实本来就不许无起因，那一半由引擎在
+写入点直接 raise（:meth:`~sgs.engine.Engine.emit_delta` 的 fail-closed）。
+"""
+
+
+class PublicSurface(BaseModel):
+    """**有界**公开面缓冲（ai-view 票 04）：聚合计数 + 最近 K 条事实。
+
+    它住在 :class:`GameState` 上、**不进记录流**（同 ``Engine.card_events`` /
+    ``life_loss_events`` 的姿态：只 append、不消耗随机数），故 47 条冻结金录像逐字节不变。
+    票 04 只做缓冲；把它有界地交给 ``PlayerView`` 是票 06。
+
+    有界性由构造保证，不是靠"局短"：
+
+    - :attr:`recent` 恒 ≤ :data:`PUBLIC_SURFACE_RECENT_LIMIT` 条（超出的丢最旧的）；
+    - :attr:`counts` 的键空间 = 座位对 × 事实类（``(n + 1)^2 × 类数``，与局长无关）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = 0
+    """盖过戳的事实总数（含已被 :attr:`recent` 淘汰的那些）。"""
+
+    counts: list[PublicCount] = Field(default_factory=list)
+    """聚合计数，按**首次出现序**（确定性；本项目禁无序容器参与顺序）。"""
+
+    recent: list[PublicFact] = Field(default_factory=list)
+    """最近 :data:`PUBLIC_SURFACE_RECENT_LIMIT` 条事实（按发生序）。"""
+
+    def record(self, fact: PublicFact) -> None:
+        """记一条事实：推进总数、更新聚合计数、推进最近窗口（唯一写入口）。"""
+        owner = fact.cause.owner if fact.cause is not None else fact.actor
+        kind = fact_class(fact)
+        seats = fact.targets if fact.targets else (None,)
+        for seat in seats:
+            updated = False
+            for index, entry in enumerate(self.counts):
+                if (entry.owner, entry.seat, entry.kind) == (owner, seat, kind):
+                    self.counts[index] = entry.model_copy(
+                        update={"count": entry.count + 1}
+                    )
+                    updated = True
+                    break
+            if not updated:
+                self.counts.append(
+                    PublicCount(owner=owner, seat=seat, kind=kind, count=1)
+                )
+        self.total += 1
+        self.recent.append(fact)
+        overflow = len(self.recent) - PUBLIC_SURFACE_RECENT_LIMIT
+        if overflow > 0:
+            del self.recent[:overflow]
+
+
 class GameState(BaseModel):
     """一局的全部棋盘状态。
 
@@ -1464,6 +1796,16 @@ class GameState(BaseModel):
 
     **没有任何初始化点**（E5）：无武将模式 ⇒ 恒空元组 ⇒ M2 基准逐字节不变；有武将的
     座位同样不写它（在场是派生出来的，见上）。
+    """
+    public_surface: PublicSurface = Field(default_factory=PublicSurface)
+    """**有界**公开面缓冲（ai-view 票 04）：最近 K 条事实 + 按座位对的聚合计数。
+
+    写入点只有两个（引擎侧）：``Engine.emit_delta``（变化事实）与 ``Engine.submit``
+    （步骤答案）；每条都带 ``Cause`` 或显式的"引擎级"``None``。**不发 delta、不进记录流**
+    （同 ``Engine.card_events`` / ``life_loss_events`` 的姿态）⇒ 47 条冻结金录像逐字节不变；
+    回放重跑引擎时按同一串动作重建，故"解释可从引擎重放重建"对它是结构事实。
+
+    票 04 只做缓冲；**把它交给 ``PlayerView`` 是票 06**（本字段今天只有引擎与测试读）。
     """
 
     def tags_of(self, card_id: int) -> tuple[CardTag, ...]:

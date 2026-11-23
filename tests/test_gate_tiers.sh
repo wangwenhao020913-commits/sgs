@@ -42,10 +42,13 @@ done
 # ---- 2) 票档 ⊆ 全量档 ----
 mapfile -t all_files < <(cd "$ROOT" && find tests -name 'test_*.py' | sort)
 [ "${#all_files[@]}" -gt 0 ] || bad "全量档一个测试文件都没枚举到"
+# 成员判定读**一份**字符串而不是 `printf | grep -q`：grep 命中即关管道，`pipefail` 下
+# printf 会拿到 SIGPIPE、整条管道因此报假失败（本票实跑撞到过一次）。
+all_joined="$(printf '%s\n' "${all_files[@]}")"
 for tier in "${TIERS[@]}"; do
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    printf '%s\n' "${all_files[@]}" | grep -qxF "$f" ||
+    grep -qxF "$f" <<<"$all_joined" ||
       bad "票档 $tier 的 $f 不在全量档的收集集合里（票档必须是子集，不许新造判据）"
   done <<<"${TIER_LIST[$tier]:-}"
 done
@@ -54,7 +57,7 @@ done
 STATS=(tests/test_heuristic_ai.py tests/test_all_ai_games.py)
 for heavy in "${STATS[@]}" tests/test_fuzz.py tests/test_determinism.py; do
   for tier in "${TIERS[@]}"; do
-    if printf '%s\n' "${TIER_LIST[$tier]:-}" | grep -qxF "$heavy"; then
+    if grep -qxF "$heavy" <<<"${TIER_LIST[$tier]:-}"; then
       bad "$heavy 出现在票档 $tier（统计类 / 慢族只留全量档）"
     fi
   done

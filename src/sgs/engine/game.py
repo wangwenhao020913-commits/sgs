@@ -95,6 +95,7 @@ from sgs.skills import (
     SEAT_PREFIX,
     SKILL_JUDGMENT_CARD_KEY,
     STATE_CHANGE_KEY,
+    ACTIVATE_TRIGGER,
     ActivationCandidate,
     MoveEvent,
     SeamKind,
@@ -131,6 +132,7 @@ from sgs.skills import (
     resolve_instances,
     seat_choice,
     seat_persistent_bonus,
+    source_key,
     start_provider,
     timing_hooks_present,
     transform_candidates,
@@ -145,12 +147,14 @@ from sgs.state import (
     ArmorChangeDelta,
     AskPolicy,
     CardRef,
+    Cause,
     Distribute,
     DistributeContext,
     DistributeQuery,
     CardRevealDelta,
     CardTag,
     ChainedChangeDelta,
+    FactKind,
     FlippedChangeDelta,
     DiscardQuery,
     DodgeContext,
@@ -167,6 +171,8 @@ from sgs.state import (
     MoveReason,
     Pass,
     PeachQuery,
+    PublicFact,
+    PublicSurface,
     Phase,
     PlayPhaseQuery,
     Player,
@@ -208,6 +214,7 @@ from sgs.state import (
     ZoneRef,
     JUDGE_SLOTS,
     SEALED_ZONE_IDS,
+    delta_subject_seats,
     next_alive_seat,
     order_targets,
     parse_action,
@@ -708,6 +715,22 @@ def _response_suits_of(frame: Frame | None) -> tuple[str, ...] | None:
     return None if suits is None else tuple(suits)
 
 
+def _answer_targets(action: Action) -> tuple[int, ...]:
+    """一条**步骤答案**涉及的目标座位（ai-view 票 04 的聚合计数 / 关系面用）。
+
+    只读**真实动作自己**的座位字段：``UseCard.targets`` + 借刀的 ``designations``，按出现
+    序去重。不再掺窗口主体（濒死 / 响应的 ``dying`` / ``target``）——那是"这一问在什么
+    窗口"（:attr:`~sgs.state.PublicFact.window`），不是**这条动作**对谁做的；两件事分开记，
+    事实才与动作逐字对应。
+    """
+    seats: list[int] = []
+    for raw in (*getattr(action, "targets", ()), *getattr(action, "designations", ())):
+        seat = int(raw)
+        if seat not in seats:
+            seats.append(seat)
+    return tuple(seats)
+
+
 def _child_payload(
     kind: FrameKind,
     parent_data: dict[str, Any],
@@ -1000,6 +1023,45 @@ class Engine:
         后返回 ``"stay"``）时 ``_started`` 仍假、本标志已真——:meth:`_step` 据此区分"L0 派发
         进行中，栈要先出空"与"构造局面（``from_state`` + ``push_frame``）里 L0 还没派发过、
         必须先跑 ``_start``"。第一次派发完成后 ``_started`` 是更持久的事实，本标志不必复位。
+        """
+        self._frame_causes: list[Cause | None] = []
+        """**每帧的起因**（ai-view 票 04）：与 ``stack.frames`` **一一对齐**的同长列表。
+
+        压帧时入、出帧时出。非 ``SKILL`` 帧**继承**当前起因：效果压出的子帧（使用 / 结算 /
+        伤害…）是那条技能效果的一部分，它的 delta 归同一个起因；栈顶没有起因时继承
+        ``None``（引擎级帧 = 引擎级事实）。``SKILL`` 帧自带新起因（见 :meth:`_skill_cause`）。
+
+        用**与帧对齐的平行列表**而不是一个"当前起因"标量：帧可以嵌套、也可以由钩子压出后
+        在钩子作用域退出**之后**才真正结算（``_run_item`` 的 ``"stay"``），齐平对齐让
+        "帧活多久、它的效果就归谁"成为结构事实，不依赖调用时序。
+        """
+        self._hook_bodies = 0
+        """正在跑的**钩子 / 接缝回调**层数（ai-view 票 04 的 fail-closed 冗余判据）。
+
+        与 :attr:`_hook_causes` 同一个入口增减，但**独立记账**：起因栈一旦漏压，这个计数仍
+        回答"此刻在不在钩子体里"，守卫因此不会被"作用域层自己坏了"骗过去。
+        """
+        self._hook_causes: list[Cause] = []
+        """正在跑的**钩子 / 接缝**的起因栈（ai-view 票 04）。
+
+        进入 :func:`sgs.skills.catalog._run_item` 压一层、返回时（含 ``"stay"``）弹一层。
+        它就是"被动技跑在别人的帧里"的归因层：帧不换、起因换。挂起重入时按同一份声明
+        重新压同一层（效果编号由声明派生，故两次压的是**同一条**）。
+        """
+        self._cause_mute = 0
+        """**起因静音**计数（ai-view 票 04）：正数时 ``_active_cause`` 恒 ``None``。
+
+        唯一消费者是终局收尾（:meth:`_teardown_processing`）：``finish()`` 可能从**钩子体
+        内部**被调用（短摸 / 摸判定牌直接判平局），那一刻 ``_hook_causes`` 还有一层；收尾
+        的搬牌是**结算结束之后**的引擎动作，不该盖成那条钩子的效果。用计数而不是清空列表：
+        钩子的 ``finally`` 之后还要正常弹它自己那一层（清空会让它对不上账）。
+        """
+        self._pending_answer_cause: Cause | None = None
+        """当前挂起那一问**被提问时**的起因（ai-view 票 04 的第二个写入点）。
+
+        提问发生在技能 / 钩子体内部，而**应答**发生在栈空之后：若在 :meth:`submit` 时现读
+        作用域，钩子层已经退出、答案会丢掉起因。故在 :meth:`ask` 建询问的那一刻把起因
+        定格，答案落账时用它——"步骤答案属于**问出这一步的那条技能**"。
         """
 
         self._frame_seq = 0
@@ -1316,6 +1378,178 @@ class Engine:
             )
         )
 
+    # -- 公开面（ai-view 票 04）---------------------------------------------
+
+    @property
+    def public_surface(self) -> PublicSurface:
+        """本局**有界公开面缓冲**的只读入口（ai-view 票 04；数据住 ``GameState``）。
+
+        它不是记录流：只 append、不进记录、不消耗随机数，故 47 条冻结金录像逐字节不变；
+        回放重跑引擎时按同一串动作重建（"解释可从引擎重放重建"因此是结构事实）。
+        票 04 只做缓冲——把它交给 ``PlayerView`` 是票 06。
+        """
+        return self.state.public_surface
+
+    def _active_cause(self) -> Cause | None:
+        """当前生效的**起因**：最内层钩子 / 接缝 > 最内层帧 > ``None``（引擎级）。
+
+        :attr:`_cause_mute` 为正时恒 ``None``——收尾段明确不属于任何技能。
+        """
+        if self._cause_mute > 0:
+            return None
+        if self._hook_causes:
+            return self._hook_causes[-1]
+        if self._frame_causes:
+            return self._frame_causes[-1]
+        return None
+
+    def _skill_in_flight(self) -> bool:
+        """此刻是否在**技能结算内**——按结算栈 / 钩子体计数判，**不**读起因栈（ai-view 票 04）。
+
+        两条判据：栈上有**经 :meth:`start_skill` 压出的** ``SKILL`` 帧（载荷带 ``skill_id``；
+        裸 ``SKILL`` 帧只是钩子派发用的**承载帧**，不算技能结算），或 :attr:`_hook_bodies`
+        为正（钩子 / 接缝回调正在跑）。它只服务 fail-closed 守卫：用与起因栈**独立**的真源
+        判"该有起因"，才抓得到"作用域没压上"这一类 bug（拿起因栈自己判自己，永远绿）。
+
+        **不**读 ``RUNNING_SKILL_KEY``：那个键在钩子 ``"stay"`` 挂起后仍留在承载帧上
+        （效果还没跑完），而挂起期间引擎会继续走**同一帧**的引擎级步骤（死亡结算 / 奖惩
+        摸牌）——那些事实不是那条技能的效果，不能因此判红。
+        """
+        if self._hook_bodies > 0:
+            return True
+        for frame in self.stack.frames:
+            if frame.kind is FrameKind.SKILL and "skill_id" in frame.data:
+                return True
+        return False
+
+    def _require_cause(self, what: str) -> None:
+        """技能结算内的公开事实**不许**缺起因（ai-view 票 04 的 fail-closed）。
+
+        ``cause is None`` 只允许出现在引擎级事件上（摸牌 / 回合切换 / 玩家自己发起的使用与
+        应答一类，封闭清单见 :data:`~sgs.state.ENGINE_LEVEL_FACT_CLASSES`）。技能结算内
+        走到这里 ⇒ 归因层自己坏了，直接 raise 而不是静默记一条无主事实。
+        """
+        if self._cause_mute > 0:
+            return
+        if self._skill_in_flight():
+            raise RuntimeError(
+                f"技能结算内的公开事实缺起因（{what}）：结算栈上有 SKILL 帧 / 正在跑的钩子，"
+                "但起因作用域是空的——这是归因层的 bug（ai-view 票 04 的 fail-closed）"
+            )
+
+    def _skill_cause(self, *, owner: int, skill_id: str) -> Cause:
+        """一条主动技的起因：所有人取 SKILL 帧的 ``source``，效果编号 = 流水线名 + 0。
+
+        触发点对**有流水线**的技能取 ``SkillFlow.name``；只有手写发动回调的技能取
+        :data:`~sgs.skills.ACTIVATE_TRIGGER`（SKILL 帧的唯一步骤）。两档都由声明派生，
+        不手写效果名表。
+
+        实例来源查不到（只可能是测试注入的合成定义）时回落 ``declared:<技能>``：不伪造
+        某个 ``SkillSourceKind``，也不静默丢掉“来源”这一格。
+        """
+        flow = flow_for(skill_id, state=self.state, owner=owner)
+        source = f"declared:{skill_id}"
+        for instance in resolve_instances(self.state, include_suppressed=True):
+            if instance.owner == owner and instance.skill_id == skill_id:
+                source = source_key(instance.source)
+                break
+        return Cause(
+            owner=owner,
+            skill_id=skill_id,
+            source=source,
+            trigger=ACTIVATE_TRIGGER if flow is None else flow.name,
+            order=0,
+        )
+
+    def _frame_cause(self, frame: Frame) -> Cause | None:
+        """新压的帧归谁：**经 ``start_skill`` 压出的** ``SKILL`` 帧自带起因，其余帧继承当前起因。
+
+        ``SKILL`` 帧并不都来自 :meth:`start_skill`：测试 / 钩子派发会压"承载帧"（载荷只有
+        ``skill_owner``）。那种帧没有技能结算可言，按普通帧处理——继承，而不是拿缺失的
+        ``skill_id`` 去造一个假起因（``KeyError`` 会让合法对局炸掉）。
+        """
+        if frame.kind is FrameKind.SKILL and "skill_id" in frame.data:
+            return self._skill_cause(
+                owner=int(frame.data["source"]), skill_id=str(frame.data["skill_id"])
+            )
+        return self._active_cause()
+
+    def leave_frame_cause(self) -> None:
+        """出帧收尾：弹出与它对齐的起因层（唯一调用点是 :meth:`_after_pop` / :meth:`finish`）。"""
+        if not self._frame_causes:
+            raise RuntimeError("起因作用域不配对：没有可弹出的帧层")
+        self._frame_causes.pop()
+
+    def enter_hook_cause(self, cause: Cause) -> None:
+        """钩子 / 接缝执行前压一层起因（唯一调用点 = ``sgs.skills.catalog._run_item``）。
+
+        被动技跑在**别人的帧**里：帧不换、起因换。效果编号由声明侧派生
+        （:func:`sgs.skills.cause_for_hook`），引擎只负责"记下这一层、并在**独立的**
+        钩子体计数上加一"——后者是 fail-closed 守卫的第二份真源，起因栈坏了它也照样回答
+        "此刻在不在钩子体里"。
+        """
+        self._hook_causes.append(cause)
+        self._hook_bodies += 1
+
+    def leave_hook_cause(self) -> None:
+        """钩子 / 接缝返回时弹一层（含 ``"stay"``：挂起后重入会按同一份声明重新压同一层）。"""
+        if not self._hook_causes:
+            raise RuntimeError("起因作用域不配对：没有可弹出的钩子层")
+        self._hook_causes.pop()
+        self._hook_bodies -= 1
+
+    def _frame_actor(self) -> int | None:
+        """所在帧的 ``source``（座位号）——引擎级事实的**发起座位**（没有帧 ⇒ ``None``）。
+
+        只读帧私有载荷里本来就有的座位事实（使用者 / 伤害来源 / 被判定者…）：一条来自
+        使用链的 ``hp_change`` 因此记得"谁打的"，AoE 的每个目标各自可归因到这一发。
+        """
+        if not self.stack:
+            return None
+        source = self.stack.top.data.get("source")
+        return source if isinstance(source, int) else None
+
+    def _note_public_delta(self, record: Any, cause: Cause | None) -> None:
+        """给一条**变化事实**盖戳并落进公开面缓冲（ai-view 票 04 的第一个写入点）。"""
+        self.public_surface.record(
+            PublicFact(
+                seq=record.seq,
+                kind=FactKind.DELTA,
+                actor=cause.owner if cause is not None else self._frame_actor(),
+                targets=delta_subject_seats(record),
+                payload=record,
+                cause=cause,
+            )
+        )
+
+    def _note_public_answer(self, action: Action) -> None:
+        """给一条**步骤答案**盖戳并落进公开面缓冲（ai-view 票 04 的第二个写入点）。
+
+        记录的是**接受的那条真实动作**，不是 ``legal_actions`` 里的候选：转化 / 预发动 /
+        借刀附带指定这些复合动作由参与者自建，按候选统计会整类漏掉。多目标动作的
+        ``targets`` 一并带着 ⇒ "这一发打到了谁"是事实（票 04 追加要求 2）。
+
+        起因在**提问那一刻**定格（:attr:`_pending_answer_cause`）：钩子体在挂起时已经退出
+        作用域，若在这里现读栈，被动技的步骤答案会丢掉起因。
+        """
+        query = self.pending
+        assert query is not None  # 调用点 = `_answer_to`，此刻询问还在
+        cause = self._pending_answer_cause
+        if cause is None:
+            self._require_cause("步骤答案")
+        self.public_surface.record(
+            PublicFact(
+                seq=self._last_seq,
+                kind=FactKind.ANSWER,
+                actor=int(query.actor),
+                targets=_answer_targets(action),
+                window=str(query.kind),
+                payload=action,
+                cause=cause,
+            )
+        )
+        self._pending_answer_cause = None
+
     def journal(self) -> str:
         """canonical JSONL（唯一序列化器的入口）；关记录时是空串。"""
         return dump_journal(self._records)
@@ -1392,7 +1626,17 @@ class Engine:
         return None
 
     def emit_delta(self, delta: Any, *, frame_id: int = 0, depth: int = 0) -> None:
-        self._emit(wrap_delta(delta, seq=self._next_seq(), frame_id=frame_id, depth=depth))
+        """落一条变化事实，并给**公开面缓冲**盖一条同源事实（ai-view 票 04）。
+
+        盖戳用当前的**起因作用域**；技能结算内拿不到起因 = 归因层 bug，直接 raise
+        （fail-closed，见 :meth:`_require_cause`）——不是"记一条无主事实"。
+        """
+        cause = self._active_cause()
+        if cause is None:
+            self._require_cause("变化事实")
+        record = wrap_delta(delta, seq=self._next_seq(), frame_id=frame_id, depth=depth)
+        self._emit(record)
+        self._note_public_delta(record, cause)
 
     def _emit_frame(self, op: str, frame: Frame) -> None:
         self._emit(
@@ -1414,6 +1658,10 @@ class Engine:
         胜负检测点之后**拒绝插入任何新结算**（票 13 §3 / 票 04 §5 的压栈守卫），
         **只放行 DEATH 帧**（票 14 §3）：同批的第二次死亡必须能进入，才谈得上"批次末宣布"。
         M1 无技能，实战天然不发生，守卫仍在，使"检测点之后不再开新结算"是结构事实。
+
+        压栈同时压一层**起因**（ai-view 票 04）：``SKILL`` 帧自带新起因，其余帧继承当前
+        起因。子帧因此与"压它的那条技能效果"同归一人——包括钩子压出、钩子作用域退出之后
+        才真正结算的那一类。
         """
         if self.pending_outcome is not None and kind is not FrameKind.DEATH:
             raise RuntimeError("胜负已判定：拒绝插入新结算（票 13 §3 / 票 04 §5）")
@@ -1422,6 +1670,7 @@ class Engine:
         self._frame_seq += 1
         frame = Frame(kind=kind, data=data, return_to=return_to, frame_id=self._frame_seq)
         self.stack.push(frame)
+        self._frame_causes.append(self._frame_cause(frame))
         self._emit_frame("push", frame)
         return frame
 
@@ -1693,12 +1942,16 @@ class Engine:
         return frame
 
     def _after_pop(self, popped: Frame) -> None:
-        """唯一的出栈收尾：记一条 ``pop``，再跑响应型使用的**成败传播**（票 11 §2）。
+        """唯一的出栈收尾：弹起因层、记一条 ``pop``，再跑响应型使用的**成败传播**（票 11 §2）。
 
         ``pop_frame`` 与 :meth:`_step` 都经这里，故"帧的生命周期"在记录流里没有缺口、
         传播也只可能跑一次。DAMAGE 帧出栈后另跑**连环传导**的引擎规则（M5-03）：它是
         "初始目标的伤害事件处理完之后"由系统决定派发的属性伤害，不是新时机。
+
+        起因层**与帧对齐出栈**（ai-view 票 04）：帧活多久、它的效果就归谁；出栈后的记录
+        （``pop`` 本身不是公开事实）不再读它。
         """
+        self.leave_frame_cause()
         self._emit_frame("pop", popped)
         self._propagate_cancel(popped)
         if popped.kind is FrameKind.DAMAGE:
@@ -6183,6 +6436,9 @@ class Engine:
         self._emit(QueryRecord(seq=seq, query=query))
         self.pending = query
         self._asked_identity = identity
+        # ai-view 票 04：起因在**提问那一刻**定格。应答发生在挂起之后——钩子作用域早已
+        # 退出、甚至帧也换了——故步骤答案的盖戳源必须是这里存下的那一层（见 `_note_public_answer`）。
+        self._pending_answer_cause = self._active_cause()
         return SUSPEND
 
     def _answer_to(self, action: Action) -> None:
@@ -6196,6 +6452,9 @@ class Engine:
             # 病态局面的兜底（见 _ANSWER_BACKLOG_LIMIT）：淘汰最旧的一条，它那一问会重问。
             self._answers.pop(next(iter(self._answers)))
         self._answers[self._asked_identity] = (action, self._structured_activation)
+        # ai-view 票 04 的第二个写入点：把**真实动作**盖戳进公开面（在清 `pending` 之前，
+        # 因为窗口种类 / 应答者 / 窗口主体都要从这一问上读）。
+        self._note_public_answer(action)
         self._asked_identity = None
         self.pending = None
 
@@ -6917,11 +7176,20 @@ class Engine:
         if self.finished:
             return
         while self.stack:
+            # 帧与它的**起因层**一起丢弃（ai-view 票 04）：终局清栈不走 `_after_pop`，
+            # 故这里补一手——否则 `_frame_causes` 会留下一个与空栈不齐的尾巴，而随后的
+            # `_teardown_processing` 会把终局收尾的搬牌错记成最后一个标签技能的效果。
+            self.leave_frame_cause()
             self._emit_frame("discard", self.stack.pop())
         outcome = self.pending_outcome
         if outcome is None or self._check_seq is None:
             raise RuntimeError("没有终局判定就清栈")
-        self._teardown_processing()
+        # 收尾的搬牌**不属于任何技能**（结算已经结束）：静音可能还开着的那层钩子起因。
+        self._cause_mute += 1
+        try:
+            self._teardown_processing()
+        finally:
+            self._cause_mute -= 1
         self._emit(
             GameEndRecord(
                 seq=self._next_seq(),

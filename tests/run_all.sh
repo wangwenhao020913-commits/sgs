@@ -115,6 +115,7 @@ tier_patterns() {
         'tests/test_virtual_ids.py' \
         'tests/test_card_family_sites.py' \
         'tests/test_m5_no_leak.py' \
+        'tests/test_public_surface.py' \
         'tests/test_action_contract.py' \
         'tests/test_timing*.py' \
         'tests/test_dod.py' \
