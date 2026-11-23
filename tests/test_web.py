@@ -1760,6 +1760,43 @@ def test_the_human_seat_learns_its_own_identity() -> None:
     assert me["identity"] is not None, "自己的身份必须可见"
 
 
+def test_the_snapshot_reveals_every_identity_once_the_game_is_over() -> None:
+    """终局亮身份（用户 2026-11-23 直接提）：**局中**一个未知座位都不露，打完全亮。
+
+    判据分两层，盯的是同一条不泄露纪律的两面：
+
+    - **局中**：开局快照里至少有一个「存活且身份为 None」的座位（夹具自检——没有未知座位
+      这条用例就什么也没测到）；
+    - **终局**：`session.engine.finished` 之后，每个座位的 `identity` / `identity_label`
+      都非空，且**逐席等于引擎真值**（不是随便填了个非空就算）。
+
+    亮身份的落点是**网页快照**（`visible_snapshot`），不是 `project()`：记录流与
+    `identity_deal` / `identity_reveal` 的逐条亮身份一字不动 ⇒ 回放与金录像零字节变化。
+    """
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    opening = visible_snapshot(session)
+    assert any(
+        player["identity"] is None and player["alive"] for player in opening["players"]
+    ), "夹具失效：开局就没有未知座位（这一条要盯的正是『局中不露』）"
+
+    _play_to_end(session)
+
+    assert session.finished, "驱动没把这一局走完"
+    payload = visible_snapshot(session)
+    for player in payload["players"]:
+        # 2~8 人身份局的四值（主公 / 忠臣 / 反贼 / 内奸）；`None` 不算过。
+        assert player["identity"] in {"lord", "loyalist", "rebel", "renegade"}, player
+        assert player["identity_label"] in {"主公", "忠臣", "反贼", "内奸"}, player
+    truth = {
+        player.seat: player.identity.value
+        for player in session.engine.state.players
+        if player.identity is not None
+    }
+    assert {player["seat"]: player["identity"] for player in payload["players"]} == truth, (
+        "亮出来的身份必须逐席等于引擎真值"
+    )
+
+
 def test_non_human_queries_are_redacted_in_the_wire_form() -> None:
     """下发的 ``query`` 记录**不带**视角与候选：别人的视角是泄露面（地图 D8）。"""
     session = Session(seed=71, ai="random", timeout_seconds=None, **TWO_PLAYERS)

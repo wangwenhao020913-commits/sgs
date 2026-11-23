@@ -176,6 +176,7 @@ def play(
     queries = 0
     pauses = 0
     game_end: dict[str, Any] | None = None
+    midgame_snapshot: dict[str, Any] | None = None
     reveals: list[dict[str, Any]] = []
 
     def note_pause_records(payload: dict[str, Any]) -> None:
@@ -218,6 +219,9 @@ def play(
             return 1
         cursor = body["cursor"]
         log_seq = body["log_seq"]
+        if midgame_snapshot is None and not body["finished"]:
+            # 局中的那一面：身份可见性在这里判（终局亮身份之后就判不出来了）。
+            midgame_snapshot = body["snapshot"]
         for record in body["records"]:
             if record["kind"] == "action":
                 if record.get("accepted"):
@@ -288,21 +292,36 @@ def play(
             f"PASS 终局与身份胜负一致：side={game_end['side']} winners={game_end['winners']}"
         )
 
-    # 不泄露（判据 2）：人类座位收到的响应体里，**存活**的对手身份必须是 None（主公除外——
-    # 主公身份公开），且任何对手都不出现手牌牌面；牌堆只有数量。
+    # **局中**不泄露（判据 2）：人类收到的那一份**局中**快照里，存活且非主公的对手身份必须是
+    # None。这一面现在必须在**局中**判——终局亮身份之后（`endgame-identities` 票 01，用户
+    # 2026-11-23 裁定）看终局那一份是判不出泄露的。
     # 「已阵亡」是**允许**公开的三种情形之一（`06` §M4 判据 2 的原文），故这里不拦它。
+    if midgame_snapshot is None:
+        print("FAIL 没有取到局中快照：局中的身份可见性无从判断")
+        return 1
+    for player in midgame_snapshot["players"]:
+        if player["seat"] == midgame_snapshot["seat"]:
+            if player.get("identity") in (None, ""):
+                print(f"FAIL 人类座位局中看不到自己的身份：{player}")
+                return 1
+            continue
+        if player["alive"] and player.get("identity") not in (None, "lord"):
+            print(
+                "FAIL 局中泄露了存活对手的身份："
+                f"座位 {player['seat']} identity={player.get('identity')!r}"
+            )
+            return 1
+    print("PASS 局中快照：存活且非主公的对手身份均为空（主公公开）")
+
+    # **终局亮出全场身份**（同一条裁定）：每个座位的 identity / identity_label 都非空。
     snapshot = body["snapshot"]
     seat = snapshot["seat"]
     for player in snapshot["players"]:
-        if player["seat"] == seat:
-            if player.get("identity") in (None, ""):
-                print(f"FAIL 人类座位看不到自己的身份：{player}")
-                return 1
-            continue
-        # 身份可见性：本人 / 主公 / 已亮明 / 阵亡 —— 存活且非主公的对手必须是 ``None``。
-        if player["alive"] and player.get("identity") not in (None, "lord"):
-            print(f"FAIL 存活对手的身份泄露：{player}")
+        if player.get("identity") in (None, "") or player.get("identity_label") in (None, ""):
+            print(f"FAIL 终局没有亮出身份：座位 {player['seat']}")
             return 1
+        if player["seat"] == seat:
+            continue
         if "self_hand" in player or "hand" in player or "hand_cards" in player:
             print(f"FAIL 对手手牌牌面泄露：{player}")
             return 1
@@ -319,7 +338,7 @@ def play(
         print("FAIL 快照没有牌堆数量")
         return 1
     print(
-        "PASS 快照无对手手牌牌面（deck_count=%d，存活对手身份均为空，牌堆只有数量）"
+        "PASS 快照无对手手牌牌面（deck_count=%d，局中身份不露 / 终局身份全亮，牌堆只有数量）"
         % snapshot["deck_count"]
     )
     return 0

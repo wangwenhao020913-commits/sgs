@@ -28,6 +28,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from sgs.data import (
+    IDENTITY_LABELS,
     SkillType,
     hero_by_id,
     hero_card_skill_id,
@@ -717,6 +718,25 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         # `exclude=True`（不进记录流）⇒ 与 `hero_zones` / `hand_limit` 同姿态在这里补进
         # 网页载荷；值**原样**取自投影（不重算、不另造名单），座位卡据此叠红色禁止角标。
         player_payload["sealed_zones"] = list(player.sealed_zones)
+    # 终局亮身份（用户 2026-11-23 直接提）：身份在对局期是隐藏信息，**引擎 `finished` 之后**
+    # 才补进这份网页载荷——`project()` 的可见性、记录流与 `identity_deal` / `identity_reveal`
+    # 的逐条亮身份一字不动（47 条金录像与回放因此零字节变化），局中仍然一个未知座位都不露。
+    # 座位卡的身份徽标本来就按 `identity` 渲染，故这一条**前端零改动**；标签与既有那条同源
+    # （`sgs.data.IDENTITY_LABELS`），不另抄一份中文映射。
+    if getattr(session.engine, "finished", False):
+        for player_payload, engine_player in zip(
+            payload["players"], state.players, strict=True
+        ):
+            identity = engine_player.identity
+            player_payload["identity"] = (
+                None if identity is None else getattr(identity, "value", identity)
+            )
+            # 只写**身份局四值**的标签：PvE 的「友 / 敌」由 `decorate_snapshot` 走另一条
+            # （``pve.seats`` 的来源侧），这里盖上去会把它抹成 None（PvE 终局也在本函数的
+            # 生效范围内）。查不到就**不动**已有的标签。
+            label = None if identity is None else IDENTITY_LABELS.get(identity)
+            if label is not None:
+                player_payload["identity_label"] = label
     # qunying 票 02：判定区里的**转化牌按产物显示**（每帧从 `state.virtual_judge` 现算，
     # 与 `hero_tags` 同姿态只补进网页载荷；没有转化牌的座位一个键都不加）。
     _decorate_judge_products(payload, state, lookup)
