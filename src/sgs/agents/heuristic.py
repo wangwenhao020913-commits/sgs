@@ -66,6 +66,15 @@
 且**够得着才算**（射程变短的替换一律不追加分，见 :func:`_keeps_reach`）；装上不改斩杀 /
 射程可能变短 / 非武器 / 已经装着同一件 ⇒ 逐值不变。不做装备的一般优先级，也不做多步规划。
 
+**盟友负分与主公 veto（`ai-view` 票 01）**：I1 那句"打盟友没有额外惩罚"被推翻——伤害牌
+（:func:`_score_attack`，含 AoE 的逐目标）与单体有害锦囊（:func:`_harmful_trick_relation`）
+都过同一个 :func:`_relation_term`（``_RELATION_FOCUS × (P敌 − P友)``），幅度使**确认
+盟友**的总分低于过牌。主忠方在**出牌阶段挑目标**时主公不可作为目标
+（:func:`_lord_veto_applies` 的规则级 veto）：单靠负分压不住斩杀项（``4.0 + 6.5 − 5.0``），
+故它是"候选不可选"而不是又一项价格。边界：**不碰响应窗口**（借刀逼你砍主公是规则）、
+**全体存活的 AoE 不 veto**（目标挑不了，只按逐目标期望差分）。实机依据 = seed 7032 里
+忠臣三次回头打主公（当时主公是唯一合法【杀】目标）＋同一局拆主公的【过河拆桥】。
+
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
 横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
@@ -101,6 +110,7 @@ from types import MappingProxyType
 
 from sgs.effects import (
     Randomness,
+    TargetCount,
     behavior_for,
     cap_of,
     is_slash,
@@ -501,9 +511,39 @@ _HERO_CARD_EFFECT_VALUE = 2.5
 一将一票可以改自己的选项 id 的登记值来覆盖这条缺省。
 """
 
-_ENEMY_FOCUS = 2.0
-"""伤害目标里"敌人"的加权：乘 ``P(敌)``（I1；已明敌人是 1.0、未知座位按配比），
-小到不盖过手牌防御贴现，只作同价时的偏向。"""
+_RELATION_FOCUS = 5.0
+""""这个目标值不值得打"的关系项幅度：``_RELATION_FOCUS × (P(敌) − P(友))``（`ai-view` 票 01）。
+
+**为什么是这一个式子**：票面要求把 `_score_attack` / `_score_card_use` 从"只按 `P(敌)`
+加权、打盟友不加不减"改成**对称**的关系项（Q4："主公对主忠方硬 veto；其余已明盟友定价
+负分"）。仓里散落四处的同一形状都是 ``k × (P敌 − P友)``——:func:`_luanwu_respond_value`
+的 ``_RESPOND_VALUE × (enemy − ally)``、:func:`_score_distribute` 的 ``2 × (enemy − ally)``、
+:func:`_peach_save_value` 的 ``1 − 2·P(敌)``、:func:`_score_iron_chain` 的
+``−_IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY × ally``。本票**不新造口径**，把这一个式子推广到
+两条主路径（敌 / 友用**同一个**系数才叫"对称"）。
+
+**为什么是 5.0**：票面的判决信号是"确认盟友的总分低于过牌"，而伤害牌有
+:data:`_DAMAGE_BASE` + :data:`_TARGET_BONUS` 的底价 4.0（单体锦囊最高 3.5）⇒ 系数必须
+**盖过底价**：``4.0 − 5.0 = −1.0 < 0``。5.0 就是 :data:`_RESPOND_VALUE`——与
+:func:`_luanwu_respond_value` 的"友 = −5 / 敌 = +5"同价，不另造一个魔数。
+
+取代的是 I1 的 ``_ENEMY_FOCUS``（2.0）：那一档只给敌人加分、盟友一分不扣，正是实机
+seed 7032 里忠臣回头打主公（主公是当时唯一合法【杀】目标）的根因。**敌人一侧因此从 +2
+涨到 +5**：关系项对 P(敌) = 1 的已明敌人更"值得打"，对未知座位按 ``P(敌) − P(友)`` 的
+**正负**取舍（先验偏敌 ⇒ 仍是正项，不会把 AI 变成不出牌的绵羊）。
+
+**它压不住斩杀项**（``4.0 + 6.5 − 5.0 = +5.5``）：主公那一格由
+:func:`_lord_veto_applies` 的**规则级** veto 兜住，其余已明盟友没有这条兜底——两笔账
+分开记，别把 veto 写成"再大一点的负分"。
+"""
+
+_LORD_VETO_PENALTY = -50.0
+"""主忠方把**主公**当目标时的硬 veto 分（Q4）：**不是价格**，是"这个候选不可选"。
+
+只需严格低于任何可选的合法候选（``EndPhase`` = 0、最贵的一张牌的负分也只有 −6 上下），
+不必与 :data:`_ILLEGAL_PENALTY` 同值——那条是"这条应答本身不合法"，语义不同，各有各的
+常量（同 :data:`_ABORT_SKILL_PENALTY` 与 :data:`_ILLEGAL_PENALTY` 分列的理由）。
+"""
 
 _DAMAGE_POINT_VALUE = 1.4
 """每**多一点**实际伤害的加权（藤甲的火焰 +1、【酒】的 +1、古锭刀的 +1）。
@@ -540,8 +580,8 @@ _LETHAL_STRIKE_VALUE = _WINE_LETHAL_VALUE
 spec §6.1 D2 的"改什么"只要求 ``_damage_to >= 体力``，用户故事里的"0 手牌"是**残局
 场景**而不是判据——概率版 P(闪) 归 C1（记牌那票）。
 
-取值只需盖过"两个**非斩杀**目标之间"的常见分差——已明敌人（:data:`_ENEMY_FOCUS` 2.0）
-与手牌贴现（:data:`_HAND_DEFENSE_WEIGHT` × :data:`_HAND_DEFENSE_CAP` = 1.0）之和 3.0——
+取值只需盖过"两个**非斩杀**目标之间"的常见分差——已明敌人（:data:`_RELATION_FOCUS`
+5.0）与手牌贴现（:data:`_HAND_DEFENSE_WEIGHT` × :data:`_HAND_DEFENSE_CAP` = 1.0）之和 6.0——
 就能让"一刀能斩的残局目标"稳过"更健康的敌人"，同时不动伤害牌的整体序（伤害 ＞ 装备 ＞
 过牌）。它不建模"这一刀可能被【闪】抵消"：那是概率贴现，归 C1，本票只做公开可算版。
 """
@@ -1363,7 +1403,11 @@ def _expected_lethal_score(view: PlayerView, seat: int) -> float:
 
 
 def _score_attack(action: Action, view: PlayerView) -> float:
-    """伤害期望：目标非己方恒正；每一点**预期**伤害与"躲掉也消耗一张牌"各自计价。
+    """伤害期望：目标非己方**基本为正**（确认盟友会被关系项压到过牌之下）；每一点
+    **预期**伤害与"躲掉也消耗一张牌"各自计价。
+
+    多目标（【万箭】/【南蛮】/方天三杀）逐目标累加，关系项也逐目标累加 ⇒ "敌方收益 −
+    盟友损失"的期望差分天然成立，不需要第二套 AoE 判据（`ai-view` 票 01）。
 
     ``targets`` 只出现在 :class:`~sgs.state.UseCard` 上；``PlayCard``（打出）无目标，
     故按"无目标"读——打出伤害牌在出牌阶段本就不产生伤害。
@@ -1418,10 +1462,11 @@ def _score_attack(action: Action, view: PlayerView) -> float:
                 score -= hand_defense
             else:
                 score += _expected_attack_score(damage, dodge_probability)
-        # 身份后验（I1）：P(敌) 只作权重——主公对反贼是 1.0，未知座位按配比均分（5 人局
-        # 主公眼里 3/4）；不升格成"必须打谁"的硬判，也不给 P(友) 扣分（与 I1 之前一样，
-        # 打盟友没有额外惩罚）。小到不能盖过"手牌越多越难命中"的贴现。
-        score += _ENEMY_FOCUS * _identity_relation(view, seat)[0]
+        # 关系项（`ai-view` 票 01）：``_RELATION_FOCUS × (P敌 − P友)``。票 21 的"打盟友
+        # 没有额外惩罚"正是实机 seed 7032 里忠臣回头打主公的根因：主公是唯一合法目标
+        # 时这张【杀】拿满底价 4.0，打得到就打。"主公"那一格另有规则级 veto
+        # （:func:`_lord_veto_applies`），因为负分压不住斩杀项。
+        score += _relation_term(view, seat)
         if _lethal_to(card, view, seat):
             score += _expected_lethal_score(view, seat)
     return score
@@ -1557,7 +1602,7 @@ def _score_fire_attack(action: Action, view: PlayerView) -> float:
     for seat in others:
         if _wears(view.players[seat], _VINE_ARMOR):
             score += _FIRE_ATTACK_VINE_BONUS
-        score += _ENEMY_FOCUS * _identity_relation(view, seat)[0]
+        score += _relation_term(view, seat)
     return score
 
 
@@ -1693,6 +1738,9 @@ def _score_card_use(query: Query, action: Action) -> float:
         score = _equip_setup_score(query, card)
     else:
         score = _TRICK_VALUES.get(card.type, _UNREGISTERED_TRICK_VALUE)
+        # 单体有害锦囊按**目标**过关系项（`ai-view` 票 01）：票面那条实机同样的缺口——
+        # 忠臣手里有【过河拆桥】就拆主公。有益 / 自己 / 全体锦囊逐值不变。
+        score += _harmful_trick_relation(action, view)
     return _trick_expectation(query, action, score)
 
 
@@ -1701,10 +1749,17 @@ def _score_play_phase(query: Query, action: Action) -> float:
 
     次序不是死的：装备在"先装后杀才斩得掉"时会被抬到那条【杀】之前（D4，票 25），
     见 :func:`_equip_setup_score`。
+
+    **主公 veto（`ai-view` 票 01 / Q4）**作用在**挑目标**这一层、而不是某项价格里：
+    主忠方把主公当目标的有害候选直接拿 :data:`_LORD_VETO_PENALTY`（见
+    :func:`_lord_veto_applies`）。写成"再大一点的负分"在斩杀那一格会被
+    :data:`_LETHAL_STRIKE_VALUE` 翻回去——忠臣照样一刀砍死 1 体力的主公。
     """
     view = query.view
     if isinstance(action, EndPhase):
         return 0.0
+    if _lord_veto_applies(view, action):
+        return _LORD_VETO_PENALTY
     if isinstance(action, ActivateSkill):
         return _skill_value(query, action)
     if isinstance(action, Reforge):
@@ -2492,6 +2547,94 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
     return (
         sum(1 for identity in remaining if identity in enemies) / unknown,
         sum(1 for identity in remaining if identity in allies) / unknown,
+    )
+
+
+def _relation_term(view: PlayerView, seat: int) -> float:
+    """``seat`` 当**我打出去的那张牌的目标**值多少：``_RELATION_FOCUS × (P敌 − P友)``。
+
+    伤害牌（:func:`_score_attack`）与单体有害锦囊（:func:`_score_card_use`）**共用这一个
+    函数**——同一个"打谁"的语义只留一处实现，别在两处各写一遍（票面的调用面收敛）。式子
+    与 :func:`_luanwu_respond_value` / :func:`_score_distribute` 同形（``k × (敌 − 友)``），
+    系数见 :data:`_RELATION_FOCUS`。
+
+    自己 / 越界座位恒 ``0.0``：牌打在自己身上（【桃】/ 装备 / 判定区 / 闪电这类只对自己的
+    牌）没有"对谁"这一说，别把自伤当成"打盟友"。
+
+    **已明身份与未知座位走同一式子**：``(P(敌), P(友))`` 由 :func:`_identity_relation` 给，
+    算不出时它返回 ``(0, 0)`` ⇒ 本函数也退回 0（与 I1 之前的行为一致）。未知座位的正负号
+    由先验决定（P敌 > P友 ⇒ 正）——扣分不会把"不确定的席位"一起压死。
+    """
+    if seat == view.seat or not 0 <= seat < len(view.players):
+        return 0.0
+    enemy, ally = _identity_relation(view, seat)
+    return _RELATION_FOCUS * (enemy - ally)
+
+
+def _harmful_trick_relation(action: Action, view: PlayerView) -> float:
+    """单体**有害**锦囊的关系项之和；其余锦囊（有益 / 自己 / 全体）恒 ``0.0``。
+
+    修复的那一格：``_score_card_use`` 的非伤害分支原来一律走 :data:`_TRICK_VALUES` 的
+    **常量分、完全不读身份** ⇒ 忠臣手里有【过河拆桥】就拆主公（实机 seed 7032）。
+
+    牌名分类**复用无懈那一族**（:data:`_NULLIFY_HARMFUL_TRICKS`：拆 / 顺 / 乐 / 兵粮 /
+    借刀 …）——"这张牌对目标是不是害"已经有唯一真源，此处不另立一张表。
+
+    已经算过关系项的牌不在这里重算：伤害牌（含【决斗】/【南蛮】/【万箭】）由
+    :func:`_score_attack` 逐目标接走，【火攻】有自己的 :func:`_score_fire_attack`；否则
+    同一笔关系会被记两次。**附带指定**（借刀杀人的 Bn）也算被指定的座位：借刀"害"的是
+    Bn，只读 ``targets``（持刀者 A）会把"逼敌人去打主公"评成正收益。
+    """
+    if not isinstance(action, UseCard):
+        return 0.0
+    card = action.card
+    if card.type not in _NULLIFY_HARMFUL_TRICKS:
+        return 0.0
+    if _damage_card(card) or card.type == "fire_attack":
+        return 0.0
+    return sum(
+        _relation_term(view, seat)
+        for seat in (*action.targets, *action.designations)
+    )
+
+
+def _lord_veto_applies(view: PlayerView, action: Action) -> bool:
+    """主忠方在**出牌阶段挑目标**时，主公不可作为目标（Q4 的硬 veto）。
+
+    三条边界（票面原文逐条落地）：
+
+    - **主忠方**：本人是主公或忠臣（:data:`_LORD_SIDE`）。反贼 / 内奸不受此约束——内奸
+      "不把主公当优先敌人"是另一笔账（:func:`_renegade_hostility` 的护主护栏），别混进来。
+      PvE 没有 ``lord`` 这个身份 ⇒ 恒不生效。
+    - **有害牌**：伤害牌（:func:`_damage_card`）与有害锦囊（:data:`_NULLIFY_HARMFUL_TRICKS`）。
+      给主公递牌 / 回血 / 帮它拆判定的**有益**牌不在此列（那本来就该打在主公身上）。
+    - **挑目标**：目标集合由牌面**强制**的全体牌（万箭 / 南蛮 / 桃园 / 五谷，``ALL_ALIVE*``
+      档）不在 veto 范围内——它们的目标使用者挑不了，取舍由 :func:`_relation_term` 的逐
+      目标期望差分给出（票面："AoE 不需要新机制"）。单体 / 区间 / 附带指定的牌才是"挑"。
+
+    只在 ``PLAY_PHASE`` 的打分器里调用（:func:`_score_play_phase`）：**不碰响应窗口**——
+    【借刀杀人】逼你砍主公是规则，禁不掉（``_score_respond`` 一行不改）。
+    """
+    if view.players[view.seat].identity not in _LORD_SIDE:
+        return False
+    card = getattr(action, "card", None)
+    if card is None:
+        return False
+    if not (_damage_card(card) or card.type in _NULLIFY_HARMFUL_TRICKS):
+        return False
+    if behavior_for(card).target_rule.count in (
+        TargetCount.ALL_ALIVE,
+        TargetCount.ALL_ALIVE_WITH_SELF,
+    ):
+        return False
+    return any(
+        0 <= seat < len(view.players)
+        and seat != view.seat
+        # ``==`` 不是 ``is``：``PlayerPublic.identity`` 是 ``Identity`` 枚举成员（str 子类），
+        # 而 :data:`_LORD` 是同一个字面量的 ``str``；``is`` 在两者之间恒 False。
+        and view.players[seat].identity == _LORD
+        # 附带指定（借刀的 Bn）也是被挑出来的座位：逼谁去打主公同样是"把主公当目标"。
+        for seat in (*getattr(action, "targets", ()), *getattr(action, "designations", ()))
     )
 
 

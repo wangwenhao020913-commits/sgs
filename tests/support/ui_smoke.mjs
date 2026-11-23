@@ -18249,10 +18249,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  *   - 点过它之后**其余手牌**的可用性与点之前逐张一致（不再一片 dis、点什么都不对）。
  */
 {
-  // AI 档位用**默认的启发式**：票 05 §2 的复现局面没有选 AI（= 默认档），而 `random` 档
-  // 下牌次序不同、种子 4 摸到的第 6 张是 ♦8杀（68）而不是票面点名的 ♠5绝影（37）。
+  // AI 档位用 **`random`**（`ai-view` 票 01 改判）：这一段验的是**界面**的点牌分派次序
+  // （缺陷 A / B），与 AI 怎么打无关；而启发式一改打分面，种子 4 进"我的出牌阶段"之前就会
+  // 先出现一问"敌方技能让你选一张"，夹具当场卡住（旧写法过不去 `SELECT_CARDS`）。`random`
+  // 档与启发式无关、同种子恒定，且它在种子 4 给出的正是**票 05 §5 原文那一手**
+  // （♣借刀杀人 106 / ♥桃 16 / ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♠杀 47 / ♠绝影 37）。
   const openPangtongSession = async (seed) => openSession(await post("/api/sessions", {
-    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null,
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null,
     seed, my_hero: "pangtong_mobile", deck_profile: "standard_108",
   }));
   /** 推进到**我的**出牌阶段：一律先选 `Pass` / `EndPhase`（"什么都不做"，与实机开局同一路）。 */
@@ -18269,6 +18272,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       const pending = ui.state.view && ui.state.view.pending;
       if (!pending) return null;
       if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
+      // 候选里真有 `Pass`（响应面 / 可选选择面）⇒ 走界面右端的「放弃」——那才是这条路的
+      // 真实入口。只设 `selectedOption` 对 `SELECT_CARDS` 不生效（它读 `state.picks`），
+      // 会原地空转到 40 步：`ai-view` 票 01（盟友负分）之后，种子 4 进我的出牌阶段**之前**
+      // 会先出现一问"敌方的技能让你从手牌 / 装备里选一张"，旧写法在那里卡死。
+      if ($("btn-pass").hidden === false
+          && (pending.legal_actions || []).some((action) => action.kind === "Pass")) {
+        await clickAndWait($("btn-pass"));
+        continue;
+      }
       ui.resetSelection();
       ui.state.selectedOption = passFirstIndex(pending);
       await ui.submitAction();
@@ -18349,13 +18361,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   // 票 05 §2/§5 点名的是**种子 4**，并给了摸牌后的六张手牌（原：♣借刀杀人 106 / ♥桃 16 /
   // ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♠杀 47 / ♠绝影 37）。上面的种子扫描在 4 号不再命中时
   // 会**悄悄**换到后面的种子，本段的语义就漂了——这里把「就是种子 4 + 这一手」显式锚住。
-  // sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66 ⇒ 发将多抽两张、初始手牌随之重排：
-  // 种子 4 的新六张 = ♣借刀杀人 106 / ♥桃 16 / ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♦顺手牵羊 61 /
-  // ♠顺手牵羊 35（票 05 的判据「一张♣牌同时有牌名级预发动与【连环】重铸」仍成立）。
+  // sp5-mayunlu-panjun 票 01 / 02 把默认池加到 100 / 66 之后，**启发式**档在种子 4 的
+  // 六张曾是 ♣借刀杀人 106 / ♥桃 16 / ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♦顺手牵羊 61 /
+  // ♠顺手牵羊 35；`ai-view` 票 01 起这一段改用 `random` 档（与 AI 改动解耦），种子 4 给的
+  // 就是**票 05 §5 原文那一手**——判据「一张♣牌同时有牌名级预发动与【连环】重铸」仍成立
+  // （106 = 借刀的清单 + ♣重铸；82 = 另一张 ♣重铸）。
   const TICKET05_SEED = 4;
   const TICKET05_HAND = [
     [106, "♣借刀杀人"], [16, "♥桃"], [26, "♥爪黄飞电"],
-    [82, "♣诸葛连弩"], [61, "♦顺手牵羊"], [35, "♠顺手牵羊"],
+    [82, "♣诸葛连弩"], [47, "♠杀"], [37, "♠绝影"],
   ];
   const settledHand = hand().map((card) => Number(card.card_id));
   const settledIds = settledHand.slice().sort((a, b) => a - b);
@@ -24971,6 +24985,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       const pending = ui.state.view && ui.state.view.pending;
       if (!pending) return null;
       if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
+      // 候选里真有 `Pass`（响应面 / 可选选择面）⇒ 走界面右端的「放弃」——那才是这条路的
+      // 真实入口。只设 `selectedOption` 对 `SELECT_CARDS` 不生效（它读 `state.picks`），
+      // 会原地空转到 40 步：`ai-view` 票 01（盟友负分）之后，种子 4 进我的出牌阶段**之前**
+      // 会先出现一问"敌方的技能让你从手牌 / 装备里选一张"，旧写法在那里卡死。
+      if ($("btn-pass").hidden === false
+          && (pending.legal_actions || []).some((action) => action.kind === "Pass")) {
+        await clickAndWait($("btn-pass"));
+        continue;
+      }
       ui.resetSelection();
       ui.state.selectedOption = passFirstIndex(pending);
       await ui.submitAction();
@@ -32029,8 +32052,13 @@ const seatGlobalsAt = (seat) => {
   return box ? byClass(box, "pve-global").map((node) => node.textContent) : [];
 };
 
+// 剧本种子 **2311 → 2301**（`ai-view` 票 01）：这一节的判据是"打到终局 → 回棋盘结算 →
+// 三选一 → 结果弹窗"，它要求这一场**赢**（服务端对败局不发奖励：`script.settle.picks_on_defeat`）。
+// 票 01 改了 AI 的伤害 / 有害锦囊定价之后，2311 那一场从"友方全歼"翻成"主角阵亡"，
+// 结算因此被服务端按规则拒收（弹窗不落、红字行给原因）。按同一判据在 2300–2419 里重扫，
+// 2301 在第 2 轮赢下这一场；扫描器 = ``.scratch/ai-view/scan_script_battle.py``。判据不放宽。
 const pveBattleBoard = await postRaw("/api/script-runs", {
-  script_id: "battleprobe", chosen_hero: "jie_liubei", seed: 2311,
+  script_id: "battleprobe", chosen_hero: "jie_liubei", seed: 2301,
 });
 ui.scriptBoardShow(pveBattleBoard);
 

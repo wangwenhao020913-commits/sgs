@@ -1723,7 +1723,7 @@ def test_the_guard_takes_the_lord_off_the_enemy_side_while_a_rebel_lives():
     主公侧的力量、不是主公本人。
 
     决策面：主公与忠臣同体力 / 同手牌时，两个候选只差敌友权重 ⇒ 忠臣严格高
-    ``_ENEMY_FOCUS / 3``。斩杀项（D2，票 19）是另一笔账、本票不动它，故这里让两个目标同体力。
+    ``_RELATION_FOCUS / 3``。斩杀项（D2，票 19）是另一笔账、本票不动它，故这里让两个目标同体力。
     """
     question = _renegade_play_query()
     view = question.view
@@ -1751,8 +1751,8 @@ def test_the_guard_takes_the_lord_off_the_enemy_side_while_a_rebel_lives():
     lord_score = heuristic_scoring._score_attack(_slash_at(lord), view)
     loyalist_score = heuristic_scoring._score_attack(_slash_at(loyalist), view)
     assert loyalist_score - lord_score == pytest.approx(
-        heuristic_scoring._ENEMY_FOCUS / 3
-    ), f"两个目标只差敌友权重（主公 {lord_score} vs 忠臣 {loyalist_score}）"
+        heuristic_scoring._RELATION_FOCUS / 3
+    ), f"两个目标只差关系项（主公 {lord_score} vs 忠臣 {loyalist_score}）"
 
     # 票面的"主公 1 体力"那一档：体力不进关系判定 ⇒ H 仍是 0（斩杀项另算，见 docstring）。
     one_hp = _renegade_play_query(lord_hp=1).view
@@ -1951,10 +1951,11 @@ def test_the_ai_teammate_does_not_target_the_ally_when_an_enemy_is_available(
 
     座位 0（AI 队友）两侧各一人、都在距离 1 内 ⇒ 友军与敌人**都是合法目标**。判据分两层：
 
-    - **分值**：两张候选只差敌友权重这一项（同一张牌、相同体力 / 手牌 / 装备），
-      故敌人目标严格高 ``_ENEMY_FOCUS``。票 21 的口径是"不给 P(友) 扣分"，所以这不是
-      "打队友为负"，而是"队友永远排在敌人后面"——两张参数化局面把座位号对调再跑一遍，
-      证明选择跟的是关系、不是座位顺序；
+    - **分值**：两张候选只差关系项这一项（同一张牌、相同体力 / 手牌 / 装备），故敌人目标
+      严格高 ``2 × _RELATION_FOCUS``（敌 +5 / 友 −5）。**票 21 的口径（"不给 P(友) 扣分"）已被
+      `ai-view` 票 01 推翻**：现在 `P(友)` 自己也扣分，确认盟友的那张【杀】因此**低于
+      过牌**（"打队友为负"），不再只是"队友排在敌人后面"。两张参数化局面把座位号对调再
+      跑一遍，证明选择跟的是关系、不是座位顺序；
     - **决策**：``HeuristicPlayer.respond`` 选中的那张【杀】必须打在敌人身上。
     """
     slash = _ids("slash")[0]
@@ -2001,8 +2002,12 @@ def test_the_ai_teammate_does_not_target_the_ally_when_an_enemy_is_available(
     )
     ally_score = heuristic_scoring._score_attack(ally_target, query.view)
     enemy_score = heuristic_scoring._score_attack(enemy_target, query.view)
-    assert enemy_score - ally_score == pytest.approx(heuristic_scoring._ENEMY_FOCUS), (
-        f"两张候选只该差敌友权重这一项（友 {ally_score} vs 敌 {enemy_score}）"
+    assert enemy_score - ally_score == pytest.approx(
+        2 * heuristic_scoring._RELATION_FOCUS
+    ), f"两张候选只该差关系项这一项（友 {ally_score} vs 敌 {enemy_score}）"
+    assert ally_score < 0.0, (
+        "确认盟友的那张【杀】必须**低于过牌**（`ai-view` 票 01 的口径）；"
+        f"实得 {ally_score}"
     )
 
     action = HeuristicPlayer(_stream(0, 0)).respond(query)

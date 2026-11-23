@@ -549,6 +549,10 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "usable_options",
             "is_slash",
             "target_sets_match",
+            # ai-view 票 01：`behavior_for(card).target_rule.count` 的**枚举**（三值：额定 /
+            # 全体存活 / 全体存活含自己）。与已允许的 `behavior_for` 同源、同一个读点——
+            # 主公 veto 用它在"挑目标"与"目标由牌面强制"之间分界，不另抄一张牌名表。
+            "TargetCount",
         }
     ),
     "sgs.state": frozenset(

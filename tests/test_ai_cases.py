@@ -942,7 +942,7 @@ def test_d2_drinks_wine_before_a_lethal_slash():
 def test_d2_prefers_a_revealed_enemy_when_no_target_is_lethal():
     """D2 斩杀优先：已明敌人 3 手 vs 未知 0 手（都 4 体力、都不可一杀）⇒ 打敌人。
 
-    **修复前已绿**（``_ENEMY_FOCUS`` 大于手牌防御贴现），故不加 xfail。它是护栏：新增的
+    **修复前已绿**（关系项大于手牌防御贴现），故不加 xfail。它是护栏：新增的
     斩杀项不许把“手牌少的那一席”捧成首选，也不许盖过已明敌人。
     """
     query = _enemy_vs_unknown_query()
@@ -1629,6 +1629,296 @@ def test_the_renegade_does_not_watch_the_lord_die():
         assert isinstance(action, UseCard), f"内奸该出【桃】救主公，实得 {action!r}"
         assert action.card.type == "peach"
         assert action.targets == (0,), "【桃】必须落在濒死的主公身上"
+
+
+# ---------------------------------------------------------------------------
+# 票 01 盟友负分 + 主公 veto（ai-view spec §0 症状 1 / Q4）
+#
+# 实机证据（seed 7032，三次；台账 `docs/agents/ai-versions.md:402-405`）：忠臣在打不到
+# 反贼时回头打主公——当时主公是**唯一合法**【杀】目标，而 `_score_attack` 对盟友**不加
+# 不减**（敌人只多 `_ENEMY_FOCUS × P(敌)`——票 21 的旧口径，这里 P(敌)=0），过牌是 0.0
+# ⇒ 打得到就打。
+# 同一条缺口在单体锦囊上更宽：`_score_card_use` 的非伤害分支走 `_TRICK_VALUES` 常量分、
+# **完全不读身份**（同一局的忠臣还用过【过河拆桥】）。
+#
+# 三条 D 用例在实现前是**红的**（先红后绿，spec §2.2）：三条构造局面里 AI（座位 0 的
+# 忠臣）都只有"打主公"与"结束阶段"两条候选，修复前**恒打主公**（4 个种子逐个实测）。
+# 第三条（主公只剩 1 体力）钉的是 **veto 的独立性**：单靠负分压不住斩杀项
+# （``4.0 + 6.5 − 5.0 = +5.5``），故"主公不可作为目标"必须是规则级取舍、不是价格。
+# ---------------------------------------------------------------------------
+
+T01_LORD_SEAT = 4
+"""主公座位：5 人环里与座位 0（AI 的忠臣）相邻，且**先手是主公** ⇒ 到 AI 的回合时主公
+已摸过牌、手里有牌（【过河拆桥】的合法目标）。换座位号会同时改先手，故固定为 4。"""
+
+T01_SLASH = cards_of_type(PACK, "slash")[0]
+T01_DISMANTLEMENT = cards_of_type(PACK, "dismantlement")[0]
+T01_HORSE = cards_of_type(PACK, "dilu")[0]
+"""票 01 的两张实体牌与座位 1 的 +1 马（把邻席挡在【杀】的射程外，见 :func:`_t01_query`）。"""
+
+
+def _t01_seats(*, card: int, lord_hp: int = 4, horse: int | None = T01_HORSE):
+    """5 人身份局：座位 0 = 忠臣（AI）、座位 4 = 主公、其余反贼 / 反贼 / 内奸。
+
+    ``horse`` = 座位 1 的 +1 马：5 人环里座位 1 与座位 0 相邻，不挂马它也会是合法【杀】
+    目标。**【过河拆桥】那条构造不需要它**（拆没有距离上限，靠"其余席位没有任何区的牌"
+    把目标收窄到主公一个人）。
+    """
+    return [
+        SeatSpec(identity=Identity.LOYALIST, hand=(card,)),
+        SeatSpec(
+            identity=Identity.REBEL, equip=() if horse is None else (horse,)
+        ),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.RENEGADE),
+        SeatSpec(hp=lord_hp, hp_max=4, identity=Identity.LORD),
+    ]
+
+
+def _t01_query(*, card: int, lord_hp: int = 4, horse: int | None = T01_HORSE):
+    """推进到 AI（座位 0，忠臣）的 ``PLAY_PHASE``。
+
+    与 D1 / D2 / C1 同一驱动姿态（真局面 → ``Engine.from_state`` → ``run_queries`` →
+    真 ``HeuristicPlayer.respond``）：牌堆顶 4 张惰性【闪】吸收**主公 + 忠臣**两次摸牌
+    （先手是主公，回合序 4 → 0），AI 的决策面因此只剩构造的手牌。
+    """
+    seats = _t01_seats(card=card, lord_hp=lord_hp, horse=horse)
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=seats,
+        deck=_deck_with_inert_top(PACK, seats=seats, count=4),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in seats],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == 0,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达忠臣的出牌阶段前就停了"
+    return query
+
+
+def _t01_hostile_candidates(query) -> list[UseCard]:
+    """这条询问里**指向主公**的用牌候选（夹具自检：恰好就是票面那个"唯一合法目标"）。"""
+    return [
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and T01_LORD_SEAT in action.targets
+    ]
+
+
+def test_the_t01_fixtures_reach_a_play_phase_with_the_lord_as_the_only_target():
+    """夹具自检（不带 xfail）：三条构造面——询问归属、主公是唯一目标、其余席位够不着。
+
+    与 D1 / D2 / C1 的自检同一姿态：只核形状、不核策略判据，夹具被引擎改动弄坏时要
+    保持可见，而不是被 D 用例一起吞掉。
+    """
+    slash = _t01_query(card=T01_SLASH)
+    assert slash.kind == "PLAY_PHASE" and slash.actor == 0, "没停在忠臣的出牌阶段"
+    assert [player.identity for player in slash.view.players] == [
+        Identity.LOYALIST,
+        None,
+        None,
+        None,
+        Identity.LORD,
+    ], "夹具失效：AI 只该看得见自己（忠臣）与主公；其余座位必须仍是暗的"
+    assert _t01_hostile_candidates(slash) == [
+        action
+        for action in slash.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    ], "夹具失效：除主公以外还有能打到的【杀】目标"
+    assert sorted(
+        action.targets[0]
+        for action in slash.legal_actions
+        if isinstance(action, UseCard)
+    ) == [T01_LORD_SEAT], "夹具失效：【杀】的合法目标不再是主公一个人"
+    assert slash.view.players[T01_LORD_SEAT].hp == 4, "夹具失效：主公不再是 4 体力"
+
+    dismantle = _t01_query(card=T01_DISMANTLEMENT, horse=None)
+    assert _t01_hostile_candidates(dismantle) == [
+        action
+        for action in dismantle.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "dismantlement"
+    ], "夹具失效：除主公以外还有能拆的座位"
+    assert dismantle.view.players[T01_LORD_SEAT].hand_count > 0, (
+        "夹具失效：主公手里没牌 ⇒ 过河拆桥的目标池本来是空的"
+    )
+
+    lethal = _t01_query(card=T01_SLASH, lord_hp=1)
+    assert lethal.view.players[T01_LORD_SEAT].hp == 1, "夹具失效：主公不再是 1 体力"
+    assert _t01_hostile_candidates(lethal), "夹具失效：斩杀局面里主公不再是合法目标"
+
+    for query in (slash, dismantle, lethal):
+        for seed in TIE_SEEDS:
+            action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+            assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
+
+
+def test_t01_a_loyalist_ends_the_phase_when_the_lord_is_the_only_slash_target():
+    """票 01 症状 1：主公是**唯一合法**【杀】目标 ⇒ 期望动作是 ``EndPhase``。
+
+    修复前：``_score_attack`` 对盟友不加不减 ⇒ 这张【杀】拿满 ``_DAMAGE_BASE +
+    _TARGET_BONUS``（4.0）⇒ 打得到就打（实机 seed 7032 三次）。
+    修复后：关系项按 ``k × (P敌 − P友)`` 给确认盟友 ``−_RELATION_FOCUS`` ⇒ 总分
+    **低于过牌**（0.0），
+    且主公 veto 把这条候选直接摘掉。8 个平分子流种子逐个断言，排除"抽签抽对了"。
+    """
+    query = _t01_query(card=T01_SLASH)
+    (hostile,) = _t01_hostile_candidates(query)
+    assert heuristic_scoring._score_attack(hostile, query.view) < 0.0, (
+        "确认盟友（主公）身上的伤害牌必须严格低于过牌"
+    )
+
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, EndPhase), (
+            f"忠臣不该对主公出【杀】（种子 {seed}），实得 {action!r}"
+        )
+
+
+def test_t01_a_loyalist_does_not_dismantle_the_lord_when_he_is_the_only_target():
+    """同一条缺口在**单体锦囊**上：主公是唯一合法目标时不出【过河拆桥】。
+
+    修复前：``_score_card_use`` 的非伤害分支走 ``_TRICK_VALUES["dismantlement"]``（3.0）
+    常量分、**完全不读身份** ⇒ 手里有就拆（同一局 seed 7032 里忠臣真的拆过）。
+    修复后：有害单体锦囊按目标过同一个关系项 ⇒ ``3.0 − 5.0 < 0``，且主公 veto 先摘候选。
+    """
+    query = _t01_query(card=T01_DISMANTLEMENT, horse=None)
+    (hostile,) = _t01_hostile_candidates(query)
+    assert heuristic_scoring._score_card_use(query, hostile) < 0.0, (
+        "确认盟友（主公）身上的有害锦囊必须严格低于过牌"
+    )
+
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, EndPhase), (
+            f"忠臣不该拆主公的牌（种子 {seed}），实得 {action!r}"
+        )
+
+
+def test_t01_the_lord_veto_is_a_rule_not_a_price():
+    """主公 veto 的**独立性**：这一刀能当场打死主公时，负分压不住斩杀项。
+
+    主公只剩 1 体力 ⇒ 关系项之外还有 ``_LETHAL_STRIKE_VALUE``（6.5），
+    ``4.0 + 6.5 − 5.0 = +5.5`` 仍为正——只靠"盟友负分"的忠臣照样一刀砍死主公。
+    故 veto 必须是**规则级取舍**（``_score_play_phase`` 直接给
+    :data:`_LORD_VETO_PENALTY`），而不是又一项价格。
+    """
+    query = _t01_query(card=T01_SLASH, lord_hp=1)
+    (hostile,) = _t01_hostile_candidates(query)
+    assert heuristic_scoring._lord_veto_applies(query.view, hostile), (
+        "主忠方把主公当目标 ⇒ veto 必须生效（哪怕这一刀是斩杀）"
+    )
+    assert heuristic_scoring._score_play_phase(query, hostile) == (
+        heuristic_scoring._LORD_VETO_PENALTY
+    ), "veto 的落点是 play phase 的 scorer，不是伤害打分器里的又一项"
+
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, EndPhase), (
+            f"忠臣不该为斩杀而打主公（种子 {seed}），实得 {action!r}"
+        )
+
+
+def test_t01_the_lord_veto_leaves_forced_aoe_target_sets_to_the_price_model():
+    """AoE 不在 veto 范围内（票面："AoE 不需要新机制"）：目标集合由牌面强制。
+
+    【万箭齐发】的目标 = 全体存活（含主公），使用者**挑不了**目标；它的取舍必须仍由
+    :func:`_relation_term` 的逐目标期望差分给出——否则主忠方手里有万箭就永远不能出，
+    "敌方收益 − 盟友损失"这件事被一刀切掉。挑得了目标的单体牌仍受 veto 约束。
+    """
+    seats = _t01_seats(card=cards_of_type(PACK, "arrow_barrage")[0])
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=seats,
+        deck=_deck_with_inert_top(PACK, seats=seats, count=4),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in seats],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == 0,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达忠臣的出牌阶段前就停了"
+    (aoe,) = [
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "arrow_barrage"
+    ]
+    assert T01_LORD_SEAT in aoe.targets, "夹具失效：万箭的目标集合不再含主公"
+    assert not heuristic_scoring._lord_veto_applies(query.view, aoe), (
+        "全体存活的强制目标集合不进 veto——它们的取舍走逐目标期望差分"
+    )
+    assert heuristic_scoring._score_play_phase(query, aoe) != (
+        heuristic_scoring._LORD_VETO_PENALTY
+    )
+
+
+def test_t01_an_unknown_seat_stays_worth_targeting():
+    """反面对照：P(友) 扣分不能把**未知座位**一起压死（那会把 AI 变成不出牌的绵羊）。
+
+    5 人局主公眼里的未知座位 ``(P(敌), P(友)) = (3/4, 1/4)``（配比减掉主公后按人头均分：
+    反贼 ×2 + 内奸 是敌、忠臣 是友）⇒ 关系项 = ``5.0 × (0.75 − 0.25) = +2.5``：仍是正项。
+    "打不确定的席位"照旧可打，只是不像 P(敌)=1 的已明敌人（+5）那样被偏爱。
+
+    AI 坐**主公**位（座位 0 = 先手）才读得到这一档；座位 0 的忠臣视角里剩余席位全是敌
+    （P(友)=0），测不到扣分那一半。
+    """
+    seats = [
+        SeatSpec(identity=Identity.LORD, hand=(T01_SLASH,)),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=seats,
+        deck=_deck_with_inert_top(PACK, seats=seats, count=2),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in seats],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == 0,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达主公的出牌阶段前就停了"
+    view = query.view
+    unknown = [
+        seat
+        for seat, player in enumerate(view.players)
+        if seat != view.seat and player.identity is None
+    ]
+    assert unknown == [1, 2, 3, 4], "夹具失效：座位 1 / 2 / 3 / 4 不再是主公视角的未知座位"
+    enemy, ally = _relation(view, 1)
+    assert (enemy, ally) == (pytest.approx(0.75), pytest.approx(0.25)), (
+        "5 人局主公视角的未知座位不再是 (3/4, 1/4)"
+    )
+    term = heuristic_scoring._relation_term(view, 1)
+    assert term == pytest.approx(heuristic_scoring._RELATION_FOCUS * (enemy - ally)), (
+        "关系项必须是 `k × (P敌 − P友)` 这一个式子（与 `_luanwu_respond_value` 同形）"
+    )
+    assert term > 0.0, (
+        "未知座位的关系项不能变负：先验说它更可能是敌人 ⇒ 伤害牌仍排在过牌之前"
+    )
+    assert heuristic_scoring._relation_term(view, view.seat) == 0.0, (
+        "牌打在自己身上没有'对谁'这一说 ⇒ 关系项恒 0"
+    )
 
 
 # ---------------------------------------------------------------------------

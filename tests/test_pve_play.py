@@ -299,13 +299,23 @@ def test_a_slay_boss_game_ends_when_the_boss_dies():
 
 
 def test_a_two_ally_three_enemy_game_runs_to_an_end_with_the_teammate_acting():
+    """2v3 队友局：真打完、友方全歼、队友真的行动过。
+
+    **种子 47 → 83**（`ai-view` 票 01）：本局的胜负是"整局由启发式打完"的**分叉产物**，
+    不是被这条用例保护的语义（它保护的是"终局判定 + 队友真的动过 + 纯求解器一致"）。
+    票 01 把伤害牌与单体有害锦囊接进关系项（``5 × (P敌 − P友)``）之后整局分叉，
+    47 的终局从"友方全歼"翻成"主角阵亡"——同批 40–99 里 83 仍满足全部四条断言。同一
+    纪律见 `tests/test_all_ai_games.py` 的 `M6_JIE_WEI_B_SEED`：AI 决策面一动，固定种子的
+    全 AI 局要重扫种子，而不是放宽判据。扫描器 = ``.scratch/ai-view/scan_pve_seeds2.py``。
+    """
     rule = _rule(
         (ALLY, ENEMY, ENEMY, ALLY, ENEMY),
         victory=PveVictory(kind=PveVictoryKind.ROUT),
     )
-    engine = Engine.new_game(seed=47, rule_config=rule, pack=PACK)
+    seed = 83
+    engine = Engine.new_game(seed=seed, rule_config=rule, pack=PACK)
 
-    engine.run([HeuristicPlayer(ai_stream(47, seat)) for seat in range(5)])
+    engine.run([HeuristicPlayer(ai_stream(seed, seat)) for seat in range(5)])
 
     outcome = engine.pending_outcome
     assert outcome is not None and outcome.side == "ally", "队友局：友方全歼敌人"
