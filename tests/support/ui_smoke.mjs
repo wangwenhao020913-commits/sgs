@@ -948,6 +948,42 @@ const clickAndWait = async (node, event = null) => {
  *  步骤预览是"选择一变就问一次后端"（去抖 90 ms）：点完之后 `cursor` / 可点集合 /
  *  提交可点都等**回包**说了算，故同步点完就断言会读到旧态。计时器只排队、不自动跑
  *  （垫片的既有纪律），这里按 `pa.previewTimer` 精确跑那一个，不碰别的计时器。 */
+/** 推进到**人类座位 0** 的出牌阶段：一律先让掉（Pass / EndPhase / 右端「放弃」）。
+ *
+ * 票 05（庞统【连环】点牌分派）与票 10（乱击）两处夹具共用**这一份**——它只是"走到那个
+ * 局面"的脚手架，不是断言；抄两份的下场已经出现过一次：`ai-view` 票 01 的修复注释被抄进
+ * 另一块，而那块用的是别的种子。
+ *
+ * 两条让路：响应 / 可选选择面走界面右端的「放弃」（那才是这条路在真界面上的入口）；
+ * 其余询问把 `selectedOption` 指向 Pass 再提交。**只设 `selectedOption` 是不够的**：
+ * `SELECT_CARDS` 读 `state.picks`，AI 决策面一动就会在出牌阶段**之前**多出
+ * "敌方技能让你选一张"这类询问，旧写法在那里原地空转到 40 步。
+ */
+const walkHumanToPlayPhase = async () => {
+  const passFirstIndex = (pending) => {
+    const actions = pending.legal_actions || [];
+    for (const kind of ["Pass", "EndPhase"]) {
+      const at = actions.findIndex((action) => action.kind === kind);
+      if (at >= 0) return at;
+    }
+    return 0;
+  };
+  for (let step = 0; step < 40; step += 1) {
+    const pending = ui.state.view && ui.state.view.pending;
+    if (!pending) return null;
+    if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
+    if ($("btn-pass").hidden === false
+        && (pending.legal_actions || []).some((action) => action.kind === "Pass")) {
+      await clickAndWait($("btn-pass"));
+      continue;
+    }
+    ui.resetSelection();
+    ui.state.selectedOption = passFirstIndex(pending);
+    await ui.submitAction();
+  }
+  return null;
+};
+
 const flushPreativationPreview = async () => {
   const pa = ui.state.preactivation;
   const id = pa ? pa.previewTimer : null;
@@ -18259,34 +18295,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     seed, my_hero: "pangtong_mobile", deck_profile: "standard_108",
   }));
   /** 推进到**我的**出牌阶段：一律先选 `Pass` / `EndPhase`（"什么都不做"，与实机开局同一路）。 */
-  const passFirstIndex = (pending) => {
-    const actions = pending.legal_actions || [];
-    for (const kind of ["Pass", "EndPhase"]) {
-      const at = actions.findIndex((action) => action.kind === kind);
-      if (at >= 0) return at;
-    }
-    return 0;
-  };
-  const walkToMyPlay = async () => {
-    for (let step = 0; step < 40; step += 1) {
-      const pending = ui.state.view && ui.state.view.pending;
-      if (!pending) return null;
-      if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
-      // 候选里真有 `Pass`（响应面 / 可选选择面）⇒ 走界面右端的「放弃」——那才是这条路的
-      // 真实入口。只设 `selectedOption` 对 `SELECT_CARDS` 不生效（它读 `state.picks`），
-      // 会原地空转到 40 步：`ai-view` 票 01（盟友负分）之后，种子 4 进我的出牌阶段**之前**
-      // 会先出现一问"敌方的技能让你从手牌 / 装备里选一张"，旧写法在那里卡死。
-      if ($("btn-pass").hidden === false
-          && (pending.legal_actions || []).some((action) => action.kind === "Pass")) {
-        await clickAndWait($("btn-pass"));
-        continue;
-      }
-      ui.resetSelection();
-      ui.state.selectedOption = passFirstIndex(pending);
-      await ui.submitAction();
-    }
-    return null;
-  };
+  const walkToMyPlay = walkHumanToPlayPhase;
   const hand = () => (ui.state.view.snapshot.self_hand || []);
   const handNode = (cardId) => Array.from($("t-hand").children).find(
     (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
@@ -24972,34 +24981,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null,
     seed, my_hero: "yuanshao_mobile", deck_profile: "standard_108",
   }));
-  const passFirstIndex = (pending) => {
-    const actions = pending.legal_actions || [];
-    for (const kind of ["Pass", "EndPhase"]) {
-      const at = actions.findIndex((action) => action.kind === kind);
-      if (at >= 0) return at;
-    }
-    return 0;
-  };
-  const walkToMyPlay = async () => {
-    for (let step = 0; step < 40; step += 1) {
-      const pending = ui.state.view && ui.state.view.pending;
-      if (!pending) return null;
-      if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
-      // 候选里真有 `Pass`（响应面 / 可选选择面）⇒ 走界面右端的「放弃」——那才是这条路的
-      // 真实入口。只设 `selectedOption` 对 `SELECT_CARDS` 不生效（它读 `state.picks`），
-      // 会原地空转到 40 步：`ai-view` 票 01（盟友负分）之后，种子 4 进我的出牌阶段**之前**
-      // 会先出现一问"敌方的技能让你从手牌 / 装备里选一张"，旧写法在那里卡死。
-      if ($("btn-pass").hidden === false
-          && (pending.legal_actions || []).some((action) => action.kind === "Pass")) {
-        await clickAndWait($("btn-pass"));
-        continue;
-      }
-      ui.resetSelection();
-      ui.state.selectedOption = passFirstIndex(pending);
-      await ui.submitAction();
-    }
-    return null;
-  };
+  const walkToMyPlay = walkHumanToPlayPhase;
   const selfHand = () => (ui.state.view.snapshot.self_hand || []);
   const handNode = (cardId) => Array.from($("t-hand").children).find(
     (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
