@@ -34,7 +34,7 @@ from support import SeatSpec, build_state
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ai_eval import main  # noqa: E402
+from ai_eval import AiEvalSpecError, main  # noqa: E402
 from ai_eval.replay import (  # noqa: E402
     Candidate,
     GodViewReport,
@@ -466,6 +466,53 @@ def test_the_renegade_truth_is_the_real_balance_not_the_stale_table() -> None:
     )
     assert _true_relation(unbalanced, Identity.RENEGADE, Identity.REBEL) == "敌"
     assert _true_relation(unbalanced, Identity.LORD, Identity.REBEL) == "敌"
+
+
+def test_explain_skips_human_queries_unless_a_human_step_is_explicitly_named(
+    tmp_path: Path,
+) -> None:
+    """全量 `--explain` 只解释 AI 座位；显式点到人类询问时才报错。
+
+    实机返回的 bug：5 人局（人类 0 号）不筛座位跑 `--explain`，第一句人类询问就把整局
+    打断成「人类的询问」。人类座位没有 AI 决策，默认应**跳过**；`--seq` / `--seat` 点到
+    它才是参数错误。
+    """
+    runs = tmp_path / "runs"
+    stem = _save_full_ai_run(runs)
+    meta_path = runs / f"{stem}.meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["human_seat"] = 0
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    report = run_replay(run=stem, runs_dir=runs, explain=True)
+
+    assert report.explained, "AI 座位必须有可解释的询问"
+    assert all(step.actor != 0 for step in report.explained)
+    assert report.mismatches == ()
+    with pytest.raises(AiEvalSpecError, match="人类的询问"):
+        run_replay(run=stem, runs_dir=runs, explain=True, seat=0)
+
+
+def test_the_header_shows_the_processed_slice_of_a_long_replay() -> None:
+    """`--seq` 早停时 `询问` 是"已重放 / 录像总数"，不是把 300 条谎报成 5 条。"""
+    report = ReplayReport(
+        run="long",
+        seed=7,
+        player_count=5,
+        human_seat=0,
+        queries=5,
+        total_queries=300,
+        recorded_actions=300,
+        explained=(),
+        mismatches=(),
+        score=None,
+        godview=None,
+    )
+
+    assert "询问=5/300" in render_replay(report)
 
 
 def test_the_ruler_warns_when_the_tape_disagrees_with_the_recomputed_argmax() -> None:

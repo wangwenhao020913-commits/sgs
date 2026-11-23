@@ -227,6 +227,8 @@ class ReplayReport:
     godview: GodViewReport | None
     comparison_mismatches: tuple[tuple[int, str, str, str | None], ...] = ()
     """全部 AI 步骤的「记录 vs 重算」不一致（score / godview 不因此失败，但会在输出里提示）。"""
+    total_queries: int = 0
+    """录像里的询问总数；`--seq` 早停时 `queries` 只是已重放的那一段。"""
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +321,7 @@ def run_replay(
         score=score_report,
         godview=godview_report,
         comparison_mismatches=tuple(driver.comparison_mismatches),
+        total_queries=loaded.total_queries,
     )
 
 
@@ -341,6 +344,7 @@ class _LoadedRun:
     revealed: dict[int, Identity]
     """阵亡 / 亮明事件里公开的身份（免费标签的优先来源；未亮明的幸存者才回落发牌表）。"""
     recorded_actions: int
+    total_queries: int
     query_aliases: frozenset[int]
     """``--seq`` 可以写的数：询问 seq 与它的动作记录 seq（票面的人读口径是后者）。"""
 
@@ -410,6 +414,7 @@ def _load_run(runs_dir: Path, run: str) -> _LoadedRun:
         identities=tuple(identities),
         revealed=revealed,
         recorded_actions=len(actions),
+        total_queries=len(query_seqs),
         query_aliases=frozenset(aliases),
     )
 
@@ -574,7 +579,13 @@ class _Driver:
         if seat == self.loaded.human_seat:
             if self.godview:
                 self._track_godview(seat, query)
-            if self.explain and self._matches(seat, query):
+            # 不筛座位（`--explain` 全量）⇒ 人类询问**跳过**，只解释 AI 座位；只有显式
+            # `--seq` / `--seat` 点到人类询问时才报错（那是在问一个不存在的 AI 决策）。
+            if (
+                self.explain
+                and (self.target_seq is not None or self.target_seat is not None)
+                and self._matches(seat, query)
+            ):
                 raise AiEvalSpecError(
                     f"seq={query.seq}（记录 seq={self.loaded.action_record_seqs.get(query.seq)}）"
                     f"是人类的询问：没有 AI 决策可解释"
@@ -1398,9 +1409,11 @@ def render_replay(report: ReplayReport) -> str:
 
 def _header(report: ReplayReport) -> str:
     human = "无" if report.human_seat is None else f"座位{report.human_seat}"
+    total = report.total_queries or report.queries
+    queries = str(total) if report.queries == total else f"{report.queries}/{total}"
     return (
         f"回放 run={report.run} seed={report.seed} {report.player_count}p 人类={human} "
-        f"询问={report.queries} 记录动作={report.recorded_actions}"
+        f"询问={queries} 记录动作={report.recorded_actions}"
     )
 
 
