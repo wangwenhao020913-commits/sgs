@@ -94,6 +94,11 @@ from .flow import (
     run_flow,
     zero_step_effect,
 )
+from .visibility import (
+    CARD_RESOLUTION_VISIBILITY,
+    STEP_VISIBILITY,
+    StepVisibility,
+)
 from .virtual import (
     card_ids,
     grouped_candidates,
@@ -106,6 +111,7 @@ __all__ = [
     "ACTIVATION_PLANS",
     "CARD_REQUEST_SCOPES",
     "CARD_REQUEST_WINDOWS",
+    "CARD_RESOLUTION_VISIBILITY",
     "CATALOG",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
@@ -131,6 +137,7 @@ __all__ = [
     "SUSPENDED_SKILL_KEY",
     "RequestAxis",
     "SKILL_JUDGMENT_CARD_KEY",
+    "STEP_VISIBILITY",
     "RejudgeOriginal",
     "Seam",
     "SeamKind",
@@ -139,6 +146,7 @@ __all__ = [
     "SkillSource",
     "SkillSourceKind",
     "StateChange",
+    "StepVisibility",
     "activation_plan",
     "awakening_skill_awakened",
     "damage_point_index",
@@ -784,6 +792,28 @@ class SkillDef:
     - **公开**：走 ``players[].hero_tags``，**不进** ``PlayerView`` / ``PlayerPublic`` /
       记录流 ⇒ 47 条金录像逐字节不变；
     - **AI 不消费**（纯显示）⇒ 不进 ``_AI_READ_POINTS``（`docs/agents/ai-adaptation.md` §5）。
+    """
+
+    step_visibility: Mapping[str, StepVisibility] | None = None
+    """**每一步答案**进不进公开面（ai-view 票 05；缺省 ``None`` = 没有流式步骤）。
+
+    键 = 步骤名（``FlowStep.key``，也即 :attr:`step_requirements` 的**清单键**）；值 = 闭集
+    :class:`StepVisibility`（``PUBLIC`` / ``HIDDEN`` / ``CLAIM``）。两者**不是逐条一一
+    对应**：投影的逐步文案对 ``SELECT_CARDS`` 恒读 ``card``、并会合并 / 补手写键（例：
+    锋·于禁【节钺】的可见性键是 ``seat`` / ``give``，文案表另有 ``card`` / ``choice``）
+    ——不要按文案键反查可见性。**键不是步序**：界【离间】与标准【离间】的点选次序相反、
+    三个键一字不改。
+
+    唯一真源是模块级 :data:`STEP_VISIBILITY`（按 ``skill_id`` 索引）：表的行由
+    ``tools/dump_public_surface.py`` 从各 ``SkillFlow`` / ``Hook`` 派生后人工确认，
+    **合并点只有一处**（``CATALOG`` 的字典推导，见 :func:`_with_step_visibility`）——
+    不在三十个族构造器里各抄一遍，也不写进 :class:`SkillFlow`（执行结构与事实面结构
+    随不同原因变化，绑死会让每次改动互相牵扯）。**只收 ``SkillFlow`` 叶子步骤**：手写
+    段机的答案（【蛊惑】的 ``target`` / ``designation``、【佐幸】的 ``name`` 一类）不是
+    ``FlowStep``，不在本表。
+
+    本字段**还没有读取方**：票 05 只登记边界，裁剪公开面是票 06 的事。``SkillDef`` 不被
+    序列化 ⇒ 不进记录流，47 条金录像逐字节不变。
     """
 
 
@@ -5318,9 +5348,20 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
 界【护驾】②：应答者 = 使用 / 打出【闪】的那个角色）与 P 族（huo-mobile-batch 票 01 的
 【猛进】）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
 
+
+def _with_step_visibility(definition: SkillDef) -> SkillDef:
+    """把 :data:`STEP_VISIBILITY` 的那一行挂到定义上（**合并点只有这一处**）。
+
+    三十个族构造器不写 ``step_visibility``：边界表按 ``skill_id`` 索引、一处登记，
+    定义只读这一份。没有分步（没有流水线 / 流水线零步）的技能不出现，字段保持 ``None``。
+    """
+    row = STEP_VISIBILITY.get(definition.skill_id)
+    return definition if row is None else replace(definition, step_visibility=row)
+
+
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
-        definition.skill_id: definition
+        definition.skill_id: _with_step_visibility(definition)
         for definition in (
             *_SKILL_DEFS,
             *conversion_skill_definitions(),

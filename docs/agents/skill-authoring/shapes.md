@@ -436,6 +436,27 @@ A 族的 `flow` 住在 `ActiveSkill` 声明上，钩子 / 接缝的 `flow` 住�
 那个标签就没了。小窗口类的两条"何时不画"闸门：`SELF` 档要求实例真在 `resolve_instances` 里
 （失去 / 失效 ⇒ 不画），`ANY_SEAT` 档由构造器自己从引擎读口判"生效中"（投影侧不做座位判断）。
 
+### 3.13 步骤可见性 `StepVisibility` / `SkillDef.step_visibility`（ai-view 票 05）
+
+每一步**答案**在公开面上的处置 = 闭集三值：`PUBLIC`（答案公开）/ `HIDDEN`（不公开：排列、
+扣置、手牌交到别人手里）/ `CLAIM`（只装**声称值**，真值永不进视图——【蛊惑】的声明牌名）。
+
+- **字段**：`SkillDef.step_visibility`（键 = `FlowStep.key`，即步骤名；**不是步序**）。
+  **唯一真源**是 `src/sgs/skills/visibility.py:STEP_VISIBILITY`（技能侧）与
+  `:CARD_RESOLUTION_VISIBILITY`（卡牌侧：拆 / 顺的 `pick`、多目标牌的 `target` 模式）；
+  唯一的合并点是 `catalog.CATALOG` 字典推导里的 `_with_step_visibility`，族构造器不写它。
+- **两道断言**（`tests/test_visibility_table.py`，engine 票档）：`FLOWS` 的每个叶子步骤都必须
+  登记；登记的每个键都必须在该技能的某条流水线里存在。派生 / 核对 / 默认值由
+  `tools/dump_public_surface.py` 给出（`--missing` / `--check` / `--players N`），**不参与
+  运行期**：新增步骤漏登记即红，不静默落默认。
+- **键不是文案键**：投影的逐步文案（§4「逐步文案」行）对 `SELECT_CARDS` 恒读 `card`，
+  会合并 / 补手写键；可见性表按 `FlowStep.key` **逐步唯一**（例：锋·于禁【节钺】可见性
+  `seat` / `give`，文案表 `card` / `choice`）。**不要按文案键反查可见性**。
+- **只收 `SkillFlow` 叶子步骤**：手写段机的答案（【蛊惑】的 `target` / `designation` 一类）
+  不是 `FlowStep`，不在这张表；票 06 的投影不能把本表当"全部答案的边界"。
+- **K1 裁定**（spec §7）：按步骤名登记、不按步序；**不**写进 `SkillFlow`（执行结构与事实面
+  结构随不同原因变化，绑死会让每次改动互相牵扯）。
+
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 
 | 触点 | 位置 | 判据 |
@@ -526,5 +547,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 
 ## 6. 更新触发（谁改这张表）
 
-新时机 / 新接缝 / 新修饰点 / 新询问 / 新帧型 / 新区域 / 新步骤类型 / 新显示组件种类，或某个机制从"枚举位"被
+新时机 / 新接缝 / 新修饰点 / 新询问 / 新帧型 / 新区域 / 新步骤类型 / 新显示组件种类 /
+**新的步骤可见性步骤 / 新卡牌解析步骤**，或某个机制从"枚举位"被
 解封——**落地那张票**顺手改对应小节；`tests/test_skill_authoring_docs.py` 会反向核（漏登记即红）。
+新增可见性步骤时还要跑 `tools/dump_public_surface.py --check` 并登记那一行（§3.13）。

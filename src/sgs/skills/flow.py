@@ -89,6 +89,7 @@ __all__ = [
     "ask_key_of",
     "card_pool_size",
     "card_preactivations",
+    "flow_steps",
     "manifest",
     "option_seat",
     "preview_step",
@@ -740,6 +741,24 @@ class SkillFlow:
                             f"SkillFlow {self.name!r} 的分支子步 {type(step).__name__} 尚未登记："
                             f"清单 / 校验器 / 预览只实现了 {[t.__name__ for t in _BRANCH_SUBSTEP_TYPES]}"
                         )
+
+
+def flow_steps(flow: SkillFlow) -> tuple[FlowStep, ...]:
+    """这条流水线的**全部叶子步骤**（分支子步按**声明**展开，不按答案）。
+
+    与执行器 / 清单不同：这里不读前序答案，故「两步分支都可能出现的步骤」都会出现。
+    用途是**声明期的机械核对**——ai-view 票 05 的可见性表必须覆盖每个步骤键，而覆盖
+    不能靠跑一局碰运气。``FlowBranch`` 自己的 ``key`` 是"按哪一步的答案分叉"，不是
+    一个可被作答的步骤，故不返回。
+    """
+    leaves: list[FlowStep] = []
+    for step in flow.steps:
+        if isinstance(step, FlowBranch):
+            for substeps in step.branches.values():
+                leaves.extend(substeps)
+            continue
+        leaves.append(step)
+    return tuple(leaves)
 
 
 def _resolve_actor(
