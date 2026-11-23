@@ -292,6 +292,11 @@ ini 不静默改时长）；`descriptions.json` 有 6 处「以牌面逐字开�
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。
+- **已知偶发（不是判据）**：`ui_smoke.mjs` 开局段的 `settleOpening` 会偶发 60 s 停滞，
+  报错串形如 `开局批播完之后没有拿到下一份视图……4xxx 轮 / 6000x ms`。2026-11-14 起的门禁
+  日志里出现过约十次（≈12% 的全量档），与具体武将 / 改动无关（同一条请求体用真 HTTP 复跑
+  0.5 s 内即停在人类询问上）。处置：**原地重跑门禁 / 重跑 CI**，不要为它改前端——真卡死会在
+  别的断言先红。
 - `tests/smoke-web.sh`：临时服务 + `ui_smoke.mjs` + 收尾（实测 60–70 s）。**给人用的快回路**，
   不在 `tests/run_all.sh` 里。
 - `tests/test_web_static.py`：静态清单（脚本顺序 / strict）、身份配比副本、CSS 设计单位，
