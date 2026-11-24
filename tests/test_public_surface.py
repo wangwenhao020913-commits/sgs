@@ -808,8 +808,14 @@ def test_the_engine_level_registry_names_every_action_constructor() -> None:
     )
 
 
-def test_the_projection_does_not_read_the_surface_and_stays_cheap() -> None:
-    """票 04 **不进视图**：``PlayerView`` 没有新字段；``project()`` 不读缓冲、保持低价。"""
+def test_the_raw_surface_stays_out_of_the_view_and_the_projection_stays_cheap() -> None:
+    """票 04 **不进视图**：``PlayerView`` 没有"原始缓冲"字段、``project()`` 保持低价。
+
+    票 06 之后 ``project()`` 会读缓冲（两份**有界**切片进 ``public_counts`` /
+    ``public_history``，见 ``tests/test_public_view.py``），但**缓冲本身**仍不是视图字段：
+    ``model_dump`` 里没有 ``public_surface``（记录流 / 网页载荷因此逐字节不变）。
+    这里的耗时判据保留为**上界**（< 5 ms），票 06 的实测数字记在那张票的 ``## Answer``。
+    """
     engine = _play_ai_game()
     state = engine.state
     views = [project(state, seat) for seat in range(len(state.players))]

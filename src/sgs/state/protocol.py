@@ -30,7 +30,19 @@ from pydantic import Field, TypeAdapter, model_serializer
 from sgs.data import Color, Identity, Kingdom
 from sgs.timing import Timing
 
-from .models import CardRef, Marker, Phase, Zone, ZoneRefField, _FrozenModel
+from .models import (
+    CardRef,
+    Cause,
+    FactKind,
+    Marker,
+    MoveReason,
+    Phase,
+    PublicCount,
+    Zone,
+    ZoneRef,
+    ZoneRefField,
+    _FrozenModel,
+)
 
 __all__ = [
     "Action",
@@ -52,6 +64,8 @@ __all__ = [
     "PlayPhaseQuery",
     "PlayerPublic",
     "PlayerView",
+    "PublicEvent",
+    "PublicMove",
     "Query",
     "QueryKind",
     "RespondContext",
@@ -665,6 +679,66 @@ class ArrangeContext:
     """
 
 
+@dataclass(frozen=True, slots=True)
+class PublicMove:
+    """一条**牌移动**事实的公开形态（ai-view 票 06；``PlayerView.public_history`` 的载荷）。
+
+    ``card_move`` 的原始载荷带**每一张**牌的牌面，而牌面是否公开取决于它此刻在哪个区
+    （以及它是不是**扣置**进去的，票 12 的持久公开事实）。公开面进视角时把它换成这个
+    形状：公开的那几张进 ``cards``，其余只按 ``hidden_count`` 计数——"某座位摸了 / 扣置了
+    N 张牌"是公开事实，"是哪几张"不是。
+
+    牌面是否公开的判据**只有一处**（``sgs.state.projection``），本模型只装结果；它不是
+    记录类型、不含 ``meaning`` / 提示文本类字段（语义归 AI 学）。
+
+    与 :class:`PublicEvent` 一样是**冻结值类型 / 不进记录流**（``PlayerView`` 上
+    ``exclude=True``）：投影每询问现算（5 人局实测 664 次）× 每次 ≤ 32 条，故它的构造
+    必须便宜——冻结 dataclass 的构造实测约 1.1 µs，同形状的 pydantic 模型约 3.0 µs
+    （``PlayerView`` 仍会校验这两格，``exclude`` 只省序列化、不省校验；差别在构造）。
+    生产者只有投影一处，输入都是引擎已校验过的事实。
+    """
+
+    reason: MoveReason
+    from_zone: ZoneRef
+    to_zone: ZoneRef
+    cards: tuple[CardRef, ...] = ()
+    """牌面**公开**的那几张（按移动载荷的顺序）；来源 / 目标区照原样给出。"""
+
+    hidden_count: int = 0
+    """牌面**不公开**的张数（只报数、不报牌）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PublicEvent:
+    """公开面进视角后的**一条事件**（ai-view 票 06）：``(起因, 效果编号, 载荷)``。
+
+    - ``cause`` = 这条事实的**起因**（发出时的所有者 + 技能实例，见
+      :class:`~sgs.state.Cause`）；它**同时就是效果编号**（``trigger`` / ``order`` 两段）。
+      ``None`` = 引擎级事件（摸牌 / 回合切换 / 开局一类）。
+    - ``fact_class`` = **机械类别**（``move:DRAW`` / ``delta:hp_change`` / ``answer:UseCard``，
+      与 :func:`~sgs.state.fact_class` 同源）。它在投影时算好：载荷被裁成 ``None`` 时，
+      "这是哪一种事实"仍然可读——类别是构造出来的，不是语义解释。
+    - ``payload`` = **公开载荷**；``None`` = 这条事实的载荷**不公开**（事实本身公开：
+      谁在什么时机做了什么，仍由 ``actor`` / ``targets`` / ``window`` 回答）。载荷形态：
+      变化事实 = 原来的 delta 模型（``card_move`` 换成 :class:`PublicMove`）；步骤答案 =
+      原来的行动模型（``ActivateSkill`` 的 ``picks`` 剥掉——它不是面内位置就是实体牌 id）。
+
+    这是**有界**切片里的一条（``PlayerView.public_history`` 恒 ≤
+    :data:`~sgs.state.PUBLIC_SURFACE_RECENT_LIMIT` 条），不是记录类型：它不进记录流，
+    47 条金录像因此逐字节不变。冻结值类型（同 :class:`PublicMove` 的理由）：投影每询问
+    现算一次、构造量固定（≤32 条/次），省下的是**构造**开销（``PlayerView`` 仍会校验这两格）。
+    """
+
+    seq: int
+    kind: FactKind
+    fact_class: str
+    actor: int | None
+    targets: tuple[int, ...]
+    window: str | None
+    cause: Cause | None = None
+    payload: Any = None
+
+
 class PlayerPublic(_FrozenModel):
     """公开区里的一个座位：对手只暴露手牌**数**，身份按可见性规则给出。
 
@@ -805,6 +879,31 @@ class PlayerView(_FrozenModel):
     另票）：``sgs.agents.heuristic._AI_READ_POINTS["PlayerView"]["processing_concealed"]``，
     理由也抄在 ``docs/agents/ai-adaptation.md`` §1.5 的信息通道先例里。空元组 = 处理区里
     没有扣置牌。
+    """
+    public_counts: tuple[PublicCount, ...] = Field(default=(), exclude=True)
+    """**（发起座位 × 涉及座位 × 事实类）→ 次数**的聚合计数（ai-view 票 06）。
+
+    照搬 :attr:`~sgs.state.GameState.public_surface` 的 ``counts``（同一份事实、不另算
+    一份）：每格回答"这个座位对那个座位做过几次这一类事实"——**敌意 / 有利由读方自己判**
+    （``kind`` 是机械类别，不写语义；"净意图"由权重学，票 08）。键空间 = 座位对 × 事实类，
+    **与局长无关**（实测：5 人局 123–165 格、8 人局 181–265 格；上限 (n+1)² × 45）。
+    顺序 = 首次出现序（确定性；本项目禁无序容器参与顺序）。
+
+    ``exclude``：不进记录流（同 ``hero_zone_cards`` / ``processing_concealed``），47 条
+    冻结金录像与 60 条基线因此**零字节变化**。**读点登记为不读**：把行为计数定价
+    （身份后验 / 集火）是票 07 的读法变更，本票只让视图能看见。
+    """
+    public_history: tuple[PublicEvent, ...] = Field(default=(), exclude=True)
+    """最近 K 条**公开事件**（ai-view 票 06；K = :data:`PUBLIC_SURFACE_RECENT_LIMIT`）。
+
+    照搬 ``GameState.public_surface.recent``，但载荷先过一层**公开性裁剪**（见
+    :class:`PublicEvent` 与 :func:`~sgs.state.projection.project`）：隐藏手牌 / 牌堆顺序 /
+    未亮明的身份 / 扣置牌的真值 / 隐藏步骤的答案都不进这个字段。有界是硬约束：``recent``
+    本身恒 ≤ 32 条（票 04），故这里不做全量事件表——``project()`` 每询问现算（5 人局实测
+    664 次/局），全量事件会是 O(N) 现算、随局变长。
+
+    ``exclude`` 与 ``public_counts`` 同一条纪律（不进记录流）；读点登记为**不读**（用是
+    票 07）。空元组 = 本局还没有公开事实。
     """
 
 

@@ -172,6 +172,7 @@ __all__ = [
     "same_kingdom",
     "skill_used_this_turn",
     "state_change",
+    "step_visibility_of",
     "terminate_activation_pass",
     "timing_hooks_present",
 ]
@@ -5415,3 +5416,28 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由
 这里的 :func:`sgs.skills.heroes.conversion_skill_definitions` 现取现并，故两半都不会漏。
 """
+
+
+def step_visibility_of(cause: Cause | None, step: str | None) -> StepVisibility | None:
+    """一条**步骤答案**在可见性表里的值（ai-view 票 06；表的唯一读入口）。
+
+    ``step`` 是询问自己的 ``skill_id``（:attr:`~sgs.state.PublicFact.step`）：流水线步骤给
+    ``<短技能 id>:<步骤键>[:序号]``、手写段机给 ``<全限定技能 id>:<步骤键>`` 一类。解析规则
+    只用**起因的技能 id** 作前缀：技能 id 对得上才把剩余段当步骤键去查表——
+    对不上的（别的窗口 / 非本技能的询问）一律 ``None``，**不猜**。
+
+    ``None`` 有三个含义相同的来源：没有步骤标识、前缀不是这条技能、表里没有这一行
+    （手写段机的答案不在表里，票 05 的边界）。三种都**不裁剪**——它们装的不是流水线步骤
+    的值（选牌是面内位置、座位 / 选项是公开选择），真正可能装秘密的是表里登记为
+    ``HIDDEN`` 的那些行。
+    """
+    if cause is None or step is None:
+        return None
+    definition = CATALOG.get(cause.skill_id)
+    if definition is None or definition.step_visibility is None:
+        return None
+    for prefix in (cause.skill_id, cause.skill_id.rsplit(".", 1)[-1]):
+        if step.startswith(f"{prefix}:"):
+            key = step[len(prefix) + 1 :].split(":", 1)[0]
+            return definition.step_visibility.get(key)
+    return None

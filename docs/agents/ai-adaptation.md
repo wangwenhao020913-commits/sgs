@@ -52,6 +52,17 @@
    全量（`view.processing`），本票只让展示层不画扣置牌的面；把扣置牌从定价 / 记牌里摘出去
    是另票的读法变更（那一票要让 `_conserved_card_count` / `_visible_card_faces` 一起动，
    并把 diff 逐条归因）。
+   **ai-view 票 06 的 `PlayerView.public_counts` / `public_history`** 是"历史通道"本身：
+   聚合计数（发起座位 × 涉及座位 × 机械事实类）+ 最近 K 条公开事件（起因 / 效果编号 /
+   **公开载荷**），两者 `exclude=True`（不进记录流、47 条金录像与 60 条基线零字节变化），
+   读点表登记为**不读**——票 06 只让视图能看见，定价（身份后验 / 集火）与似然表是票 07 的
+   读法变更。**历史不是全量事件表**：`recent` 恒 ≤ 32 条、计数键空间 = 座位对 × 事实类
+   （都与局长无关），投影每询问现算也不会随局变长。**载荷在投影期裁剪**（票 04 的缓冲仍是
+   原始事实面）：隐藏牌面 / 牌堆顺序 / 未亮明身份 / 隐藏步骤的答案值 / 扣置牌真值都不进
+   视图；其中"隐藏步骤"由**写点**按票 05 的可见性表解析成 `PublicFact.answer_hidden`
+   （`sgs.state` 不许深层 import `sgs.skills`，读表住引擎），变化事实的载荷处置则是
+   `sgs.state.projection` 里的**闭集登记**（`_DELTA_PAYLOAD_RULES`，未登记即 `KeyError`）。
+   记牌守恒量**不受影响**（新字段不喂 `_conserved_card_count` / `_visible_card_faces`）。
 6. **回归**：≥1 条"不犯已知的蠢"用例进 `tests/test_ai_cases.py`；本票进决策 diff 批，diff 非空
    逐条解释（"为什么改对了"比"改了"重要）。
 

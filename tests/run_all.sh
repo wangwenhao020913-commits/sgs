@@ -117,6 +117,7 @@ tier_patterns() {
         'tests/test_m5_no_leak.py' \
         'tests/test_exchange_visibility.py' \
         'tests/test_public_surface.py' \
+        'tests/test_public_view.py' \
         'tests/test_visibility_table.py' \
         'tests/test_action_contract.py' \
         'tests/test_timing*.py' \

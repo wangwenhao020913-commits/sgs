@@ -1415,6 +1415,24 @@ class PublicFact(_FrozenModel):
     """起因；``None`` = **引擎级事件**（摸牌 / 回合切换 / 开局一类，见
     :data:`ENGINE_LEVEL_FACT_CLASSES`）。技能结算内的事实**不许**缺起因（引擎直接 raise）。"""
 
+    step: str | None = None
+    """这条步骤答案问的是**哪一个步骤**（ai-view 票 06）：``<技能 id>:<步骤键>[:序号]``。
+
+    取值 = 询问自己的 ``skill_id``（``step_option_key`` 的形状；手写段机给全限定 id、
+    流水线步骤给短 id）。它**只服务边界裁剪的审计与追溯**：变化事实 / 不带步骤的询问恒
+    ``None``。**不写语义**：步骤键是声明里的名字，不是"这一步值多少分"。
+    """
+
+    answer_hidden: bool = False
+    """这条步骤答案的边界值登记为 **HIDDEN** 吗（ai-view 票 06；票 05 的可见性表）。
+
+    在**写点**（``Engine._note_public_answer``）解析、以布尔落盘：``sgs.state`` 是
+    ``sgs.skills`` 的下层（子包边界纪律禁止深层跨子包 import），故"读表"这一步住引擎，
+    事实只带**结果**——投影据此决定载荷进不进视图（``PlayerView.public_history``）。
+    表里没有这一行（手写段机的答案）⇒ ``False``：它们的答案值不是流水线步骤的秘密
+    （选牌是面内位置、座位 / 选项是公开选择，见票 05 的边界）。
+    """
+
 
 class PublicCount(_FrozenModel):
     """公开面的**聚合计数**一格：``(发起座位, 涉及座位, 事实类) -> 次数``（ai-view 票 04）。"""

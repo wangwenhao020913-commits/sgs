@@ -102,6 +102,7 @@ from sgs.skills import (
     SeamKind,
     SeatModifierKind,
     StateChange,
+    StepVisibility,
     advance_provider,
     auto_start_for,
     awakening_skill_awakened,
@@ -135,6 +136,7 @@ from sgs.skills import (
     seat_persistent_bonus,
     source_key,
     start_provider,
+    step_visibility_of,
     timing_hooks_present,
     transform_candidates,
     validate_activation,
@@ -738,6 +740,31 @@ def _answer_targets(action: Action) -> tuple[int, ...]:
         if seat not in seats:
             seats.append(seat)
     return tuple(seats)
+
+
+def _answer_step(query: Query) -> str | None:
+    """这条答案问的是**哪一个步骤**（ai-view 票 06；形状见 ``PublicFact.step``）。
+
+    只有"选项 / 座位"两类询问带步骤标识：它们的 ``skill_id`` 就是 ``step_option_key`` 的
+    形状（``<短技能 id>:<步骤键>[:序号]``，手写段机给全限定 id）。其余询问的 ``skill_id``
+    要么是**技能**（``SKILL_ACTIVATION`` / ``SELECT_CARDS`` 的发动后步骤），要么根本没有
+    ——把技能 id 当步骤键喂给可见性表只会整批判成"未登记"，故这里只取这两类。
+    """
+    if query.kind not in (QueryKind.SELECT_OPTION, QueryKind.SELECT_OPTIONS):
+        return None
+    return str(getattr(query, "skill_id", "") or "") or None
+
+
+def _answer_hidden(cause: Cause | None, step: str | None) -> bool:
+    """这条步骤答案的边界值是不是 ``HIDDEN``（ai-view 票 06；票 05 的可见性表）。
+
+    **读表住引擎**：``sgs.state`` 是 ``sgs.skills`` 的下层（子包边界纪律禁止深层跨子包
+    import），故写点在这里把"这一步的答案进不进公开面"解析成布尔、随事实落盘；投影只读
+    结果。表里没有这一行（手写段机的答案）⇒ ``False``。
+    """
+    if step is None:
+        return False
+    return step_visibility_of(cause, step) is StepVisibility.HIDDEN
 
 
 def _child_payload(
@@ -1564,12 +1591,18 @@ class Engine:
 
         起因在**提问那一刻**定格（:attr:`_pending_answer_cause`）：钩子体在挂起时已经退出
         作用域，若在这里现读栈，被动技的步骤答案会丢掉起因。
+
+        ``step``（ai-view 票 06）= 这一问自己的 ``skill_id``（步骤步 / 手写问的
+        ``<技能 id>:<步骤键>`` 形状）：票 05 的可见性表按它裁视图，故必须与**询问**同源
+        记下来——投影期没有第二个地方能回答"这条答案是哪一步的"。解析结果
+        （``answer_hidden``）一并落盘：表住技能侧，投影（``sgs.state``）不许反向下探。
         """
         query = self.pending
         assert query is not None  # 调用点 = `_answer_to`，此刻询问还在
         cause = self._pending_answer_cause
         if cause is None:
             self._require_cause("步骤答案")
+        step = _answer_step(query)
         self.public_surface.record(
             PublicFact(
                 seq=self._last_seq,
@@ -1579,6 +1612,8 @@ class Engine:
                 window=str(query.kind),
                 payload=action,
                 cause=cause,
+                step=step,
+                answer_hidden=_answer_hidden(cause, step),
             )
         )
         self._pending_answer_cause = None

@@ -129,6 +129,7 @@ from .catalog import (
     seat_persistent_modifiers,
     skill_used_this_turn,
     state_change,
+    step_visibility_of,
     terminate_activation_pass,
     timing_hooks_present,
 )
@@ -623,6 +624,7 @@ __all__ = (
     "skill_used_this_turn",
     "state_change",
     "start_provider",
+    "step_visibility_of",
     "target_change_skill_definitions",
     "target_is_ineffective",
     "tiandu_handler",
