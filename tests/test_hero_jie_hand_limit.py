@@ -27,6 +27,7 @@ from sgs.effects import check_targets, discard_count, hand_limit
 from sgs.engine import Engine
 from sgs.state import (
     FrameKind,
+    MoveReason,
     Pass,
     QueryKind,
     SelectCards,
@@ -1082,6 +1083,80 @@ def test_jie_fanjian_reveals_the_given_card_and_the_targets_hand():
     ]
     assert given in revealed, "交出的那张是展示的"
     assert same_suit in revealed, "目标展示所有手牌"
+
+
+def test_jie_fanjian_gives_card_id_zero_only_once_when_its_target_dies_from_choice_two():
+    """回归（fuzz-dead-player-cards 票 01）：**0 号牌**在手时，交出那一步不能被重跑。
+
+    seed=11708824395823848589 / 7 人（票面基线 ``5139275``）撞到"座位 1 已阵亡、仍有手牌
+    1"。取证结论不是票面猜的"没有终点区就按 owner 回流"：现场栈是界周瑜【反间】的**交出
+    那一步**（``_jie_fanjian_effect``），触发牌是 **0 号牌**（标准 108 的第一张：桃园结义
+    ♥1）。目标选②失去体力把自己打死后，效果从 LIFE_DECREASE 子帧续跑；``_JIE_FANJIAN_GIVEN``
+    存的是 ``card_id``，旧实现按真值判（``if not frame.data.get(...)``）⇒ **0 被读成"还没
+    交"**，于是同一张牌被从弃牌堆又 PUT 进死者的手牌区。
+
+    本用例把目标摆成 1 点体力、发动者手里只有 0 号牌：选②当场打死目标，正是现场形状。
+    判据落在**记录流 + 终局状态**两处：交出只有一次、死者手牌为空、那张牌在弃牌堆。
+    """
+    given = 0
+    assert PACK.deck.cards[given].type == "peach_garden", "0 号牌按本档数据是桃园结义 ♥1"
+    same_suit = _heart_card(exclude={given})
+    different_suit = _spade_card(exclude={given, same_suit})
+    state = build_state(
+        pack=PACK,
+        seats=[
+            # 发动者手里**只有** 0 号牌：选牌步因此没有第二个候选（交出的一定是它）。
+            SeatSpec(hand=(given,)),
+            # 目标 1 点体力：选②"失去 1 点体力"当场进濒死，无人出【桃】即阵亡。
+            SeatSpec(hp=1, hand=(same_suit, different_suit)),
+            # 第三座：死一个之后场上还有两活人 ⇒ 对局**不终局**，技能帧才会续跑
+            # （这正是现场与 fuzz 的形状；两人局会在死亡检测点直接收局，复现不出来）。
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(given, same_suit, different_suit),
+        turn_seat=0,
+    )
+    state.player(0).granted_skills.append(JIE_FANJIAN)
+    engine = Engine.from_state(state, seed=7)
+    driver = _JieFanjianDriver(seat=1, choice="lose_hp")
+    players = [driver, driver, driver]
+    _advance(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and getattr(e.pending, "skill_id", None) == "fanjian:choice",
+    )
+    engine.submit(driver.respond(engine.pending))
+    _advance(
+        engine,
+        players,
+        lambda e: e.finished
+        or (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and e.pending.actor == 0
+        ),
+    )
+
+    puts = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.PUT
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == 1
+    ]
+    assert len(puts) == 1, "交出那一步只发生一次（0 号牌不能因游标按真值判而被重放）"
+    assert engine.state.player(1).alive is False, "选②把 1 点体力的目标打死了"
+    assert engine.state.player(1).hand == [], "阵亡者手牌必须被清空"
+    assert given in engine.state.discard, "交出去的那张随死亡进弃牌堆，而不是回到死者手里"
+    reveals = [
+        record.card.card_id
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "card_reveal"
+    ]
+    assert reveals == [given], "展示也只发生一次"
 
 
 def test_jie_fanjian_is_once_per_play_phase():

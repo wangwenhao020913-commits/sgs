@@ -1024,7 +1024,12 @@ _JIE_FANJIAN_ASK = "fanjian:choice"
 """
 
 _JIE_FANJIAN_GIVEN = "jie_fanjian_given"
-"""帧私有：那张手牌已经交出（搬牌挂起后的续跑不重搬）。"""
+"""帧私有：那张手牌已经交出（搬牌挂起后的续跑不重搬）。
+
+只存 ``True``，判据只认"键在不在"：**游标不许按真值判**。这里曾存 ``card_id``，而 ``0``
+是合法牌号（标准 108 的第一张），一次已完成的交出因此被读成"还没交"——目标阵亡后续跑，
+同一张牌被第二次 PUT 进**死者手牌**（`fuzz-dead-player-cards` 票 01）。
+"""
 
 _JIE_FANJIAN_CHOICE = "jie_fanjian_choice"
 """帧私有：目标选的那一项（重入不重问）。"""
@@ -1065,8 +1070,8 @@ def _jie_fanjian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     owner = frame.data["source"]
     target = int(answers["seat"][0])
     card = state.card(int(answers["card"][0]))
-    if not frame.data.get(_JIE_FANJIAN_GIVEN):
-        frame.data[_JIE_FANJIAN_GIVEN] = card.card_id
+    if _JIE_FANJIAN_GIVEN not in frame.data:
+        frame.data[_JIE_FANJIAN_GIVEN] = True
         host.reveal_card(frame, owner, card)
         control = host.move_in_frame(
             frame,

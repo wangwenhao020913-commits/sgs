@@ -3,6 +3,13 @@
 断言全部落在**记录流与棋盘状态**上：时机 / delta / query / action、体力、区域、手牌数。
 不碰帧私有 ``data`` / ``pc``，也不碰注册表内部结构。
 
+**唯一例外**：``test_harvest_skips_a_target_that_died_before_its_pick`` 按票面要求
+（flow-resume-step-cancel 票 09 §4）把局面**直接摆成使用结算的中间态**——``build_state``
+摆棋盘、``Engine.push_frame`` 摆一个"目标表已冻结、逐座游标还没走完"的 ``RESOLVE`` 帧。
+它写一次帧私有 ``data``（``targets`` / ``cursor`` / ``revealed``），此后仍全走产品路径
+（C 段步骤表、真实搬牌与询问记录），断言也只读记录流与棋盘；写这一次是为了让"死者那一座
+不被问、也不拿牌"这一面可判（随机局里那一幕只能靠撞）。
+
 覆盖三组行为：
 
 1. **多目标两段式**：B 段"时机外层、目标内层"、C 段一个 ``RESOLVE`` 帧 + 游标逐目标、
@@ -1256,6 +1263,76 @@ def test_harvest_revealed_cards_end_in_hands_and_processing_is_emptied(pack):
     assert after_end, "使用结算结束后已到"
     assert engine.state.processing == []
     assert harvest in engine.state.discard
+
+
+def test_harvest_skips_a_target_that_died_before_its_pick(pack):
+    """回归（flow-resume-step-cancel 票 09）：逐座取牌队列里**死者不再被问、也不拿牌**。
+
+    现场是门禁 fuzz 的 seed=15962758650526724301 / 7 人（seq=2263）：五谷丰登的亮牌队列
+    里 3 名角色，其中 1 名在轮到自己取牌前阵亡，旧实现仍向死者发 ``SELECT_CARDS`` 并把
+    一张牌 ``PUT`` 进死者手牌（"阵亡者三区为空"判红）。目标表在"使用时"就冻结，死者不会
+    自己从队列里消失，故过滤点在 :func:`sgs.effects.ops.pick_harvest`（与濒死求桃的
+    "活人环"同一纪律）：跳过它，它那一份留在处理区由 ``finish_harvest`` 一并弃掉。
+
+    局面按票面 §4 的写法**直接摆成中间态**：``build_state`` 把三张亮牌放进处理区，再用
+    :meth:`~sgs.engine.Engine.push_frame` 压一个"目标表已冻结、游标还没走完"的 ``RESOLVE``
+    帧（座位 1 已阵亡，座位 0 / 2 存活）。此后**全部走产品路径**：C1–C5 的步骤表、真实
+    搬牌、真实询问记录。判据三面——**谁被问**（询问记录里没有 1）、**牌落在哪**（两活人
+    各一张进手牌）、**死者的手牌区**（空）、**死者那一份**（留在处理区）。
+    """
+    harvest = cards_of_type(pack, "harvest")[0]
+    revealed = tuple(
+        card_id for card_id in range(len(pack.deck.cards)) if card_id != harvest
+    )[:3]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec(alive=False, hp=0), SeatSpec()],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in (*revealed, harvest)
+        ),
+        processing=revealed,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(harvest),
+            "source": 0,
+            "targets": (0, 1, 2),
+            "cursor": 0,
+            "revealed": revealed,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    players = [RecordingPlayer(), RecordingPlayer(), RecordingPlayer()]
+    for _ in range(500):
+        if not engine.stack.frames:
+            break
+        if engine.pending is None:
+            engine._step()
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+
+    selections = _queries(engine, QueryKind.SELECT_CARDS)
+    assert [query.actor for query in selections] == [0, 2], (
+        "已阵亡的座位 1 不该被问（「活人环」纪律）"
+    )
+    assert not [
+        record.query for record in engine.records
+        if record.kind == "query" and record.query.actor == 1
+    ], "死者在这次结算里一条询问都不该收到"
+    assert len(engine.state.player(0).hand) == 1, "座位 0 取到一张"
+    assert len(engine.state.player(2).hand) == 1, "座位 2 取到一张"
+    assert engine.state.player(1).hand == [], "死者的手牌区必须是空的"
+    taken = (*engine.state.player(0).hand, *engine.state.player(2).hand)
+    assert len(engine.state.processing) == 1, (
+        "死者那一份留在处理区，由 finish_harvest 一并弃掉（不转给下家、不占份额）"
+    )
+    assert engine.state.processing[0] not in taken, "留下的那张不该被别的座位取走"
 
 
 def test_harvest_terminates_the_use_when_the_reveal_cannot_complete(pack):
