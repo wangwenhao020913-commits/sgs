@@ -2339,56 +2339,14 @@ def test_a_multi_candidate_face_prefers_the_unknown_skill_over_pass_after_the_kn
     assert isinstance(HeuristicPlayer(_stream(4)).respond(query), Pass)
 
 
-def test_select_cards_keeps_the_valuable_cards_when_they_are_a_cost():
-    peach, slash = _ids("peach")[0], _ids("slash")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hand=(peach, slash)), SeatSpec()],
-        deck=_deck_excluding(peach, slash),
-        turn_seat=0,
-    )
-    slots = (
-        Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(slash)),
-        Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(peach)),
-    )
-    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1))
-    actions = legal_actions_for(
-        state,
-        0,
-        QueryKind.SELECT_CARDS,
-        answers_seq=1,
-        payload=SelectContext(spec=spec, slots=slots),
-    )
-    query = SelectCardsQuery(
-        seq=1,
-        actor=0,
-        timing=Timing.PHASE_PLAY_IDLE,
-        prompt="选一张。",
-        legal_actions=actions,
-        view=project(state, 0),
-        spec=spec,
-        slots=slots,
-    )
-
-    action = HeuristicPlayer(_stream(6)).respond(query)
-
-    assert action.picks == (0,), "成本选牌取低价值的【杀】而不是【桃】"
-
-
-# ---------------------------------------------------------------------------
-# ⑥ 亮出的牌的两种语义（票 20）：**交出去**按最坏情形、**获得**按收益
-#
-# 【遗计】的亮牌来自牌堆顶，收牌人在**下一步**（``SELECT_OPTION`` 的 ``seat:N``）才选
-# ⇒ 选牌步没有收牌人可读，只能按"最坏情形（这些牌落到谁手里都可能，按敌人算）"估：
-# 给出的牌越多越亏，故一轮**只交 1 张**（票 20 的选项 1；两张分两轮、每轮可换人）。
-# 【反馈】拿起源的一张牌是**真的进自己手牌** ⇒ 同一张牌按收益估、取最值钱的那张。
-# 两条在同一个打分器里靠"牌在谁的区"分开：下面两条用例把方向钉在**同一种牌、同一个
-# 时机**上，只换"牌在谁的区"，改坏任一侧都会有一条红。
-# ---------------------------------------------------------------------------
-
-
 def _select_cards_face(state, *, refs, spec, timing, revealed=()) -> SelectCardsQuery:
-    """搭一条与引擎同形的 ``SELECT_CARDS`` 询问（候选由真局面 + 同一份 spec 生成）。"""
+    """搭一条与引擎同形的 ``SELECT_CARDS`` 询问（候选由真局面 + 同一份 spec 生成）。
+
+    ``refs`` = ``(ZoneRef, card_id)`` 逐槽给**归属**；``revealed`` 只在"授予面"上给
+    （【遗计】的亮牌由 ``_yiji`` 的 ``ask_selection(revealed=remaining)`` 写入，牌面只进
+    这一次询问、不进任何视角）。这两个面上引擎写的 ``skill_id`` 是 ``None``（询问由手写
+    回调发，不带技能 id），故本函数也不填——打分器读的是槽位归属，不是技能名。
+    """
     slots = tuple(Slot(ref=ref, card=state.card(card_id)) for ref, card_id in refs)
     actions = legal_actions_for(
         state,
@@ -2410,10 +2368,45 @@ def _select_cards_face(state, *, refs, spec, timing, revealed=()) -> SelectCards
     )
 
 
-def test_select_cards_takes_the_most_valuable_card_when_the_step_is_a_gain():
-    """【反馈】形状（别人的牌 ⇒ 真的进自己手牌）：拿最值钱的那张，不是先铺的那张。
+def test_select_cards_keeps_the_valuable_cards_when_they_are_a_cost():
+    peach, slash = _ids("peach")[0], _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(peach, slash)), SeatSpec()],
+        deck=_deck_excluding(peach, slash),
+        turn_seat=0,
+    )
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1))
+    query = _select_cards_face(
+        state,
+        refs=((ZoneRef(Zone.HAND, 0), slash), (ZoneRef(Zone.HAND, 0), peach)),
+        spec=spec,
+        timing=Timing.PHASE_PLAY_IDLE,
+    )
 
-    【桃】排在【杀】**之后**，故"拿【桃】"只能来自牌价，不来自候选序。
+    action = HeuristicPlayer(_stream(6)).respond(query)
+
+    assert action.picks == (0,), "成本选牌取低价值的【杀】而不是【桃】"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 亮出的牌的两种语义（票 20）：**交出去**按最坏情形、**拿别人的**按收益
+#
+# 【遗计】的亮牌来自牌堆顶，收牌人在**下一步**（``SELECT_OPTION`` 的 ``seat:N``）才选
+# ⇒ 选牌步没有收牌人可读，只能按"最坏情形（这些牌落到谁手里都可能，按敌人算）"估：
+# 给出的牌越多越亏，故一轮**只交 1 张**（票 20 的选项 1；两张分两轮、每轮可换人）。
+# 别人的牌（【反馈】/【反间】/【麒麟弓】那一侧）则按收益估：同一张牌取最值钱的那张。
+# 两条在同一个打分器里靠"牌在谁的区"分开：下面两条用例把方向钉在**同一种牌、同一个
+# 时机**上，只换"牌在谁的区"，改坏任一侧都会有一条红。
+# ---------------------------------------------------------------------------
+
+
+def test_select_cards_prefers_the_valuable_card_when_it_belongs_to_another_seat():
+    """别人的牌（【反馈】/【反间】/【麒麟弓】那一侧）：取高价值的，不是先铺的那张。
+
+    【桃】排在【杀】**之后**，故"取【桃】"只能来自牌价，不来自候选序。与下一条成对：
+    同一种牌、同一个时机，只换"牌在谁的区"，答案从"取最值钱"翻成"只交一张"——
+    「拿别人的 / 拆对家」与「交出去」两个方向因此不会一起反转（票 20 的判据之一）。
     """
     peach, slash = _ids("peach")[0], _ids("slash")[0]
     state = build_state(
@@ -3079,24 +3072,31 @@ RATE_SEEDS: tuple[int, ...] = tuple(range(5000, 5128))
 **票 15 的实测与根因留档**（改动本身与绝对档无关，仍值得记）：票 15 之后 75/128 = 0.586
 （随机档同批 53/128 = 0.414），比上一条基线的 79/128 低 4 局（种子 113 / 181 / 209 / 217
 由胜转负，没有反向翻盘）。384 局（104–487）的复核口径同样只差 4 局：启发式 229 vs 233、
-随机 134 vs 130 ⇒ 变化是**约 1% 量级的小幅**，不是崩坏。原因**已定位**：【遗计】的选牌面
-新增了"两张一起选"的候选（票 15 的用户口径），而当时的 `_score_select_cards` 按"选别人的
-牌取高价值"打分、**不看收牌人是谁**，于是启发式从"一次一张、按 `SELECT_OPTION` 分别给不同
-玩家"变成"一次把两张都给同一名玩家"——给错了人。
+随机 134 vs 130 ⇒ 变化是**约 1% 量级的小幅**，不是崩坏。
 
-**票 20 复核（缺口已收口，不再单立票）**：选牌步现在按**最坏情形**估（亮牌记 ``-牌价`` ⇒
-一轮只交 1 张，两张分两轮、每轮可换人，见 :func:`sgs.agents.heuristic._step_card_score`），
-收牌人步把"交给自己"从帮助类的 ``+2`` 改成 no-op（`ai-light` 票 24 的 D3）。护栏三条：
-``test_select_cards_hands_out_one_revealed_card_at_a_time``（模型方向：同一面上"两张一起"
-必须严格低于只交一张）、``test_select_cards_takes_the_most_valuable_card_when_the_step_is_a_gain``
-（反方向：【反馈】那种"真的进自己手牌"的牌仍取高价值）与
+**真正的原因（票 20 复核，2026-11-25 在票 15 的落地提交 `a92b2eb` 上实测）**：票 15 把选牌面
+从 ``total=(1, 1)`` 放宽到 ``(1, 2)`` 时给的是 ``optional=True``——候选里因此有 ``Pass``，
+而 ``Pass`` 记 0 分、交一张记 ``-牌价``（牌价恒正）⇒ 启发式**恒选放弃**。同一条 128 局批上
+实测：19 次【遗计】选牌步 **19 次全是 `Pass`**（0 次选牌、0 次"两张一起"）；只把这一处换成
+``optional=False``（其余代码不动）后，同一批种子回到 **78/128 = 0.609**（30 次选牌全为 1 张）。
+所以掉的那 4 局**不是**"一次把两张都给同一名玩家"——那句判断（票 20 票面抄过、本段旧文也抄
+过）在落地提交上不成立：`_score_select_cards` 自票 13 / W4 的成本模型起就把本人区的槽记
+``-牌价``，"两张一起"恒严格更低，从来没被选中过。真正的修法是后来的 U2-12（删掉选牌步的
+``Pass`` 出口；`tests/test_ai_cases.py` 的 `assert not query.spec.optional` 钉住这一条），
+不是打分模型的改动。
+
+**票 20 复核（缺口已收口，不另立票）**：HEAD 上选牌步按**最差情形**估（亮牌记 ``-牌价`` ⇒
+一轮只交 1 张，见 :func:`sgs.agents.heuristic._step_card_score`），收牌人步的"交给自己"由
+`ai-light` 票 24 的 D3 记 no-op（0 分）。两条护栏钉住方向：
+``test_select_cards_hands_out_one_revealed_card_at_a_time``（同一面上"两张一起"必须严格低于
+只交一张）与 ``test_select_cards_prefers_the_valuable_card_when_it_belongs_to_another_seat``
+（反方向：别人的牌仍取高价值）；真引擎侧原有的
 ``tests/test_ai_cases.py::test_the_yiji_pick_step_gives_one_card_while_the_recipient_is_unknown``
-（真引擎的一次【遗计】询问）。真 5 人局探针（郭嘉钉座位 0、120 局）：``total=(1, 2)`` 的
-选牌步 **712 次全是 1 张**（0 次两张一起），712 次交牌里 392 次给盟友、230 次给自己、90 次
-落在身份后验平手（= 平分抽签）、**0 次给已明敌人**。四颗种子（113 / 181 / 209 / 217）在票 12
-换每座位子流之后已是另一批局面，今天四局全是启发式胜（随机档 1/4）；128 局批
-（``5000..5127``）复核启发式 **91/128 = 0.711**、随机 **57/128 = 0.445**（相对优势 0.266）
-⇒ 票 20 要的"回到 ≥ 0.6"按今天的种子批满足，判据本身仍是相对档（上面 §评审处置）。"""
+（D3 落地时加的）仍钉着同一条行为。真 5 人局探针（郭嘉钉座位 0、120 局）：``total=(1, 2)`` 的
+选牌步 **712 次全是 1 张**、712 次交牌 **0 次给已明敌人**。四颗种子（113 / 181 / 209 / 217）
+按票面留作回归样本（票 12 换每座位子流之后已是另一批局面，今天四局启发式全胜）。绝对胜率
+只作**诊断读数**（§5 已删掉绝对下限，不在测试里断言）：本批 ``5000..5127`` 上启发式 91/128、
+随机 57/128。"""
 
 
 def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> dict[int, bool]:
