@@ -2375,6 +2375,110 @@ def test_select_cards_keeps_the_valuable_cards_when_they_are_a_cost():
     assert action.picks == (0,), "成本选牌取低价值的【杀】而不是【桃】"
 
 
+# ---------------------------------------------------------------------------
+# ⑥ 亮出的牌的两种语义（票 20）：**交出去**按最坏情形、**获得**按收益
+#
+# 【遗计】的亮牌来自牌堆顶，收牌人在**下一步**（``SELECT_OPTION`` 的 ``seat:N``）才选
+# ⇒ 选牌步没有收牌人可读，只能按"最坏情形（这些牌落到谁手里都可能，按敌人算）"估：
+# 给出的牌越多越亏，故一轮**只交 1 张**（票 20 的选项 1；两张分两轮、每轮可换人）。
+# 【反馈】拿起源的一张牌是**真的进自己手牌** ⇒ 同一张牌按收益估、取最值钱的那张。
+# 两条在同一个打分器里靠"牌在谁的区"分开：下面两条用例把方向钉在**同一种牌、同一个
+# 时机**上，只换"牌在谁的区"，改坏任一侧都会有一条红。
+# ---------------------------------------------------------------------------
+
+
+def _select_cards_face(state, *, refs, spec, timing, revealed=()) -> SelectCardsQuery:
+    """搭一条与引擎同形的 ``SELECT_CARDS`` 询问（候选由真局面 + 同一份 spec 生成）。"""
+    slots = tuple(Slot(ref=ref, card=state.card(card_id)) for ref, card_id in refs)
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots),
+    )
+    return SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=timing,
+        prompt="请选择牌。",
+        legal_actions=actions,
+        view=project(state, 0),
+        spec=spec,
+        slots=slots,
+        revealed=revealed,
+    )
+
+
+def test_select_cards_takes_the_most_valuable_card_when_the_step_is_a_gain():
+    """【反馈】形状（别人的牌 ⇒ 真的进自己手牌）：拿最值钱的那张，不是先铺的那张。
+
+    【桃】排在【杀】**之后**，故"拿【桃】"只能来自牌价，不来自候选序。
+    """
+    peach, slash = _ids("peach")[0], _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hand=(slash, peach))],
+        deck=_deck_excluding(peach, slash),
+        turn_seat=0,
+    )
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1))
+    query = _select_cards_face(
+        state,
+        refs=((ZoneRef(Zone.HAND, 1), slash), (ZoneRef(Zone.HAND, 1), peach)),
+        spec=spec,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+    )
+
+    action = HeuristicPlayer(_stream(6)).respond(query)
+
+    assert action.picks == (1,), "别人的牌 = 收益 ⇒ 取高价值的【桃】"
+
+
+def test_select_cards_hands_out_one_revealed_card_at_a_time():
+    """【遗计】形状（亮出的牌要交出去）：收牌人还没选 ⇒ 按最坏情形只交 1 张。
+
+    面里的两张牌都在**本人区**（引擎的授予通道只给位置：亮牌还在牌堆顶、不真的在我手里）、
+    且 ``revealed`` 非空；``total=(1, 2)`` 让"一张"与"两张"都是合法候选（票 15 的用户
+    口径）。"两张一起"必须**严格低于**"交一张"——否则启发式会一次把两张都给同一名玩家
+    （票 20 定位的缺口：那一刻还没选收牌人，给错了人也没法分两轮改）。与上一条成对：
+    同一种牌、同一个时机，只换"牌在谁的区"，答案从"取最值钱"翻成"只交一张"。
+    """
+    peach, slash = _ids("peach")[0], _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=(slash, peach, *_deck_excluding(slash, peach)),
+        turn_seat=0,
+    )
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 2), optional=False)
+    query = _select_cards_face(
+        state,
+        refs=((ZoneRef(Zone.HAND, 0), slash), (ZoneRef(Zone.HAND, 0), peach)),
+        spec=spec,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        revealed=(state.card(slash), state.card(peach)),
+    )
+
+    offers = [
+        action for action in query.legal_actions if isinstance(action, SelectCards)
+    ]
+    assert any(len(action.picks) == 2 for action in offers), (
+        "面内必须有「两张一起」那条路（票 15 的用户口径）"
+    )
+    scorer = heuristic_scoring._score_select_cards
+    one = max(scorer(query, action) for action in offers if len(action.picks) == 1)
+    two = next(scorer(query, action) for action in offers if len(action.picks) == 2)
+    assert two < one, "交出去的牌按最差情形估：两张一起必须严格低于只交一张"
+
+    action = HeuristicPlayer(_stream(6)).respond(query)
+
+    assert isinstance(action, SelectCards)
+    assert len(action.picks) == 1, (
+        f"收牌人未知时按最坏情形只交 1 张，实得 {len(action.picks)} 张"
+    )
+
+
 def test_select_option_greedily_takes_the_cheaper_loss():
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
     options = ("discard_one", "draw_one")
@@ -2976,11 +3080,23 @@ RATE_SEEDS: tuple[int, ...] = tuple(range(5000, 5128))
 （随机档同批 53/128 = 0.414），比上一条基线的 79/128 低 4 局（种子 113 / 181 / 209 / 217
 由胜转负，没有反向翻盘）。384 局（104–487）的复核口径同样只差 4 局：启发式 229 vs 233、
 随机 134 vs 130 ⇒ 变化是**约 1% 量级的小幅**，不是崩坏。原因**已定位**：【遗计】的选牌面
-新增了"两张一起选"的候选（票 15 的用户口径），而 `_score_select_cards` 只按**牌面价值**
-逐张累加、**不看收牌人是谁**（票 13 的"选别人的牌取高价值"模型里没有"交出去之后落到谁
-手里"这一维），于是启发式从"一次一张、按 `SELECT_OPTION` 分别给不同玩家"变成"一次把两张
-都给同一名玩家"——给错了人。这是**启发式模型的缺口**，不是引擎的规则错；缺口另立票修
-（`issues/20`）。"""
+新增了"两张一起选"的候选（票 15 的用户口径），而当时的 `_score_select_cards` 按"选别人的
+牌取高价值"打分、**不看收牌人是谁**，于是启发式从"一次一张、按 `SELECT_OPTION` 分别给不同
+玩家"变成"一次把两张都给同一名玩家"——给错了人。
+
+**票 20 复核（缺口已收口，不再单立票）**：选牌步现在按**最坏情形**估（亮牌记 ``-牌价`` ⇒
+一轮只交 1 张，两张分两轮、每轮可换人，见 :func:`sgs.agents.heuristic._step_card_score`），
+收牌人步把"交给自己"从帮助类的 ``+2`` 改成 no-op（`ai-light` 票 24 的 D3）。护栏三条：
+``test_select_cards_hands_out_one_revealed_card_at_a_time``（模型方向：同一面上"两张一起"
+必须严格低于只交一张）、``test_select_cards_takes_the_most_valuable_card_when_the_step_is_a_gain``
+（反方向：【反馈】那种"真的进自己手牌"的牌仍取高价值）与
+``tests/test_ai_cases.py::test_the_yiji_pick_step_gives_one_card_while_the_recipient_is_unknown``
+（真引擎的一次【遗计】询问）。真 5 人局探针（郭嘉钉座位 0、120 局）：``total=(1, 2)`` 的
+选牌步 **712 次全是 1 张**（0 次两张一起），712 次交牌里 392 次给盟友、230 次给自己、90 次
+落在身份后验平手（= 平分抽签）、**0 次给已明敌人**。四颗种子（113 / 181 / 209 / 217）在票 12
+换每座位子流之后已是另一批局面，今天四局全是启发式胜（随机档 1/4）；128 局批
+（``5000..5127``）复核启发式 **91/128 = 0.711**、随机 **57/128 = 0.445**（相对优势 0.266）
+⇒ 票 20 要的"回到 ≥ 0.6"按今天的种子批满足，判据本身仍是相对档（上面 §评审处置）。"""
 
 
 def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> dict[int, bool]:
