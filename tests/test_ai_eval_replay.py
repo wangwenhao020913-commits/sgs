@@ -83,7 +83,7 @@ def _tampered_run(tmp_path: Path) -> Path:
     return runs
 
 
-def _save_full_ai_run(runs_dir: Path, *, seed: int = 4242, players: int = 5) -> str:
+def _save_full_ai_run(runs_dir: Path, *, seed: int = 4245, players: int = 5) -> str:
     """现场录一局全 AI 对局（不依赖 `.scratch/`，也不把大录像塞进仓）。"""
     pack = load_content_pack(deck_profile="standard_108")
     engine = Engine.new_game(
@@ -143,13 +143,18 @@ def test_the_seed_7004_replay_explains_the_lord_duel_step() -> None:
         3,
         "PLAY_PHASE",
     )
-    # 「座位 1 当时是未知座位、P(敌)=3/4」：身份读数来自 AI 自己的 _identity_relation。
+    # 「座位 1 当时是未知座位」：`ai-view` 票 07 起身份读数来自**行为后验**，不再是
+    # 配比均匀后验的 0.75 —— 公开行为把 P(敌) 推高（这一局前面有对主公的敌意动作）。
     seat_one = step.identities[1]
     assert seat_one.public_identity is None
-    assert seat_one.enemy == pytest.approx(0.75)
-    assert seat_one.ally == pytest.approx(0.25)
+    assert 0.75 < seat_one.enemy <= 1.0, (
+        f"行为后验没有把未知座位的 P(敌) 推离均匀基线：{seat_one.enemy}"
+    )
+    assert 0.0 <= seat_one.ally < 0.25
     assert seat_one.label == "敌"
-    assert seat_one.fraction == (3, 1, 4)
+    assert seat_one.fraction is None, (
+        "已有行为证据时不再是配比均匀后验的分数写法（3/4）"
+    )
     # 选中者 = 记录动作 = 【决斗】→ 座位 1；候选分项来自生产代码的 Score.add。
     assert step.chosen.kind == "UseCard"
     assert step.chosen.card.name == "决斗"
@@ -171,8 +176,9 @@ def test_the_seed_7004_replay_explains_the_lord_duel_step() -> None:
 
     text = render_replay(report)
     assert "## 询问 seq=510（记录 seq=511）座位 3 · PLAY_PHASE" in text
-    assert "P(敌)=0.75=3/4" in text
-    assert "P(友)=0.25=1/4" in text
+    # 票 07 起 P(敌) 由行为后验给出，不再是配比均匀的 3/4（精确值住上面那条断言）。
+    assert "P(敌)=" in text and "P(友)=" in text
+    assert "=3/4" not in text
     assert "记录动作：UseCard(【决斗♣A】 → 座位1)" in text
     assert "- 一致 ✓" in text
 
@@ -198,7 +204,7 @@ def test_explain_output_is_byte_identical_across_two_replays() -> None:
 def test_a_full_ai_game_replays_without_a_comparison_mismatch(
     tmp_path: Path,
 ) -> None:
-    """整局 292 条 AI 询问的对照段全绿；转化确认（丈八蛇矛）也按引擎解析后一致。
+    """整局 AI 询问的对照段全绿；转化确认（丈八蛇矛）也按引擎解析后一致。
 
     `--score` / `--godview` 只走到终局、不看对照，这一条把"磁带驱动 + 影子 AI + 复合
     动作归一"三件事一起钉住：转化确认的 AI 应答不在候选里，记录流里只有引擎解析后的
@@ -345,10 +351,20 @@ def test_score_reports_both_baselines_with_sample_size(tmp_path: Path) -> None:
         assert math.isfinite(baseline.brier) and baseline.brier >= 0
         assert 0.0 <= baseline.ece <= 1.0
 
+    # ai-view 票 07：行为后验与两个基线**同一批座位步**（缺证据的退回均匀，分母不变）。
+    assert report.score.posterior is not None
+    assert report.score.posterior.name == "行为后验"
+    assert math.isfinite(report.score.posterior.log_loss)
+    assert 0.0 <= report.score.posterior.ece <= 1.0
+    assert 0 <= report.score.posterior_fallbacks <= report.score.samples
+    assert len(report.score.details) == report.score.samples
+
     text = render_replay(report)
     assert "## 尺子（--score）" in text
     assert f"座位步={report.score.samples}" in text
     assert "| 配比均匀后验 |" in text
+    assert "| 行为后验 |" in text
+    assert "退回配比均匀后验的座位步" in text
 
 
 def test_godview_ties_each_wrong_judgment_to_its_in_office_cost(
@@ -569,5 +585,6 @@ def test_replay_explain_prints_the_step_and_exits_0(
     captured = capsys.readouterr()
 
     assert code == 0, captured.err
-    assert "P(敌)=0.75=3/4" in captured.out
+    assert "P(敌)=" in captured.out
+    assert "=3/4" not in captured.out
     assert "## 询问 seq=510（记录 seq=511）" in captured.out

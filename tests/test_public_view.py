@@ -844,15 +844,26 @@ def test_an_unregistered_delta_type_fails_closed():
         project(state, 0)
 
 
-def test_the_read_point_table_registers_the_new_fields_as_not_read():
-    """读点表覆盖：两格都在表里、理由非空、本票登记为**不读**（用是票 07）。"""
-    from sgs.agents import heuristic
+def test_the_read_point_table_registers_the_new_fields_as_read_by_ticket_07():
+    """读点表覆盖：两格都在表里、理由非空、`ai-view` 票 07 起登记为**读**。
+
+    票 06 只让视图能看见（两格登记为不读）；票 07 的身份行为后验是它们的第一读方
+    （`public_history` → 逐事件行为类，`public_counts` → 长期拿牌 / 弃牌压力）。
+    """
+    from sgs.agents import heuristic, identity
 
     rows = heuristic._AI_READ_POINTS["PlayerView"]
     for field in ("public_counts", "public_history"):
         assert field in rows, f"{field} 没有登记读点"
         read, reason = rows[field]
-        assert read is False, f"{field} 本票不该读（定价是票 07）"
+        assert read is True, f"{field} 票 07 起必须登记为读"
         assert reason.strip(), f"{field} 的理由为空"
+    assert "behavior_observations" in rows["public_history"][1]
+    assert "pressure_observations" in rows["public_counts"][1]
+    # 登记的理由必须点名**真的被启发式接上的那个函数**（不是同名的另一份实现）：
+    # 启发式经 `from . import identity` 读它，故模块对象必须是同一个。
+    assert heuristic.identity_model is identity
+    assert identity.behavior_observations is heuristic.identity_model.behavior_observations
+    assert identity.pressure_observations is heuristic.identity_model.pressure_observations
 
 

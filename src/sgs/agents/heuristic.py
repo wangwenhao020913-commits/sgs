@@ -12,11 +12,26 @@
 **硬约束**（票 13 §硬约束 4 / `04` 的 AI 工程约束）：只读**询问自带的面**
 （:attr:`Query.view`、:attr:`Query.legal_actions` 与询问自己的派生态：
 ``skill_id`` / ``spec`` / ``slots`` / ``preactivations`` / ``preactivation``）。本模块
-**不** import ``sgs.engine`` / ``sgs.skills`` / ``sgs.data`` / ``sgs.resolution`` /
+**不直接** import ``sgs.engine`` / ``sgs.skills`` / ``sgs.data`` / ``sgs.resolution`` /
 ``sgs.timing``，也不读 ``GameState``——"信息隐藏不是约定"这条因此是可断言事实
-（静态扫描住 ``tests/test_source_discipline.py``）。
-**不做行为 / 历史推断、不建决策时限**（ADR-011）：身份只用**公开信号**做配比后验
-（I1，票 21，档 1）；拿不准时缺省保守，而不是猜。
+（静态扫描住 ``tests/test_source_discipline.py``）。`ai-view` 票 07 起本模块经
+``from . import identity`` 读身份信念；``identity`` 自己只 import ``sgs.data`` 的
+配比表与 ``sgs.state`` 的视图类型（同一可见面的子集），它的 import 白名单在同一份
+扫描里（``IDENTITY_IMPORT_ALLOWLIST``），不靠"相对导入天然安全"放行。
+**行为推断（`ai-view` 票 07 起）与决策时限**：ADR-011 原文的"不做行为 / 历史推断"已被
+推翻——历史经 ``PlayerView.public_history`` / ``public_counts`` 进视图，读点表由"不读"改
+"读"；"不建决策时限 / 不读全知状态 / 同步纯函数"三条不变。
+
+**身份信念（`ai-view` 票 07；spec §2.6）**：未知座位的 ``(P(敌), P(友))`` 从"配比均匀
+后验"换成 :mod:`sgs.agents.identity` 的**精确联合后验**边缘——不矛盾的联合身份分配
+（本人已知 / 主公已明 / 阵亡者已亮明）乘各公开行为事件的似然因子、归一。证据只有
+``PlayerView.public_history`` 的**公开事实**（敌意 / 有利 / 濒死未救，按"行为类 × 身份 ×
+先手方"的似然表）与 ``public_counts`` 的长期压力，加上两道反自我实现的护栏（干预折扣 +
+先手方条件化）。改动**只发生在 :func:`_identity_relation` 的未知分支**：返回值契约、读点、
+14 个调用点一字不改，``P(敌)`` 仍只作连续权重、不升格成硬判；判定层另导出
+``(标签, 置信度)``（:func:`~sgs.agents.identity.identity_judgment`），解释面
+（`ai_eval replay --explain`）读它。
+无公开行为证据 / 配比算不出 ⇒ 逐值退回 I1 的均匀后验与中性 ``(0, 0)``。
 
 **身份保守档（I1，票 21）**：敌友不再只有"主公 ↔ 反贼"这一对 0/1——已亮明的身份
 （本人 / 主公 / 已阵亡 / ``identity_visible``）从 :data:`_IDENTITY_ROSTER` 里减掉，存活
@@ -153,6 +168,8 @@ from sgs.state import (
     WindowCause,
     step_option_key,
 )
+
+from . import identity as identity_model
 
 __all__ = ["SKILL_VALUES", "HeuristicPlayer", "Score"]
 
@@ -2700,6 +2717,12 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
       ``P = 该集合里"敌人 / 盟友身份"的份数 ÷ 存活未知座位数``；
     - **算不出**（见上）⇒ ``(0.0, 0.0)``，即今天的中性（不猜）。
 
+    **`ai-view` 票 07 换掉了"未知"那一档的来源**：先问
+    :func:`~sgs.agents.identity.joint_posterior`——有公开行为证据时按**精确联合后验**的
+    边缘取 ``P(敌) / P(友)``（内奸行仍按局面函数 ``H`` 加权）；没有证据 / 算不出 ⇒
+    逐值落回上面的均匀后验。调用面（本函数签名 / 返回值 / 14 个调用点）一字未改，
+    ``P(敌)`` 仍只作连续权重。
+
     自己恒 ``(0.0, 1.0)``；``P(敌) + P(友) ≤ 1``，剩下的质量是"两边都不是"（反贼眼里的
     内奸、内奸眼里的主公）。**``P(敌)`` 只作权重**：调用方乘在原 0/1 的幅度上，不把它
     升格成"必须打谁"的硬判（spec §6.4）。
@@ -2737,6 +2760,41 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
     if remainder is None:
         return 0.0, 0.0
     remaining, unknown = remainder
+    posterior = identity_model.joint_posterior(view)
+    if posterior is not None:
+        row = posterior.marginal(seat)
+        order = identity_model.IDENTITY_ORDER
+        if mine == _RENEGADE:
+            # 内奸行仍是**局面函数**：边缘后验只换掉"剩余多重集均分"这一层权重，
+            # ``H(→c)`` 的式子与护主护栏一字不动（逐值等于 ``_renegade_unknown_relation``
+            # 在均匀权重下的读数）。
+            balance = _renegade_balance(view)
+            if balance is not None:
+                enemy = 0.0
+                ally = 0.0
+                for index, candidate in enumerate(order):
+                    hostility = _renegade_hostility_from_balance(
+                        candidate.value, balance
+                    )
+                    enemy += row[index] * max(hostility, 0.0)
+                    ally += row[index] * max(-hostility, 0.0)
+                return enemy, ally
+        else:
+            enemies = _enemy_identities(mine)
+            allies = _ally_identities(mine)
+            # 迭代身份序（tuple）而不是 frozenset：源码纪律禁无序容器迭代。
+            return (
+                sum(
+                    row[index]
+                    for index, candidate in enumerate(order)
+                    if candidate.value in enemies
+                ),
+                sum(
+                    row[index]
+                    for index, candidate in enumerate(order)
+                    if candidate.value in allies
+                ),
+            )
     if mine == _RENEGADE:
         # 内奸行：该行对剩余多重集求期望（`|剩余| = 0` ⇒ (0, 0)，见函数本体）。
         return _renegade_unknown_relation(view, remaining)
@@ -3934,17 +3992,17 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "是另票的定价问题；在那之前读它就是悄悄的读法变更",
                 ),
                 "public_counts": (
-                    False,
-                    "ai-view 票 06 的聚合计数（发起座位 × 涉及座位 × 事实类 → 次数）："
-                    "本票只把公开面交给视图，**不改打分**——把它定价（更新身份后验 / 集火）"
-                    "是票 07 的读法变更；在那之前读它就是悄悄的策略改动（金录像 / 决策 diff"
-                    "都没法归因）",
+                    True,
+                    "ai-view 票 07 的**长期证据**读它（identity.pressure_observations）："
+                    "聚合里的 move:LOSE / move:DISCARD 是**全局长**的拿牌 / 弃牌压力"
+                    "（拆 / 顺一类，对目标有害的方向），补上窗口只有 32 条事实时"
+                    "早年 / 平静期读不到的样本；伤害 / 回复仍因无符号不进这张表",
                 ),
                 "public_history": (
-                    False,
-                    "ai-view 票 06 的最近 K 条公开事件（起因 / 效果编号 / 公开载荷）："
-                    "同上，本票只让视图能看见。票 07 的似然表与票 08 的 A 族特征是它的"
-                    "第一批读方，落地时把这两格改成 True 并逐条归因",
+                    True,
+                    "ai-view 票 07 的**行为推断**读它（唯一读方）：identity.behavior_observations "
+                    "把公开事实摊成行为类 × 先手方，喂精确联合后验；只读 actor / targets / "
+                    "fact_class / window / 公开载荷，不读隐藏手牌或未亮明身份",
                 ),
                 "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
                 "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),

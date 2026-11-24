@@ -143,8 +143,18 @@ def _write_copy(path: Path, data: bytes) -> None:
 
 
 def _import_copy(path: Path, *, ref: str, digest: str) -> object:
-    """以独立模块名从副本 import；``__file__`` 必须指回副本。"""
-    name = f"{MODULE_PREFIX}{_safe_name(ref)}_{digest[:8]}"
+    """以独立模块名从副本 import；``__file__`` 必须指回副本。
+
+    **包名指回 ``sgs.agents``**：`ai-view` 票 07 起 `heuristic.py` 有同包相对导入
+    （``from . import identity``）。副本是**单文件**冻结（只冻结 `heuristic.py`），
+    按"其余一律解析到当前引擎"的既有口径，它的兄弟模块应解析到**当前**的
+    `sgs.agents.identity`——不把包名补回去，`exec_module` 会报
+    ``attempted relative import with no known parent package``。旧版本没有相对导入，
+    这一步对它们是无操作；副本自己的 ``__file__`` 断言不受影响。
+    """
+    # 限定在 `sgs.agents.` 下：`__spec__.parent` 因此就是 `sgs.agents`，相对导入解析到
+    # **当前**的兄弟模块，且不会触发 `__package__ != __spec__.parent` 的弃用告警。
+    name = f"sgs.agents.{MODULE_PREFIX}{_safe_name(ref)}_{digest[:8]}"
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise AiVersionError(f"版本 {ref!r} 的副本无法 import：{path}")

@@ -746,7 +746,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 24
+_WINE_TAPE_NEAR_DEATH_SEED = 29
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 jie-yijiang-2014-wuyi-caozhen 票 01（默认池 112/74 → 114/75，界一将成名-2014·移动版加
@@ -810,7 +810,13 @@ ai-view 票 01（启发式：伤害 / 有害锦囊改成 `5 × (P敌 − P友)` 
 对局在出现自救窗口前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
 ``.scratch/ai-view/scan_wine_near_death.py``，逐字复用 ``_wine_tape_near_death`` 的兜底策略
 与命中断言），命中 **16 / 24**；16 是【火攻】tape 的那一格，故取 **24**（10 次应答内推进到
-人类 0 血 + 求桃窗口里的【酒】目标为自己）。"""
+人类 0 血 + 求桃窗口里的【酒】目标为自己）。
+
+ai-view 票 07（身份行为后验进 ``_identity_relation``）再换种：seed 24 的对局在出现自救窗口
+前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
+``.scratch/ai-view/scan_wine_near_death.py``，逐字复用 ``_wine_tape_near_death`` 的兜底策略
+与命中断言），命中 **29 / 34**；取首个未在用的 **seed 29**（29 未被其余 tape 占用：火攻
+4 / 16、出牌阶段 65）。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:

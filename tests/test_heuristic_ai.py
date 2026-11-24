@@ -2570,13 +2570,18 @@ HEURISTIC_SOURCE = ROOT / "src" / "sgs" / "agents" / "heuristic.py"
 PARITY_SEEDS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
 """parity 批次：5 人全启发式、开武将池。8 个种子实测覆盖九类询问（``DISTRIBUTE`` 除外）。"""
 
-PARITY_CANDIDATES = 5319
-PARITY_DIGEST = "9266db83fa35034b5872f59127e34070e45494a07f6f54f406ad2d4ad69e0129"
-"""**分项改写之前**（``master@b65b75f``）在同一批次上录下的（候选数, sha256）。
+PARITY_CANDIDATES = 5404
+PARITY_DIGEST = "629b7faa7546a56de367597770412ce3916d604ac4cc107d24fb1b3efc85c533"
+"""**分项改写之前**（``master@b65b75f``）录下的（候选数, sha256）；票 07 按新读数重录。
 
 逐行 = ``kind|actor|seq|action repr|score repr``：**分数是 float**，改写只许改内部结构、
 不许动任何一个数（票面"逐询问同一 float"）。改权重的票会正当地改这个摘要——那时按新读数
 重录，并在票面写清"这是行为改动，不是重构"；重构让摘要变了就是回归。
+
+**票 07 的重录**：身份后验进 `_identity_relation` 的未知座位分支 ⇒ 关系权重变化 ⇒ 决策
+走向不同 ⇒ 候选集合 / 条数变化（5319 → 5404）。这是**行为改动**（spec §2.6），不是
+`Score` 累加次序的回归；分项自洽（`test_every_candidate_score_is_the_sum_of_its_own_items`）
+仍全绿，故重录基线摘要。
 """
 
 

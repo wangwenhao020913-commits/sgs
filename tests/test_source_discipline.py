@@ -688,3 +688,88 @@ def test_the_heuristic_import_scan_goes_red_on_an_omniscient_import():
     for needle in ("GameState", "sgs.engine", "sgs.skills", "sgs.timing"):
         assert needle in reds, f"{needle} 应被判红：{reds}"
     assert not _heuristic_visibility_offenders(green), "可见面 import 不该被判红"
+
+
+# ---------------------------------------------------------------------------
+# 9. 身份信念模块的可见面（`ai-view` 票 07）
+# ---------------------------------------------------------------------------
+
+IDENTITY = SOURCE_ROOT / "agents" / "identity.py"
+"""`ai-view` 票 07 的身份信念模块：**启发式经相对 import 使用它**，故它自己也要被扫。
+
+启发式白名单对相对 import 一律跳过（``if node.level: continue``）——那对同子包的
+participants 是对的，但 `from . import identity` 把 identity 的 import 面带进了启发式的
+传递闭包。若只靠"相对导入天然安全"，启发式那句"不 import ``sgs.data``"就成了假命题；
+这一节的 allowlist 是同一份纪律的**第二张表**（fail-closed：未登记即红）。
+"""
+
+IDENTITY_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
+    "__future__": frozenset({"annotations"}),
+    "math": frozenset(),
+    "collections.abc": frozenset({"Mapping", "Sequence"}),
+    "dataclasses": frozenset({"dataclass"}),
+    "functools": frozenset({"lru_cache"}),
+    "types": frozenset({"MappingProxyType"}),
+    "typing": frozenset({"Any"}),
+    # 配比表是规则常数（与 `_IDENTITY_ROSTER` 同一份数据的真源）；PlayerView 是询问自带的
+    # 视图类型。两者都是可见面，不含 GameState / 记录流 / 技能目录。
+    "sgs.data": frozenset({"IDENTITY_ROSTERS", "Identity"}),
+    "sgs.state": frozenset({"PlayerView"}),
+}
+
+IDENTITY_ALLOWED_SGS_MODULES = frozenset({"sgs.data", "sgs.state"})
+"""``import sgs.x`` 形态允许的整包名（与启发式的同一条口径）。"""
+
+
+def _identity_visibility_offenders(tree: ast.Module) -> list[str]:
+    """身份信念模块的越权 import（空列表 = 只碰可见面）。抽出来是为了跑合成反例。"""
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:  # 相对导入留在本子包内
+                continue
+            allowed = IDENTITY_IMPORT_ALLOWLIST.get(node.module or "")
+            if allowed is None:
+                offenders.append(f"{node.lineno} from {node.module} import …")
+                continue
+            offenders.extend(
+                f"{node.lineno} from {node.module} import {alias.name}"
+                for alias in node.names
+                if alias.name not in allowed
+            )
+        elif isinstance(node, ast.Import):
+            offenders.extend(
+                f"{node.lineno} import {alias.name}"
+                for alias in node.names
+                if alias.name.split(".")[0] == "sgs"
+                and alias.name not in IDENTITY_ALLOWED_SGS_MODULES
+            )
+    return offenders
+
+
+def test_the_identity_module_only_imports_the_visible_surface():
+    """`ai-view` 票 07：identity 只读配比表 + ``PlayerView``，不碰全知面。"""
+    tree = ast.parse(IDENTITY.read_text(encoding="utf-8"), filename=str(IDENTITY))
+
+    offenders = _identity_visibility_offenders(tree)
+
+    assert not offenders, "身份信念模块碰到了全知面：" + "；".join(offenders)
+
+
+def test_the_identity_import_scan_goes_red_on_an_omniscient_import():
+    """合成反例：``GameState`` / ``sgs.engine`` / ``sgs.skills`` 一律判红。"""
+    red = ast.parse(
+        "from sgs.state import GameState, PlayerView\n"
+        "import sgs.engine\n"
+        "from sgs.skills import CATALOG\n"
+    )
+    green = ast.parse(
+        "from sgs.data import IDENTITY_ROSTERS, Identity\n"
+        "from sgs.state import PlayerView\n"
+        "from .participants import Participant\n"
+    )
+
+    reds = "\n".join(_identity_visibility_offenders(red))
+    for needle in ("GameState", "sgs.engine", "sgs.skills"):
+        assert needle in reds, f"{needle} 应被判红：{reds}"
+    assert not _identity_visibility_offenders(green), "可见面 import 不该被判红"

@@ -447,7 +447,8 @@ def test_the_loader_loads_a_tag_from_a_copy_under_runs(tmp_path: Path) -> None:
     assert loaded.path.read_bytes() == STUB_HEURISTIC.encode()
     # __file__ 指回副本（不是主树）：inspect 读的是 sys.modules[cls.__module__].__file__
     assert Path(inspect.getfile(loaded.player_class)).resolve() == loaded.path.resolve()
-    assert loaded.player_class.__module__.startswith("_sgs_ai_version_")
+    # 票 07：副本注册在 `sgs.agents.` 下（相对导入要能解析到当前兄弟模块）。
+    assert loaded.player_class.__module__.startswith("sgs.agents._sgs_ai_version_")
 
 
 def test_a_missing_tag_fails_loudly_and_never_falls_back_to_head(tmp_path: Path) -> None:

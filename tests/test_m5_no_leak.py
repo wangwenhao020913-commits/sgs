@@ -100,7 +100,9 @@ EIGHT_SEED = 20261013
 ``.scratch/sp1-sunshangxiang-maliang/find_leak_seed.py`` 那一类小工具挑种子。"""
 
 
-def _assert_player_payload(player: dict, *, human_seat: int) -> None:
+def _assert_player_payload(
+    player: dict, *, human_seat: int, allow_revealed: bool = False
+) -> None:
     """一个座位在快照 / 挂起视角里的公开面（唯一读点 = 投影输出）。"""
     seat = player["seat"]
     if seat == human_seat:
@@ -116,11 +118,13 @@ def _assert_player_payload(player: dict, *, human_seat: int) -> None:
         assert player["identity"] is not None, "阵亡者的身份应亮明"
     elif player["identity"] == "lord":
         pass  # 主公身份公开
-    else:
+    elif not allow_revealed:
         assert player["identity"] is None, f"存活非主公的身份泄露：{player}"
 
 
-def _assert_snapshot(snapshot: dict, *, human_seat: int) -> None:
+def _assert_snapshot(
+    snapshot: dict, *, human_seat: int, allow_revealed: bool = False
+) -> None:
     assert snapshot["seat"] == human_seat
     assert isinstance(snapshot.get("self_hand"), list), "本人手牌必须可见"
     me = next(
@@ -130,7 +134,9 @@ def _assert_snapshot(snapshot: dict, *, human_seat: int) -> None:
     assert isinstance(snapshot.get("deck_count"), int), "牌堆只给数量"
     assert "deck" not in snapshot and "deck_cards" not in snapshot, "牌堆顺序 / 牌面泄露"
     for player in snapshot["players"]:
-        _assert_player_payload(player, human_seat=human_seat)
+        _assert_player_payload(
+            player, human_seat=human_seat, allow_revealed=allow_revealed
+        )
 
 
 def _human_action(query) -> object:
@@ -192,7 +198,10 @@ def test_the_human_payload_of_a_full_160_game_never_leaks_hands_identities_or_de
     assert checks >= 10, f"这一局只检查了 {checks} 次询问——样本太少，判据不可信"
     assert lord_seen, "8 人身份局必须能看到主公身份（否则身份可见性判据是空转）"
     final = visible_snapshot(session)
-    _assert_snapshot(final, human_seat=session.human_seat)
+    # 终局亮身份是**产品行为**（2026-11-23 用户口径，`tools/sgs_web/projection.py` 的
+    # "引擎 finished 之后才补"）：终局快照可以带全场身份，局中逐次询问仍不许（上面的循环）。
+    assert session.engine.finished
+    _assert_snapshot(final, human_seat=session.human_seat, allow_revealed=True)
     assert session.engine.records[-1].kind == "game_end"
 
 

@@ -212,6 +212,18 @@ ALLOWLIST: dict[Site, Rule] = {
         "_pool_card_value",
         'return _CARD_VALUES["slash"]',
     ): Rule(FAMILY, 1, "档位表牌名经族登记判定是【杀】后回落到族价（与 _card_value 同一口径）"),
+    # ---- agents/identity.py：行为推断的敌意牌型闭集 ----
+    (
+        "src/sgs/agents/identity.py",
+        "HARMFUL_CARD_TYPES",
+        '"slash",',
+    ): Rule(
+        FAMILY,
+        1,
+        "ai-view 票 07 的敌意牌型闭集：普通 / 火 / 雷杀与转化、虚拟产物按 card.type 同权"
+        "（与 heuristic._NULLIFY_HARMFUL_TRICKS ∪ is_slash 同一份真源，"
+        "tests/test_identity_belief.py 双向核）",
+    ),
     # ---- effects/actions.py：响应候选的语境分派 ----
     # 票 03 起那一行改成按 `SLASH_FAMILY_KEY` 选 `CandidateScope`（不再有 "slash" 字面量，
     # 故本清单里没有对应站点）：请求牌名仍是**族请求**，成员判定仍在下游 `satisfies_required`。

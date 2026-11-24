@@ -20,7 +20,8 @@
    对照段比较「记录动作」与「重算 argmax」；不一致是版本或输入不匹配的 bug 信号，**不静默**：
    报告照常打印（含不一致的那一步），CLI 退出码为 1。
 2. `--score`：用**免费标签**（阵亡亮明 / 终局）算对数损失 / ECE / Brier，只统计**当时还
-   暗着的座位**。第一版只测两个基线——配比均匀后验与恒先验——先给出一个数再谈改进。
+   暗着的座位**。前两行是基线——配比均匀后验与恒先验；第三行「行为后验」是 `ai-view` 票 07
+   接上的公开行为推断（同一批座位步、同一份视图），票面据此判"比均匀后验低多少"。
 3. `--godview`：把错误判定与它的在位代价对齐：同一个（观察者, 目标）的连续错误关系判定
    记一个区间，代价 = 在位决策数 × 期间决策数。
 
@@ -52,6 +53,7 @@ from typing import Any
 # `getattr(module, "_SCORERS", None)`（缺表 fail-closed）同一条先例。这是 tools 层的
 # 刻意例外；`src/sgs/agents/__init__.py` 的"外部不得深导"约束仍对 src 的消费者生效。
 import sgs.agents.heuristic as heuristic_scoring
+import sgs.agents.identity as identity_model
 from sgs.agents import HeuristicPlayer, Score
 from sgs.data import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity
 from sgs.engine import Engine, JournalVersionError, ai_stream, read_journal
@@ -67,6 +69,7 @@ __all__ = [
     "GodViewReport",
     "ReplayReport",
     "ScoreReport",
+    "ScoreSample",
     "WrongJudgment",
     "render_replay",
     "run_replay",
@@ -89,9 +92,12 @@ _LOG_FLOOR = 1e-12
 _REL_ENEMY = "敌"
 _REL_ALLY = "友"
 _REL_NEUTRAL = "中立"
-_REL_UNDECIDED = "未定"
 _REL_SELF = "本人"
-"""关系判定的闭集（解释 / 上帝视角共用；中文只出现在输出层，比较用这几个常量）。"""
+"""关系判定的闭集（解释 / 上帝视角共用；中文只出现在输出层，比较用这几个常量）。
+
+「未定」只在 ``sgs.agents.identity.relation_label`` 里产出（敌友平票），解释的稳定判定
+不用它；这里不抄第二份。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +131,10 @@ class IdentityRead:
     label: str
     """关系标签：``敌`` / ``友`` / ``中立`` / ``未定``；本人写 ``本人``。"""
     confidence: float
+    identity_label: Identity | None = None
+    """``(身份标签, 置信度)`` 的标签（``sgs.agents.identity.identity_judgment``）。"""
+    identity_confidence: float = 0.0
+    """``(身份标签, 置信度)`` 的置信度；算不出时 0。"""
     fraction: tuple[int, int, int] | None = None
     """配比后验的分数三元组 ``(敌方份数, 友方份数, 未知座位数)``；算不出时 ``None``。"""
 
@@ -166,12 +176,27 @@ class ExplainStep:
 
 @dataclass(frozen=True)
 class BaselineScore:
-    """一个基线（配比均匀后验 / 恒先验）在**同一批**座位步上的三个数。"""
+    """一个基线（配比均匀后验 / 恒先验 / 行为后验）在**同一批**座位步上的三个数。"""
 
     name: str
     log_loss: float
     brier: float
     ece: float
+
+
+@dataclass(frozen=True)
+class ScoreSample:
+    """一个座位步的三种预测 + 真值（同一批样本上比较，不各算各的分母）。
+
+    ``posterior`` = ``ai-view`` 票 07 的**行为后验**边缘（``sgs.agents.identity``）；
+    ``None`` = 本步算不出（无公开行为证据 / 配比算不出），比较时退回 ``uniform``，
+    并在 :attr:`ScoreReport.posterior_fallbacks` 里计数。
+    """
+
+    uniform: tuple[float, ...]
+    prior: tuple[float, ...]
+    posterior: tuple[float, ...] | None
+    truth: Identity
 
 
 @dataclass(frozen=True)
@@ -182,6 +207,12 @@ class ScoreReport:
     seats: int
     queries: int
     baselines: tuple[BaselineScore, ...]
+    posterior: BaselineScore | None = None
+    """``ai-view`` 票 07 的**行为后验**在同一批座位步上的读数（``None`` = 没请求 / 无样本）。"""
+    posterior_fallbacks: int = 0
+    """退回配比均匀后验的座位步数（无公开行为证据 / 算不出；比较分母不变）。"""
+    details: tuple[ScoreSample, ...] = ()
+    """逐座位步的样本（批内聚合用；渲染不读它）。"""
 
 
 @dataclass(frozen=True)
@@ -487,15 +518,6 @@ class _StopReplay(Exception):
     """`--seq` 命中后，在**下一次**参与询问时停下（不依赖引擎的私有步进接口）。"""
 
 
-@dataclass(frozen=True)
-class _ScoreSample:
-    """一个座位步的两种基线预测 + 真值（避免用元组下标读同一组字段）。"""
-
-    uniform: tuple[float, ...]
-    prior: tuple[float, ...]
-    truth: Identity
-
-
 @dataclass
 class _OpenJudgment:
     judged: str
@@ -546,7 +568,7 @@ class _Driver:
                 self._narratives[seat] = NarrativeCursor(
                     viewer=seat, heroes=heroes, pack_id=loaded.meta["pack_id"]
                 )
-        self._score_samples: list[_ScoreSample] = []
+        self._score_samples: list[ScoreSample] = []
         self._score_queries = 0
         self._score_seats: set[int] = set()
         self._initial_counts = _initial_counts(loaded)
@@ -776,6 +798,10 @@ class _Driver:
                 f"剩余 {remaining!r}，暗座 {hidden!r}"
             )
         unknown = len(hidden)
+        # 行为后验（票 07）每询问只算一次：同一视图的全部暗座共享同一份联合后验。
+        # 用 ``joint_posterior``（而不是 ``marginals``）是为了区分"有行为证据"与
+        # "退回配比均匀后验"——后者在尺子上要计数，不能伪装成模型读数。
+        posterior = identity_model.joint_posterior(view)
         for target in hidden:
             # 免费标签优先读**阵亡 / 亮明**；终局仍暗的幸存者（如只剩内奸）用发牌表兜底——
             # 终局的 side 已把它公开，发牌表是同一张事实的内部投影，不是另一份答案。
@@ -789,29 +815,40 @@ class _Driver:
                 self._initial_counts[identity] / self.loaded.player_count
                 for identity in IDENTITY_ORDER
             )
-            self._score_samples.append(_ScoreSample(uniform, prior, label))
+            posterior_row = (
+                None if posterior is None else posterior.marginal(target)
+            )
+            self._score_samples.append(
+                ScoreSample(uniform, prior, posterior_row, label)
+            )
             self._score_seats.add(target)
 
     def score_report(self) -> ScoreReport:
         if not self._score_samples:
             raise AiEvalSpecError("--score 没有采到任何座位步（没有暗着的座位）")
-        baselines = []
-        for name, field in (("配比均匀后验", "uniform"), ("恒先验", "prior")):
-            predictions = [getattr(sample, field) for sample in self._score_samples]
-            truths = [sample.truth for sample in self._score_samples]
-            baselines.append(
-                BaselineScore(
-                    name=name,
-                    log_loss=_log_loss(predictions, truths),
-                    brier=_brier(predictions, truths),
-                    ece=_ece(predictions, truths),
-                )
+        truths = [sample.truth for sample in self._score_samples]
+        baselines = tuple(
+            _baseline_score(
+                name,
+                [getattr(sample, field) for sample in self._score_samples],
+                truths,
             )
+            for name, field in (("配比均匀后验", "uniform"), ("恒先验", "prior"))
+        )
+        # 行为后验与两个基线**同一批座位步**：算不出的样本退回配比均匀后验，分母不变。
+        fallbacks = [sample for sample in self._score_samples if sample.posterior is None]
+        posterior_predictions = [
+            sample.uniform if sample.posterior is None else sample.posterior
+            for sample in self._score_samples
+        ]
         return ScoreReport(
             samples=len(self._score_samples),
             seats=len(self._score_seats),
             queries=self._score_queries,
-            baselines=tuple(baselines),
+            baselines=baselines,
+            posterior=_baseline_score("行为后验", posterior_predictions, truths),
+            posterior_fallbacks=len(fallbacks),
+            details=tuple(self._score_samples),
         )
 
     # -- 上帝视角 -----------------------------------------------------------
@@ -842,7 +879,7 @@ class _Driver:
                 self._close(key, query.seq)
                 continue
             enemy, ally = heuristic_scoring._identity_relation(view, target)
-            judged = _relation_label(enemy, ally)
+            judged = identity_model.relation_label(enemy, ally)
             truth = _true_relation(self.engine.state, mine, self.loaded.identities[target])
             current = self._open.get(key)
             if current is not None and current.judged != judged:
@@ -982,6 +1019,8 @@ def _identity_reads(view: Any) -> tuple[IdentityRead, ...]:
                     ally=1.0,
                     label=_REL_SELF,
                     confidence=1.0,
+                    identity_label=player.identity,
+                    identity_confidence=1.0,
                 )
             )
             continue
@@ -991,8 +1030,9 @@ def _identity_reads(view: Any) -> tuple[IdentityRead, ...]:
         ally = 0.0 if ally == 0 else ally
         # 判定读**同一个** `_identity_relation`（内奸那行是动态局面函数）；已亮明的事实由
         # 同一行的「反贼 / 忠臣 / 主公」单独展示，不把静态敌对表伪装成"AI 的判定"。
-        label = _relation_label(enemy, ally)
-        confidence = _relation_confidence(enemy, ally)
+        label = identity_model.relation_label(enemy, ally)
+        confidence = identity_model.relation_confidence(enemy, ally)
+        judgment = identity_model.identity_judgment(view, player.seat)
         fraction = _relation_fraction(view, player.seat, enemy, ally)
         reads.append(
             IdentityRead(
@@ -1007,36 +1047,14 @@ def _identity_reads(view: Any) -> tuple[IdentityRead, ...]:
                 ally=ally,
                 label=label,
                 confidence=confidence,
+                identity_label=None if judgment is None else judgment.label,
+                identity_confidence=(
+                    0.0 if judgment is None else judgment.confidence
+                ),
                 fraction=fraction,
             )
         )
     return tuple(reads)
-
-
-def _relation_label(enemy: float, ally: float) -> str:
-    """三值判定：敌 / 友 / 中立；两类都拿不准（敌友平票）才写「未定」。"""
-    neutral = max(0.0, 1.0 - enemy - ally)
-    best = max(enemy, ally, neutral)
-    if best == 0.0:
-        return _REL_NEUTRAL
-    winners = [
-        name
-        for name, value in (
-            (_REL_ENEMY, enemy),
-            (_REL_ALLY, ally),
-            (_REL_NEUTRAL, neutral),
-        )
-        if value == best
-    ]
-    if len(winners) == 1:
-        return winners[0]
-    if _REL_NEUTRAL in winners:
-        return _REL_NEUTRAL
-    return _REL_UNDECIDED
-
-
-def _relation_confidence(enemy: float, ally: float) -> float:
-    return max(enemy, ally, max(0.0, 1.0 - enemy - ally))
 
 
 def _relation_fraction(
@@ -1325,6 +1343,18 @@ def _true_renegade_balance(state: Any) -> tuple[int, int, int]:
     return len(alive) - 1, lord_side, rebel_side
 
 
+def _baseline_score(
+    name: str, predictions: Sequence[tuple[float, ...]], truths: Sequence[Identity]
+) -> BaselineScore:
+    """一组预测在同一批真值上的三个读数（对数损失 / Brier / ECE）。"""
+    return BaselineScore(
+        name=name,
+        log_loss=_log_loss(predictions, truths),
+        brier=_brier(predictions, truths),
+        ece=_ece(predictions, truths),
+    )
+
+
 def _log_loss(predictions: Sequence[tuple[float, ...]], truths: Sequence[Identity]) -> float:
     total = 0.0
     for prediction, truth in zip(predictions, truths, strict=True):
@@ -1488,11 +1518,16 @@ def _render_inference(step: ExplainStep) -> list[str]:
             enemy_count, ally_count, unknown = read.fraction
             enemy_fraction = f"={enemy_count}/{unknown}"
             ally_fraction = f"={ally_count}/{unknown}"
+        identity_text = (
+            "—（无后验）"
+            if read.identity_label is None
+            else f"{IDENTITY_LABELS[read.identity_label]}({read.identity_confidence:.2f})"
+        )
         lines.append(
             f"  - 座位{read.seat}：未知 · "
             f"P(敌)={read.enemy:.2f}{enemy_fraction} "
             f"P(友)={read.ally:.2f}{ally_fraction} · "
-            f"判定={read.label}({read.confidence:.2f})"
+            f"判定={read.label}({read.confidence:.2f}) · 身份={identity_text}"
         )
     for seat, probability in step.dodge:
         shown = "—（记牌不可用）" if probability is None else f"{probability:.2f}"
@@ -1561,16 +1596,25 @@ def _render_score(report: ScoreReport) -> list[str]:
         "## 尺子（--score）",
         f"- 样本：座位步={report.samples}（AI 询问 {report.queries} 次 · "
         f"不同暗座={report.seats}）；只统计当时还暗着的座位",
-        "- 口径：这是**公开配比基线**，不是 AI 的实际判定（票 07 才接）；"
+        "- 口径：前两行是**公开配比基线**；「行为后验」是 `PlayerView.public_history` 的"
+        "行为推断（ai-view 票 07，`sgs.agents.identity`）在同一批座位步上的读数。"
         "ECE = top-label 10 bin。配比均匀后验在「只数暗座」上按构造校准，ECE=0 不是缺陷。",
         "",
         "| 基线 | 对数损失(nats) | Brier | ECE(10 bin) |",
         "|---|---|---|---|",
     ]
-    for baseline in report.baselines:
+    rows = list(report.baselines)
+    if report.posterior is not None:
+        rows.append(report.posterior)
+    for baseline in rows:
         lines.append(
             f"| {baseline.name} | {baseline.log_loss:.4f} | {baseline.brier:.4f} | "
             f"{baseline.ece:.4f} |"
+        )
+    if report.posterior is not None:
+        lines.append(
+            f"- 行为后验退回配比均匀后验的座位步：{report.posterior_fallbacks}"
+            "（无公开行为证据 / 算不出；分母不变）"
         )
     return lines
 
