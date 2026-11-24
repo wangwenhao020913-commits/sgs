@@ -216,6 +216,25 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
   概率读数（不是胜率）：判决批 40 局 / 35,674 座位步上对数损失 0.7967 → **0.7437**
   （−0.0530 nats/座位步）、ECE 0.0402；票面 `## Answer`。
 
+- **`ai-view` 票 11（2026-11-24，提交 `8ef1095`，未打 tag）**：内奸护主**硬 veto**——
+  `_renegade_lord_veto_applies` / `_renegade_lord_off_limits`：本人是内奸、存活人数 > 2、
+  敌意牌、目标是挑出来的（`ALL_ALIVE*` 不算）、目标含主公 ⇒ `_score_play_phase` 给
+  `_LORD_VETO_PENALTY`（与票 01 同一常量）；1v1（只剩主公与内奸）放开，响应窗口不动。
+  座位层 `_lord_is_vetoed_target` 同口径，故【酒】/ 装备先手的计划分也不为被 veto 的主公
+  那一刀铺垫。**`quick`（baseline = 父提交 `1f1e802`，128 副 commit 派生批
+  `8ec7d8c6…`）**：`deals_differing=**13/128**`（`PLAY_PHASE` 12 / `SELECT_CARDS` 1）、
+  `errors=0`、`gaps=0`、`cases=78/78`、`pass_with_options=0.0739`，
+  **`diff_attributed=false`**（预注册 `PLAY_PHASE`；那条 `SELECT_CARDS` 是下游平分漂移）。
+  **逐条归因**（`.scratch/ai-view/attribute_t11_final.py`）：12 条**直接命中**（座位 0 =
+  内奸、存活 3–5、基线动作是"敌意牌 × 目标含主公" ⇒ 换目标 / 换牌 / 结束阶段）；1 条
+  **下游漂移**（seed `3864777351393203901`：更早的出牌阶段 seq=308 里【决斗】打主公与打
+  别家同分，veto 摘掉主公那一路后决胜集合 2 → 1、选中动作未变 ⇒ `randbelow` 位数变化 ⇒
+  后续平分抽签错位，第一个动作分叉落在 `SELECT_CARDS`；探针
+  `.scratch/ai-view/probe_t11_final_shift.py`）。**parity 按行为改动重录**（5404 → 5529、
+  分项自洽 `violations=0`）。**无 `promote` / 无新 tag**：行为面只动内奸的出牌阶段目标取舍，
+  `quick` 的 13 条已逐条归因；下一版 tag 仍由票 07 + 本票一起跑 `quick` / `promote` 后
+  追加台账行（在那之前 serving = HEAD ≠ 最新 tag `ai-v11`）。
+
 - **`ai-v1` 的两条口径说明**（读 JSON 前先看这两条；它们也是 §2.3 五条件里两条的**待裁定项**）：
   1. `cases` = **8/9**：工具口径要求"模块里无 failed、无 strict xfail"（§2.3 ① / §2.8），
      而 `tests/test_ai_cases.py` 里仍有 D3【遗计】的 `xfail(strict=True)`（票 24，本票未
