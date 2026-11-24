@@ -22899,6 +22899,39 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       summary(nodes));
   }
 
+  /* ---- 票 12：交换的**混合**移动（可见的照发 + 扣置的按张数） ---- */
+  {
+    const shown = flightCard(3, "杀");
+    const snapshot = snapshotFor(playersBase(), []);
+    feed([
+      moveRecord(2, "LOSE", zoneRef("hand", 1), zoneRef("processing"),
+        [shown], { card_count: 1 }),
+    ], snapshot);
+    const nodes = stepFlights();
+    check("U4-01-b2 交换的混合移动：可见牌画牌面、扣置张数画牌背（2 个飞行器，顺序按 cards）",
+      nodes.length === 2
+        && nodes[0].getAttribute("data-anim-hidden") !== "true"
+        && nodes[1].getAttribute("data-anim-hidden") === "true"
+        && missing() === null && unregistered() === null,
+      summary(nodes));
+  }
+
+  /* ---- 票 12 回归：【蛊惑】的"声明牌名"载荷（cards + 旧的 card_count）不双计 ---- */
+  {
+    const declared = { ...flightCard(4, "无中生有"), concealed: true };
+    const snapshot = snapshotFor(playersBase(), []);
+    feed([
+      moveRecord(2, "LOSE", zoneRef("hand", 1), zoneRef("processing"),
+        [declared], { card_count: 1 }),
+    ], snapshot);
+    const nodes = stepFlights();
+    check("U4-01-b3 【蛊惑】声明牌名：cards 已代表全部张数，不与 card_count 相加（1 个飞行器）",
+      nodes.length === 1
+        && nodes[0].getAttribute("data-anim-hidden") !== "true"
+        && missing() === null && unregistered() === null,
+      summary(nodes));
+  }
+
   /* ---- D3-2 使用 / 判定亮牌：手牌 / 牌堆 → 处理区（舞台卡） ---- */
   {
     const used = flightCard(9, "杀");

@@ -28,6 +28,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from sgs.data import (
+    CardTagType,
     IDENTITY_LABELS,
     SkillType,
     hero_by_id,
@@ -104,7 +105,9 @@ from .visibility import (
     cards_visible,
     deck_cards_visible,
     identity_visible,
+    public_face_card_ids,
     tag_visible,
+    visible_card_ids,
 )
 
 __all__ = [
@@ -127,6 +130,8 @@ __all__ = [
     "option_seats",
     "option_source",
     "pending_payload",
+    "processing_entry_faces",
+    "window_has_processing_legs",
     "query_context",
     "seat_hero_zones",
     "seat_skill_display",
@@ -292,6 +297,121 @@ def concealed_by_later_reveal(records: Iterable[object], state: Any = None) -> d
             if revealed is not None and seq < revealed:
                 out[card_id] = declared.get(card_id, "")
     return out
+
+
+def processing_entry_faces(records: Iterable[object], state: Any = None) -> dict[int, bool]:
+    """每张牌**最近一次进处理区**时，牌面是否公开（ai-view 票 12 的交换规则用）。
+
+    一条 ``card_move`` 的牌面公开性不再只按区域回答：**扣置**那一腿
+    ``(HAND → PROCESSING, LOSE)`` 进去的牌是"背面朝上"的，而处理区是公开区。故取牌
+    **进处理区那一刻**的公开性：
+
+    - 来源是**手牌**且原因是 ``LOSE`` ⇒ 读持久公开事实（``PUBLIC_FACE`` 标签，
+      :func:`sgs_web.visibility.public_face_card_ids`）；
+    - 其余入口（装备 / 判定区 / 牌堆亮牌 / 使用）都是公开事实 ⇒ ``True``。
+
+    **一次性 ``card_reveal`` 在进区之前不算公开事实**（票面的口径：明置是持久逐牌事实，
+    亮牌不是）：一张被【展示】过的手牌再进处理区仍是普通的"扣置"。但牌**已经在处理区里**
+    被亮出 / 标成明置时，它的牌面从那一刻起公开（引擎侧
+    ``Engine.processing_concealed`` 与叙事侧 `_Narrator` 在同一时刻做同一件事）——回手腿
+    因此照发，四处的"当前公开性"同一个答案。
+
+    值 = ``card_id → 是否公开``，键随最近一次入口**覆盖**（同一张牌可能被多次搬进处理区）。
+    这个表只回答"这条回手腿该不该给牌面"：``visible_card_ids`` 对
+    ``(PROCESSING → HAND, PUT)`` 读它，五谷那种"牌堆亮出 → 取走"的牌在这里是 ``True``，
+    不会被误掩。
+
+    只读记录流 + ``state`` 的标签表：不写状态、不进记录。``records`` 是引擎记录模型
+    （``state`` / 回放都可以给）；``state`` 缺失时持久事实按空集（fail-closed）。
+    与叙事侧（:mod:`sgs_web.narrative`）的增量维护同一条规则——那边逐条喂记录，这边
+    一次扫完，判据都是"入口形状 + 持久事实"，不各写一套。
+
+    ``records`` 里的 ``tag_add`` / ``tag_remove`` 会按**记录次序**重放（``state`` 给的是
+    **当前**标签表，直接拿来做"进区那一刻"的答案会把**之后**才标成明置的牌也算公开）：
+    有标签事件的牌先退回"无事实"，再逐条加减。
+    """
+    records = tuple(records)
+    public = set(public_face_card_ids(state))
+    wanted = CardTagType.PUBLIC_FACE.value
+    tagged: set[int] = set()
+    for record in records:
+        if getattr(record, "delta_type", None) not in ("tag_add", "tag_remove"):
+            continue
+        if str(getattr(getattr(record, "tag_type", None), "value", "")) != wanted:
+            continue
+        card = getattr(record, "card", None)
+        if card is not None:
+            tagged.add(int(card.card_id))
+    public -= tagged
+    faces: dict[int, bool] = {}
+    for record in records:
+        delta_type = getattr(record, "delta_type", None)
+        if delta_type in ("tag_add", "tag_remove"):
+            if str(getattr(getattr(record, "tag_type", None), "value", "")) != wanted:
+                continue
+            card = getattr(record, "card", None)
+            if card is None:
+                continue
+            card_id = int(card.card_id)
+            if delta_type == "tag_add":
+                public.add(card_id)
+                # 在处理区里被标成明置 ⇒ 牌面从这一刻起公开（与引擎 / 叙事同一时刻）。
+                if card_id in faces:
+                    faces[card_id] = True
+            else:
+                public.discard(card_id)
+            continue
+        if delta_type == "card_reveal":
+            card = getattr(record, "card", None)
+            if card is not None and int(card.card_id) in faces:
+                # 处理区里被亮出（【蛊惑】验明）：此刻起公开；进区**之前**的亮牌
+                # 不会制造这里面的键，故不改变"交换前是否公开"。
+                faces[int(card.card_id)] = True
+            continue
+        if delta_type != "card_move":
+            continue
+        to_zone = getattr(record, "to_zone", None)
+        if to_zone is None or to_zone.zone is not Zone.PROCESSING:
+            continue
+        from_zone = getattr(record, "from_zone", None)
+        concealed_entry = (
+            from_zone is not None
+            and from_zone.zone is Zone.HAND
+            and getattr(record, "reason", None) is MoveReason.LOSE
+        )
+        for card in getattr(record, "cards", ()) or ():
+            card_id = int(card.card_id)
+            faces[card_id] = (not concealed_entry) or card_id in public
+    return faces
+
+
+def window_has_processing_legs(records: Iterable[object]) -> bool:
+    """这一批记录里有没有**交换的两条腿**（票 12；``serve.view`` 据此决定算不算公开性表）。
+
+    判据只看移动形状，不认技能 id：
+
+    - ``(HAND → PROCESSING, LOSE)``：扣置 / 交换的第一腿；
+    - ``(PROCESSING → HAND)``：回手腿（含五谷那种公开的"取走"——它的表值全是公开，
+      算一次表即可，不做第二套区域规则）。
+
+    没有这两类移动的窗口（绝大多数）一次全量扫描都不做。
+    """
+    for record in records:
+        if getattr(record, "delta_type", None) != "card_move":
+            continue
+        from_zone = getattr(record, "from_zone", None)
+        to_zone = getattr(record, "to_zone", None)
+        if from_zone is None or to_zone is None:
+            continue
+        if from_zone.zone is Zone.PROCESSING and to_zone.zone is Zone.HAND:
+            return True
+        if (
+            from_zone.zone is Zone.HAND
+            and to_zone.zone is Zone.PROCESSING
+            and getattr(record, "reason", None) is MoveReason.LOSE
+        ):
+            return True
+    return False
 
 
 def _concealed_hidden(
@@ -672,7 +792,13 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     取值原样取自 ``PlayerPublic``，界面据此画红色禁止角标。
     """
     state = session.engine.state
-    view = project(state, session.human_seat)
+    view = project(
+        state,
+        session.human_seat,
+        # 票 12：处理区里**扣置**进去的牌（交换 / 蛊惑）由引擎按移动形状维护；
+        # 舞台据此不给牌面（蛊惑的"声明牌名"另有 `concealed` 一档，优先于本档）。
+        concealed_processing=getattr(session.engine, "processing_concealed", ()),
+    )
     payload = view.model_dump(mode="json")
     # U1-04 展示契约：牌面色 / 属性 / 种类 / 来源牌 + 座位身份标签。派生在 display.py，
     # 投影只负责"哪些可见"；下发的仍然是**同一份可见快照**，不新增真源。
@@ -687,6 +813,9 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         # UI1/UI2：验明之前的【蛊惑】扣置牌**不给牌面**（处理区是全局公开区，这里按
         # "它不是公开事实"处理），舞台改画**声明的牌名**。
         concealed=concealed_guohuo_cards(session.engine),
+        # 票 12：交换 / 扣置进处理区的牌同样不给牌面——`PlayerView.processing_concealed`
+        # 是引擎侧按移动形状维护的同一份事实；蛊惑的"声明牌名"优先（上面那条先判）。
+        concealed_processing=view.processing_concealed,
         # 票 26：座位卡的全局距离增减（现算、只读；0 时前端不画节点）。
         distance_bonuses=_seat_distance_bonuses(state),
         # M7 票 23：剧本战斗的三处显示（友 / 敌、模板名、副本全局技能标签）由 header 里的
@@ -3838,6 +3967,7 @@ def visible_record(
     query_actors: Mapping[int, int] | None = None,
     state: Any = None,
     concealed: Mapping[int, str] | None = None,
+    exchange_faces: Mapping[int, bool] | None = None,
 ) -> dict[str, Any] | None:
     """把一条记录转成**查看者可下发**的 JSON；``None`` = 这一条不下发。
 
@@ -3854,7 +3984,13 @@ def visible_record(
     （弃牌堆 / 处理区 / 装备区 / 判定区）照常下发牌面；隐藏区（牌堆 / 手牌）之间的移动，
     除查看者自己的手牌 / 自己经手的移动外，``cards`` 抹成空列表并补 ``card_count``，
     让界面仍能说"移动了几张"。判据与事件流（``sgs_web.narrative``）共用
-    :func:`sgs_web.visibility.cards_visible`——一处规则，两个下发口。
+    :func:`sgs_web.visibility.visible_card_ids`——一处规则，两个下发口。
+
+    **交换（ai-view 票 12）**：``(HAND → PROCESSING, LOSE)`` 与
+    ``(PROCESSING → HAND, PUT)`` 两条腿由 :func:`visible_card_ids` 的交换规则回答——
+    ``state`` 提供**持久公开事实**（``PUBLIC_FACE`` 标签），``exchange_faces``
+    （:func:`processing_entry_faces`，由 ``serve.view`` 按本次窗口需要算一次）提供"每张牌进处理区
+    那一刻是否公开"，用来裁回手腿（非公开的牌对第三方只给张数）。
 
     M5 retro 补齐另两条 A3 面（同住 :mod:`sgs_web.visibility`）：
 
@@ -3904,7 +4040,7 @@ def visible_record(
                 # 画**声明的牌名**（无花色点数 + `concealed` 标记）——声明本身是公开事实，
                 # 舞台与事件流因此照旧是"于吉把牌当【无中生有】扣置"这条故事线；解不出
                 # 声明的牌型（旧形态记录）时退回"只给张数"。
-                raw["card_count"] = len(raw["cards"])
+                total = len(raw["cards"])
                 lookup = _card_lookup(state) if state is not None else None
                 shown = [
                     hidden_guohuo_payload(
@@ -3916,22 +4052,45 @@ def visible_record(
                     if isinstance(card, dict) and "card_id" in card
                 ]
                 raw["cards"] = [entry for entry in shown if entry is not None]
-            elif not cards_visible(raw, viewer):
-                # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
-                raw["card_count"] = len(raw["cards"])
-                raw["cards"] = []
+                # 票 12：声明的牌面照旧带上 `card_count`（既有下发形状 / 字节不变）；
+                # 前端 `liveMoveCount` 对"全部是声明牌"的这一档只数 `cards`，不与
+                # `card_count` 相加（同一批牌不数两倍）。
+                raw["card_count"] = total
             else:
-                # 公开区的移动牌也要**完整的卡面契约**（display_name / attribute / kind /
-                # source_cards / description）。舞台是拿 card_move 建舞台项的：只给裸
-                # CardRef 时它只能读数据名（"火杀""雷杀"两个字、没有属性 ⇒ 画成黑色），
-                # 同一张牌在手牌里是蓝的、在台上是黑的（用户实机报障 2026-10-31）。
-                lookup = _card_lookup(state) if state is not None else None
-                raw["cards"] = [
-                    card_payload(CardRef.model_validate(card), lookup=lookup)
-                    if isinstance(card, dict)
-                    else card
-                    for card in raw["cards"]
-                ]
+                # 票 12：交换的两条腿可以**逐牌**回答（一手牌里可能混着明置的与普通的），
+                # 故这里先取"这一条里哪些牌脸可见"，再决定下发形态：
+                # - 一张都不可见 ⇒ ``cards=[]`` + ``card_count``（隐藏区 / 普通手牌）；
+                # - 全部可见 ⇒ 整份卡面（公开区 / 自己的 / 明置的）；
+                # - 部分可见 ⇒ **可见的照发 + ``card_count`` = 被扣置的张数**。前端
+                #   ``liveMoveCount`` 把两格相加（互斥只在全隐藏档成立），飞行层按
+                #   ``cards`` 之后的下标画牌背。
+                visible_ids = visible_card_ids(
+                    raw, viewer, state=state, exchange_faces=exchange_faces
+                )
+                total = len(raw["cards"])
+                if not visible_ids:
+                    # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说
+                    # "移动了几张"。票 12 的扣置 / 交换也落这一档。
+                    raw["card_count"] = total
+                    raw["cards"] = []
+                else:
+                    # 公开区的移动牌也要**完整的卡面契约**（display_name / attribute /
+                    # kind / source_cards / description）。舞台是拿 card_move 建舞台项的：
+                    # 只给裸 CardRef 时它只能读数据名（"火杀""雷杀"两个字、没有属性 ⇒
+                    # 画成黑色），同一张牌在手牌里是蓝的、在台上是黑的（用户实机报障
+                    # 2026-10-31）。
+                    lookup = _card_lookup(state) if state is not None else None
+                    shown = set(visible_ids)
+                    upgraded = [
+                        card_payload(CardRef.model_validate(card), lookup=lookup)
+                        if isinstance(card, dict)
+                        else card
+                        for card in raw["cards"]
+                        if isinstance(card, dict) and int(card.get("card_id", 0)) in shown
+                    ]
+                    raw["cards"] = upgraded
+                    if len(upgraded) < total:
+                        raw["card_count"] = total - len(upgraded)
         elif delta_type == "deck_shuffle" and raw.get("cards"):
             # A3：牌堆只给数量。整副洗后牌序是引擎 / 回放的全知事实，不是人类载荷。
             if not deck_cards_visible(viewer):
@@ -3992,6 +4151,7 @@ def serialize_record(
     query_actors: Mapping[int, int] | None = None,
     state: Any = None,
     concealed: Mapping[int, str] | None = None,
+    exchange_faces: Mapping[int, bool] | None = None,
 ) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
     return visible_record(
@@ -4000,6 +4160,7 @@ def serialize_record(
         query_actors=query_actors,
         state=state,
         concealed=concealed,
+        exchange_faces=exchange_faces,
     )
 
 

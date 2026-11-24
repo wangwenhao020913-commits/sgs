@@ -404,15 +404,24 @@ const PHASE_TIMING_VALUES = {
   FINISH: "finish",
 };
 
-/** 一条移动的张数：牌面可见时 = `cards.length`；被服务端裁掉（隐藏区）时读 `card_count`。
+/** 一条移动的张数：牌面可见的 + 被裁成张数的（``card_count``）。
  *
- * 两个字段**互斥**（`visible_record` 只在抹掉 `cards` 时补 `card_count`），不会重复计数。
+ * 两格**相加**：隐藏移动（``cards=[]`` + ``card_count``）与全公开移动（只有 ``cards``）
+ * 都退化成同一个和；交换的**混合**移动（一手牌里混着明置与普通手牌）两格同时带——
+ * 可见的照发、扣置的只给张数（ai-view 票 12）。
+ *
+ * **例外 =【蛊惑】的"声明牌名"载荷**（`cards` 全是 ``concealed`` 的声明牌 + 一个旧的
+ * `card_count`）：那些 `cards` 就是这条移动的全部张数，加起来会把同一批牌数成两倍。
+ * 判据认载荷形状（`concealed` 标记），不认技能 id。
  */
 function liveMoveCount(record) {
-  const visible = (record.cards || []).length;
-  if (visible) return visible;
+  const cards = record.cards || [];
+  const visible = cards.length;
   const hidden = Number(record.card_count);
-  return Number.isFinite(hidden) && hidden > 0 ? hidden : 0;
+  const declared = visible > 0
+    && cards.every((card) => Boolean(card) && card.concealed === true);
+  if (declared) return visible;
+  return visible + (Number.isFinite(hidden) && hidden > 0 ? hidden : 0);
 }
 
 /** 按牌 id 从一份公开牌表里撤掉这些牌；`cards` 为空（隐藏区移动）时原样复制。 */
@@ -1539,7 +1548,8 @@ function applyEffectDelta(
   const to = record.to_zone || {};
   const frameId = stageFrameOf(record);
   // D9：同一条移动的 N 张一起入台 ⇒ 停留 0.5(N+1) 秒。N 与飞行层同一个口径
-  // （可见牌 = `cards.length`，隐藏区 = `card_count`）；记在创建出的舞台项上，之后不重算。
+  // （`liveMoveCount`：可见牌 + 被裁成张数的两格相加，含交换的混合移动，票 12）；
+  // 记在创建出的舞台项上，之后不重算。
   const batch = Math.max(1, liveMoveCount(record));
   const carryingFrameKind = stageFrameKindOf(held, frameId);
   const byId = (cardId) => held.find((item) => String(item.card_id) === String(cardId));

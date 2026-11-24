@@ -40,6 +40,7 @@ from typing import Any, Final
 
 from sgs.data import (
     IDENTITY_LABELS,
+    CardTagType,
     hero_skill_names,
     load_content_pack,
     load_hero_tables,
@@ -256,6 +257,16 @@ class _Narrator:
         # 同一帧里出现 Pass 动作 = 显式放弃；出现手牌 → 弃牌堆的移动 = 弃置；
         # 两者都没有 ⇒ 自动放弃（无可弃的同花色牌）。纯展示派生，不写状态。
         self.reveal_frames: dict[int, dict[str, bool]] = {}
+        # 票 12：交换的牌面公开性。两格都由记录流增量维护，与
+        # `sgs_web.projection.processing_entry_faces` 同一条规则（入口形状 + 持久事实）：
+        # - `public_faces` = 带 `PUBLIC_FACE` 标签的牌——一次性 `card_reveal` **不算**：
+        #   明置是持久逐牌事实，亮牌只让那一帧的牌面公开；
+        # - `processing_faces` = 每张牌**最近一次进处理区**时牌面是否公开
+        #   （`(HAND → PROCESSING, LOSE)` 且不公开 ⇒ False；与引擎
+        #   `Engine.processing_concealed` 读同一份持久事实）。
+        # 叙事只读第二格：`_gain` 用它回答"回手腿该不该写牌名"。
+        self.public_faces: set[int] = set()
+        self.processing_faces: dict[int, bool] = {}
 
     # -- 单条记录 -----------------------------------------------------------
 
@@ -353,6 +364,9 @@ class _Narrator:
 
     def _delta(self, record: dict[str, Any], seq: int) -> None:
         delta_type = record.get("delta_type")
+        # 票 12：交换的公开性记账与"开始讲第一回合"无关——记录流从头喂时也要把
+        # 标签增删 / 亮牌 / 进处理区的形状记下来，故先记再按 `started` 写条目。
+        self._track_card_faces(record)
         if delta_type == "hp_change":
             self._hp_change(record, seq)
         elif delta_type == "card_move":
@@ -380,6 +394,62 @@ class _Narrator:
                     _act(" 亮明身份："),
                     _act(label),
                 ],
+            )
+
+    def _track_card_faces(self, record: dict[str, Any]) -> None:
+        """记录交换 / 明置的**牌面公开性**（ai-view 票 12；只记账，不写叙事行）。
+
+        与 :func:`sgs_web.projection.processing_entry_faces` 同一条规则，只是这里逐条增量维护：
+        标签增删（``PUBLIC_FACE``）改"这张牌的牌面是否**持久**公开"，牌进处理区的
+        **形状**决定它在效果区算不算公开——``(HAND → PROCESSING, LOSE)`` 且不公开 ⇒ 背面。
+        进区**之前**的一次性 ``card_reveal``（【展示】/【火攻】亮牌）**不**写这条持久事实；
+        牌已经在处理区里被亮出 / 标成明置时，回手表从那一刻翻成公开。
+
+        ``processing_faces`` 只在**同一张牌的回手腿**上被读（``_gain``）：标记成 ``False``
+        的牌对第三方只写张数；标成 ``True``（或没有登记的入口，例如五谷从牌堆亮出）照写
+        牌名。标记**不删**：同一张牌再进处理区时按新入口覆盖，表的大小以牌数为界。
+        """
+        delta_type = record.get("delta_type")
+        if delta_type in ("tag_add", "tag_remove"):
+            tag_type = str(record.get("tag_type") or "")
+            if tag_type != CardTagType.PUBLIC_FACE.value:
+                return
+            card = record.get("card")
+            if not isinstance(card, dict) or card.get("card_id") is None:
+                return
+            card_id = int(card["card_id"])
+            if delta_type == "tag_add":
+                self.public_faces.add(card_id)
+                # 在处理区里被标成明置 ⇒ 这张牌此刻起牌面公开（与引擎 / 回手表同步）。
+                if card_id in self.processing_faces:
+                    self.processing_faces[card_id] = True
+            else:
+                self.public_faces.discard(card_id)
+            return
+        if delta_type == "card_reveal":
+            card = record.get("card")
+            if isinstance(card, dict) and card.get("card_id") is not None:
+                card_id = int(card["card_id"])
+                # 处理区里被亮出（【蛊惑】验明）：此刻起牌面公开；进区**之前**的亮牌
+                # 不制造表项，故不改变"交换前是否公开"。
+                if card_id in self.processing_faces:
+                    self.processing_faces[card_id] = True
+            return
+        if delta_type != "card_move":
+            return
+        to_zone = record.get("to_zone") or {}
+        if to_zone.get("zone") != "processing":
+            return
+        from_zone = record.get("from_zone") or {}
+        concealed = (
+            from_zone.get("zone") == "hand" and record.get("reason") == "LOSE"
+        )
+        for card in record.get("cards") or ():
+            if not isinstance(card, dict) or card.get("card_id") is None:
+                continue
+            card_id = int(card["card_id"])
+            self.processing_faces[card_id] = (
+                (not concealed) or card_id in self.public_faces
             )
 
     def _card_reveal(self, record: dict[str, Any], seq: int) -> None:
@@ -587,7 +657,11 @@ class _Narrator:
         from_zone = record.get("from_zone") or {}
         verb = " 摸牌" if from_zone.get("zone") == "deck" else " 获得"
         segments = [*self._subject(seat), _act(verb)]
-        if cards_visible(record, self.viewer):
+        # 票 12：交换的回手腿按**进处理区那一刻的公开性**回答——非公开的牌对第三方
+        # 只写"获得 N 张牌"（收到它的本人照常可见，判据住 `cards_visible`）。
+        if cards_visible(
+            record, self.viewer, exchange_faces=self.processing_faces
+        ):
             segments.extend(_cards(cards))
         else:
             segments.append(_act(f" {len(cards)} 张牌"))

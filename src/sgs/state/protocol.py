@@ -792,6 +792,20 @@ class PlayerView(_FrozenModel):
     实例），同一座位可有多个区；跨座位的区只有在查看者是宿主时才进来。``exclude``：不进
     记录流（47 条金录像逐字节不变），但进询问、是 AI 记牌的"已出现的牌"之一。
     """
+    processing_concealed: tuple[int, ...] = Field(default=(), exclude=True)
+    """处理区里**牌面不公开**的牌 id（ai-view 票 12）。
+
+    ``processing`` 本身仍是处理区的**全量**（区域事实不变，AI 的读点 / 守恒量因此不动）：
+    这个字段只回答"其中哪几张是**扣置**进去的"（手牌 → 处理区、原因 ``LOSE``，且交换前
+    不是持久公开事实 ``CardTagType.PUBLIC_FACE``）。网页展示据此不在效果区画牌面；
+    ``Engine.processing_concealed`` 是它的唯一生产者，按**移动形状**维护、不认技能 id。
+
+    ``exclude`` 与 ``hero_zone_cards`` 同一条纪律：不进记录流（47 条冻结金录像 + 60 条基线
+    逐字节不变），但进询问。AI 读点登记为**不读**（本票不改打分；把扣置牌从定价里摘出去
+    另票）：``sgs.agents.heuristic._AI_READ_POINTS["PlayerView"]["processing_concealed"]``，
+    理由也抄在 ``docs/agents/ai-adaptation.md`` §1.5 的信息通道先例里。空元组 = 处理区里
+    没有扣置牌。
+    """
 
 
 # ---------------------------------------------------------------------------

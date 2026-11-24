@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from sgs.agents import Participant
 from sgs.data import (
     CardTagClear,
+    CardTagType,
     Color,
     ContentPack,
     Gender,
@@ -300,6 +301,14 @@ SKIPPED_TURN_KEY = "skipped_turn"
 
 只影响一件事：收尾步不发 ``TURN_AFTER_END``（该角色没有进入过这个回合）。它随
 ``_turn_data`` 在回合环回卷时清掉。
+"""
+
+_PUBLIC_FACE_SOURCE = "engine.public_face"
+"""``CardTagType.PUBLIC_FACE`` 的**来源实例 id**（ai-view 票 12）。
+
+明置技能的写入方另票；本票的写入口 :meth:`Engine.mark_card_face_public` 是引擎级接缝，
+故 ``skill_id`` 用一个不冒充任何武将技能的规范 id（标签登记表 ``carrier=None``、
+``disappears_with_source=False``，来源身份只作审计；显示层 ``HIDDEN``，不会印出来）。
 """
 
 _DISPATCH_SCOPE = "dispatch_scope"
@@ -1015,6 +1024,19 @@ class Engine:
         ``LIFE_DECREASE_DAMAGE_KEY``）且真的掉了体力的帧——故"一次失去体力 ⇒ 恰好一条"。
         与 :attr:`_damage_events` 同一姿态：只 ``append``，不写状态、不发记录、不取随机数。
         """
+        self._processing_concealed: set[int] = set()
+        """**处理区里牌面不公开**的牌（ai-view 票 12；视图 / 展示面事实，不进记录流）。
+
+        唯一来源是移动形状 + 持久公开事实（不认技能 id）：一张牌进处理区时，
+        若来源是**手牌**、原因是 ``LOSE``（扣置 / 交换的第一腿）且它**没有**
+        :data:`~sgs.data.CardTagType.PUBLIC_FACE` 事实 ⇒ 记进来；离开处理区（或它在
+        处理区期间被公开亮出 / 标成明置）⇒ 移出。
+
+        与 :attr:`_card_events` 同一姿态：只服务视图 / 展示（``PlayerView.processing_concealed``），
+        不写 ``GameState``、不发记录、不取随机数 ⇒ 47 条金录像与 60 条基线逐字节不变。
+        ``Engine.from_state`` 从空集起：构造局面里**已经在**处理区的牌按既有口径视为公开
+        （它们没有经过本引擎的移动入口，进区形状无从得知）。
+        """
         self._started = False
         self._l0_in_progress = False
         """L0 派发（:meth:`_start`）**是否已经开始过**。
@@ -1389,6 +1411,17 @@ class Engine:
         票 04 只做缓冲——把它交给 ``PlayerView`` 是票 06。
         """
         return self.state.public_surface
+
+    @property
+    def processing_concealed(self) -> frozenset[int]:
+        """处理区里**牌面不公开**的牌 id（ai-view 票 12；只读视图口）。
+
+        数据住 :attr:`_processing_concealed`，由移动入口按形状 + 持久公开事实维护。
+        ``project(state, seat, concealed_processing=engine.processing_concealed)`` 把它
+        变成 ``PlayerView.processing_concealed``；网页展示据此不在效果区画牌面。
+        只读、不写状态、不进记录流。
+        """
+        return frozenset(self._processing_concealed)
 
     def _active_cause(self) -> Cause | None:
         """当前生效的**起因**：最内层钩子 / 接缝 > 最内层帧 > ``None``（引擎级）。
@@ -4437,6 +4470,7 @@ class Engine:
             owner=owner,
             to_top=to_top,
         )
+        self._note_processing_faces(delta)
         self.emit_delta(
             delta,
             frame_id=(frame.frame_id if frame is not None else 0),
@@ -6193,6 +6227,61 @@ class Engine:
         player = self.state.player(seat)
         player.hand_limit_bonus += int(amount)
 
+    def _note_processing_faces(self, delta: Any) -> None:
+        """按**移动形状**维护"处理区里牌面不公开"的集合（ai-view 票 12）。
+
+        规则不认技能 id，只看 ``(from_zone, to_zone, reason)`` + 牌的持久公开事实：
+
+        - ``to = PROCESSING`` 且 ``from = HAND`` 且 ``reason = LOSE``（扣置 / 交换的第一腿）：
+          带 :data:`~sgs.data.CardTagType.PUBLIC_FACE` 事实的牌**公开**，其余记进集合；
+        - ``to = PROCESSING`` 的其余入口（装备 / 判定区 / 牌堆亮牌 / 使用）都是公开事实；
+        - ``from = PROCESSING``（第二腿 / 结算收尾）：这张牌离开处理区，集合里不再有它。
+
+        只写 :attr:`_processing_concealed`：不写 ``GameState``、不发记录（``delta`` 已落、
+        全信息不变），故 47 条金录像逐字节不变。
+        """
+        to_zone = getattr(delta, "to_zone", None)
+        from_zone = getattr(delta, "from_zone", None)
+        if to_zone is not None and to_zone.zone is Zone.PROCESSING:
+            concealed_entry = (
+                from_zone is not None
+                and from_zone.zone is Zone.HAND
+                and getattr(delta, "reason", None) is MoveReason.LOSE
+            )
+            for card in getattr(delta, "cards", ()) or ():
+                card_id = int(card.card_id)
+                if concealed_entry and not self.state.has_card_tag(
+                    card_id, CardTagType.PUBLIC_FACE
+                ):
+                    self._processing_concealed.add(card_id)
+                else:
+                    self._processing_concealed.discard(card_id)
+            return
+        if from_zone is not None and from_zone.zone is Zone.PROCESSING:
+            for card in getattr(delta, "cards", ()) or ():
+                self._processing_concealed.discard(int(card.card_id))
+
+    def mark_card_face_public(self, card_id: int, *, owner: int) -> bool:
+        """把一张牌标成**明置**（ai-view 票 12 的持久公开事实写入口）。
+
+        写的是 ``CardTagType.PUBLIC_FACE``：牌面是公开事实，交换经过处理区时效果区按它
+        画正面。寿命由登记表回答 = **进入弃牌堆即清**（交换要穿过 hand → processing →
+        hand，故不能用"离开手牌即清"）。本票只落接缝——明置技能的写入方 / 界面入口另票，
+        测试与将来的写方都走这一个入口（不能直接改 ``state.card_tags``：那样不会落
+        ``tag_add``、回放也重建不出来）。
+
+        ``owner`` = 来源实例的持有者座位（规范身份的一半，与 :class:`~sgs.state.CardTag`
+        同形）；``skill_id`` 取引擎级接缝的规范 id :data:`_PUBLIC_FACE_SOURCE`。
+        """
+        return self.add_card_tag(
+            card_id,
+            CardTag(
+                tag_type=CardTagType.PUBLIC_FACE,
+                owner=int(owner),
+                skill_id=_PUBLIC_FACE_SOURCE,
+            ),
+        )
+
     def add_card_tag(self, card_id: int, tag: CardTag) -> bool:
         """给一张**实体牌**挂一个标签（M6 票 09 的唯一写入口；spec D12）。
 
@@ -6200,6 +6289,9 @@ class Engine:
         故这里不做任何区域判断。写入口先读登记表（:func:`~sgs.data.card_tag_spec`）——
         **未登记的类型读不到"清除触发"**，在这里就 fail-closed，不让它落进状态。
         同一标签重复挂是幂等的（返回 ``False``）。返回值 = 状态真的变了吗。
+
+        票 12：挂上 ``PUBLIC_FACE`` 就是"这张牌的牌面从此公开"——若它此刻在处理区，
+        同步把它从 :attr:`_processing_concealed` 移出（视图层立刻按正面画）。
         """
         if card_id < 0:
             raise ValueError(
@@ -6212,6 +6304,8 @@ class Engine:
             return False
         self.state.card_tags[card_id] = (*tags, tag)
         self._emit_tag(TagAddDelta, card_id, tag)
+        if tag.tag_type is CardTagType.PUBLIC_FACE:
+            self._processing_concealed.discard(int(card_id))
         return True
 
     def _emit_tag(self, model: type, card_id: int, tag: CardTag) -> None:
@@ -6374,7 +6468,12 @@ class Engine:
         原区（所以不是 ``card_move``、不进牌守恒），也**不写任何"已知"状态**：亮牌不是
         持久知识，记录流里的这一条就是全部公开事实（spec §5.1.4 / D10）。``frame`` 是承载
         帧（【火攻】的 RESOLVE 帧），记录坐标因此与那次结算的其它 delta 同帧。
+
+        票 12：亮出即"这张牌对场上公开了"——若它此刻在处理区，从
+        :attr:`_processing_concealed` 移出（【蛊惑】验明后的舞台 / 视图立即按正面画）；
+        持久公开性仍**不**写标签（``card_reveal`` 是一次性的，明置是持久事实，两件事）。
         """
+        self._processing_concealed.discard(int(card.card_id))
         self.emit_delta(
             CardRevealDelta(seat=seat, card=card),
             frame_id=(frame.frame_id if frame is not None else 0),
@@ -6834,7 +6933,9 @@ class Engine:
             context=_conversion_use_context(kind),
         )
         actions = tuple(action for action in actions if not is_transformed_action(action))
-        view = project(self.state, actor)
+        view = project(
+            self.state, actor, concealed_processing=self._processing_concealed
+        )
         if kind is QueryKind.PLAY_PHASE:
             return PlayPhaseQuery(
                 seq=seq,
@@ -7219,6 +7320,9 @@ class Engine:
             owner=None,
         )
         self.emit_delta(delta)
+        # 票 12：这条收尾**不是** `move_in_frame`（直调 `move_card`，见上一条注释），
+        # 处理区已空 ⇒ 扣置集合同步清空（否则会留下"处理区里不存在的牌 id"）。
+        self._processing_concealed.clear()
 
     # -- 驱动 ---------------------------------------------------------------
 

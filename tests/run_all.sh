@@ -115,6 +115,7 @@ tier_patterns() {
         'tests/test_virtual_ids.py' \
         'tests/test_card_family_sites.py' \
         'tests/test_m5_no_leak.py' \
+        'tests/test_exchange_visibility.py' \
         'tests/test_public_surface.py' \
         'tests/test_visibility_table.py' \
         'tests/test_action_contract.py' \
@@ -129,6 +130,7 @@ tier_patterns() {
     web)
       printf '%s\n' \
         'tests/test_web.py' \
+        'tests/test_exchange_visibility.py' \
         'tests/test_web_card_events.py' \
         'tests/test_web_damage_events.py' \
         'tests/test_web_script.py' \

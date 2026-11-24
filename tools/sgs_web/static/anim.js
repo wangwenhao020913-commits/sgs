@@ -252,7 +252,8 @@ function animRawDuration(kind) {
 
 /** N = 同一条 ``card_move`` 的牌数；隐藏移动（``cards`` 抹空）读 ``card_count``。
  *
- *  口径只有一份：`session.js:liveMoveCount`（可见牌 = `cards.length`，隐藏区 = `card_count`）。
+ *  口径只有一份：`session.js:liveMoveCount`（可见牌 = `cards.length`，
+ *  扣置 / 隐藏 = `card_count`，混合交换两格相加，ai-view 票 12）。
  *  这里不另抄一份可见性规则，避免飞行与舞台 / live view 的张数漂移。
  */
 function animCountOf(record) {
@@ -778,6 +779,8 @@ function animPlanFlight(record, base = 100) {
       kind: rule.kind,
       record,
       cards,
+      // 整条都没有牌面（纯隐藏移动）⇒ 全部画牌背；混合交换由 `cards[index]` 缺项
+      // 逐只决定（见 `animLaunchFlight`）。
       hidden: cards.length === 0,
       count,
       duration,
@@ -801,7 +804,10 @@ function animLaunchFlight(plan) {
     const layerRect = animRect(layer) || { left: 0, top: 0, width: 0, height: 0 };
     let spawned = 0;
     for (let index = 0; index < plan.count; index += 1) {
-      const card = plan.cards[index] || plan.cards[plan.cards.length - 1] || null;
+      // 第 index 张牌：只有 `cards` 里真给出来的才有牌面；``cards`` 之后的那些是
+      // **被裁成张数的**（隐藏移动整条为空 / 混合交换只发公开的那几张，票 12）⇒
+      // 不拿最后一张有牌面的牌去顶替，交给 `animFlightNode` 画牌背「?」。
+      const card = plan.cards[index] || null;
       const toRect = animRect(animAnchorFor(plan.record.to_zone, card));
       if (!toRect) {
         animMarkMissing("destination");

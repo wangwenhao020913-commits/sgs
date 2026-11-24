@@ -154,19 +154,22 @@ def test_reading_an_unregistered_tag_type_fails_closed() -> None:
 
 
 def test_every_tag_shape_is_registered_and_its_carrier_anchor_is_live() -> None:
-    """spec §标签：M6 三类 + feng-yujin 票 03 的【定乱】+ sp1 票 01 的【自书】（5 类 / 3 个活载体）。"""
+    """spec §标签：M6 三类 + feng-yujin 票 03 的【定乱】+ sp1 票 01 的【自书】
+
+    + ai-view 票 12 的**明置**（6 类 / 3 个活载体）。"""
     specs = {tag_type: CARD_TAG_TYPES[tag_type] for tag_type in TAG_TYPES}
     carriers = {tag_type: spec.carrier for tag_type, spec in specs.items()}
     live = [tag_type for tag_type, carrier in carriers.items() if carrier is not None]
 
-    assert len(specs) == 5, sorted(specs)
+    assert len(specs) == 6, sorted(specs)
     assert set(live) == {
         CardTagType.LUOSHEN_HAND,
         CardTagType.DINGLUAN,
         CardTagType.ZISHU,
     }, (
         "三个活载体：界甄姬【洛神】（本回合不计入）、锋·于禁【定乱】（禁令 + 进入弃牌堆）"
-        "与马良【自书】（逐张标记 + 离手 / 回合开始清除）"
+        "与马良【自书】（逐张标记 + 离手 / 回合开始清除）；明置（票 12）只有引擎级写入口、"
+        "没有技能载体"
     )
     assert carriers[CardTagType.LUOSHEN_HAND] == "hero.jie_zhenji.luoshen"
     assert carriers[CardTagType.DINGLUAN] == "hero.feng_yujin.dingluan"
@@ -204,6 +207,21 @@ def test_every_tag_shape_is_registered_and_its_carrier_anchor_is_live() -> None:
     assert zishu.visibility is CardTagVisibility.FACE_VISIBLE
     assert zishu.disappears_with_source is True, "马良阵亡 / 失去【自书】时标记一并清"
     assert zishu.effect is None, "自书标记没有独立效果（结算由【自书】自己的钩子做）"
+
+    # ai-view 票 12：明置 = **逐牌牌面公开**的持久事实。读取方是**可见性判据**
+    # （`visibility.cards_visible` / `project` 的 `processing_concealed`），不是手牌计数 /
+    # 禁令；寿命必须穿过 hand → processing → hand，故取"进入弃牌堆"而不是"离开手牌"。
+    # 可见性 HIDDEN：这条事实不给牌面挂徽章，`tag_add` 也不许广播一张仍在手牌里的牌面。
+    public_face = specs[CardTagType.PUBLIC_FACE]
+    assert public_face.reader is CardTagReader.PUBLIC_FACE, "读点是交换 / 扣置的牌面可见性"
+    assert public_face.clear_trigger is CardTagClear.ENTER_DISCARD, (
+        "交换必须穿过处理区：LEAVE_ZONE 会在 hand → processing 那一刻清掉"
+    )
+    assert public_face.visibility is CardTagVisibility.HIDDEN, (
+        "事实本身不进玩家载荷（显示层不需要徽章，tag_add 不能广播隐藏手牌）"
+    )
+    assert public_face.disappears_with_source is False, "没有技能来源，寿命只按清除触发回答"
+    assert public_face.carrier is None and public_face.effect is None
 
     # 载体锚点与 ``CATALOG`` 对账：登记表说"由谁生产"，技能表里就必须真有那一条。
     for tag_type, spec in specs.items():

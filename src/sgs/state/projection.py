@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from sgs.data import Identity
 
 from .models import CardRef, GameState, Player
@@ -55,7 +57,12 @@ def _hero_zone_facts(
     return count, tuple(cards)
 
 
-def project(state: GameState, seat: int) -> PlayerView:
+def project(
+    state: GameState,
+    seat: int,
+    *,
+    concealed_processing: Iterable[int] = (),
+) -> PlayerView:
     """投影出 ``seat`` 这一参与者能看到的棋盘信息。
 
     武将 id 与势力是**公开信息**（标准版武将牌明置；`04`（§2「信息可见性」）），故逐座位照搬；
@@ -67,6 +74,12 @@ def project(state: GameState, seat: int) -> PlayerView:
 
     被废除的区域（lei 票 05）：``sealed_zones`` 照搬状态里的闭集（公开事实，不做可见性
     过滤）；它同样 ``exclude``，由 ``sgs_web.projection.visible_snapshot`` 补进网页载荷。
+
+    ``concealed_processing``（ai-view 票 12）是**处理区里牌面不公开**的牌 id，由引擎按
+    **移动形状**维护（``Engine.processing_concealed``）：交换 / 扣置进去的那几张。它只
+    抄成 :attr:`PlayerView.processing_concealed`（``exclude``、不进记录流），
+    ``processing`` 本身仍是全量——本票不改 AI 的读点 / 守恒量。纯状态参数：投影不读
+    记录流，也不为它做任何判定（形状规则只有一处，住引擎的移动入口）。
     """
     hero_zone_facts = {
         player.seat: _hero_zone_facts(
@@ -97,6 +110,19 @@ def project(state: GameState, seat: int) -> PlayerView:
         for player in state.players
     )
     self_hand = state.refs(state.player(seat).hand)
+    # 排序只为可重现（集合无序；契约是"哪些牌"，不是顺序）。只收**此刻真的在处理区**里的
+    # 牌：字段名字就是它的契约（终局清栈等直调 `move_card` 的收尾不会再回写集合，这里把
+    # "处理区里不存在"的残留挡在视图外）。
+    in_processing = set(state.processing)
+    processing_concealed = tuple(
+        sorted(
+            {
+                int(card_id)
+                for card_id in concealed_processing
+                if int(card_id) in in_processing
+            }
+        )
+    )
     return PlayerView(
         seat=seat,
         players=players,
@@ -107,4 +133,5 @@ def project(state: GameState, seat: int) -> PlayerView:
         turn_seat=state.turn_seat,
         phase=state.phase,
         hero_zone_cards=hero_zone_facts[seat][1],
+        processing_concealed=processing_concealed,
     )

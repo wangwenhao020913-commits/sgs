@@ -65,12 +65,15 @@ from sgs.engine import (  # noqa: E402
     record_json,
 )
 from sgs.state import (  # noqa: E402
+    ActivateSkill,
     CardRef,
     EndPhase,
     MoveReason,
     Pass,
+    Phase,
     QueryKind,
     SelectCards,
+    SelectOption,
     UseCard,
     Zone,
     ZoneRef,
@@ -1343,3 +1346,147 @@ def test_a_pve_script_battle_leaks_neither_hands_nor_deck_and_registers_no_new_d
     assert delta_types, "对照：这一局至少产出一类 delta（判据不是空转）"
     missing = sorted(delta_types - set(_delta_records()))
     assert not missing, f"PvE 局出现了未登记不泄露判据的 delta 类型：{missing}"
+
+
+# ---------------------------------------------------------------------------
+# ai-view 票 12：交换（鲁肃【缔盟】）的第三方不泄露
+# ---------------------------------------------------------------------------
+
+DIMENG = "hero.lu_su_mobile.dimeng"
+HAOSHI = "hero.lu_su_mobile.haoshi"
+
+
+def test_a_dimeng_exchange_never_leaks_the_swapped_hand_faces_to_a_third_party() -> None:
+    """票 12 的验收：人类不是被交换的两名角色 ⇒ 两条腿都只给张数。
+
+    交换 = ``(HAND → PROCESSING, LOSE)`` 两次扣置 + ``(PROCESSING → HAND, PUT)`` 两次回手。
+    扣置腿对**任何人**只给张数（牌面公开性取交换前）；回手腿对第三方也只给张数，只有
+    收到它的本人照发。引擎记录流仍是全信息（``record_json`` 的 ``cards`` 不动）。
+    """
+    mine = (cards_of_type(PACK, "slash")[0], cards_of_type(PACK, "dodge")[0])
+    hand_a = (cards_of_type(PACK, "ex_nihilo")[0],)
+    hand_b = (cards_of_type(PACK, "duel")[0], cards_of_type(PACK, "peach")[0])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="lu_su_mobile", hp=3, hp_max=3, hand=mine),
+            SeatSpec(hand=hand_a),
+            SeatSpec(hand=hand_b),
+            SeatSpec(),  # 座位 3 = 人类（第三方）
+            SeatSpec(),  # 座位 4：**5p**（票面验收的人数）
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in set(mine) | set(hand_a) | set(hand_b)
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    class _Driver:
+        """座位 0：放弃两条技能，出牌阶段提交【缔盟】（1, 2）；其余最小应答。"""
+
+        def __init__(self) -> None:
+            self.pair: tuple[int, int] | None = (1, 2)
+            self.done = False
+
+        def respond(self, query):  # noqa: ANN001 - Participant 协议
+            if query.kind == QueryKind.SKILL_ACTIVATION and str(query.skill_id) in (
+                HAOSHI,
+                DIMENG,
+            ):
+                return next(
+                    action for action in query.legal_actions if isinstance(action, Pass)
+                )
+            if query.kind == QueryKind.PLAY_PHASE and self.pair is not None:
+                first, second = self.pair
+                self.pair = None
+                self.done = True
+                return ActivateSkill(
+                    skill_id=DIMENG,
+                    picks=(),
+                    choices=(f"seat:{first}", f"seat:{second}"),
+                    answers_seq=query.seq,
+                )
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            if query.kind == QueryKind.PLAY_PHASE:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, EndPhase)
+                )
+            return query.legal_actions[0]
+
+    driver = _Driver()
+    for _ in range(1000):
+        if (
+            driver.done
+            and engine.pending is not None
+            and engine.pending.kind == QueryKind.PLAY_PHASE
+        ):
+            break
+        if engine.pending is None:
+            engine._step()
+        else:
+            engine.submit(driver.respond(engine.pending))
+    assert driver.done, "没走到【缔盟】的提交点"
+
+    moves = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+    ]
+    first = [
+        record
+        for record in moves
+        if record.from_zone is not None
+        and record.from_zone.zone is Zone.HAND
+        and record.to_zone.zone is Zone.PROCESSING
+        and record.reason is MoveReason.LOSE
+    ]
+    second = [
+        record
+        for record in moves
+        if record.from_zone is not None
+        and record.from_zone.zone is Zone.PROCESSING
+        and record.to_zone.zone is Zone.HAND
+        and record.reason is MoveReason.PUT
+    ]
+    assert len(first) == 2 and len(second) == 2, "交换的两条腿各两条"
+    for record in first + second:
+        raw = json.loads(record_json(record))
+        assert raw["cards"], "引擎记录流保持全信息（本票只裁下发）"
+
+    session = Session(
+        seed=0,
+        player_count=5,
+        ai="random",
+        human_seat=3,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=PACK,
+    )
+    session.engine = engine
+    payload = GameRegistry(runs_dir="/tmp/unused").view(
+        session, after=-1, logs_after=0
+    )
+    shown = {
+        record["seq"]: record
+        for record in payload["records"]
+        if "seq" in record
+    }
+    for record in first + second:
+        entry = shown[record.seq]
+        assert entry["cards"] == [], f"交换的牌面泄露到第三方：{entry}"
+        assert entry["card_count"] == len(record.cards), entry
+        text = json.dumps(entry, ensure_ascii=False)
+        for key in ("card_id", '"name"', '"suit"', '"rank"'):
+            assert key not in text, f"脱敏记录仍带牌面字段 {key}：{entry}"
+    # 数量正确变化（牌面之外的事实照发）。
+    players = {player["seat"]: player for player in payload["snapshot"]["players"]}
+    assert players[1]["hand_count"] == len(hand_b)
+    assert players[2]["hand_count"] == len(hand_a)

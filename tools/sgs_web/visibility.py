@@ -19,6 +19,12 @@ A3 的口径按**记录类型**各有一条，全部只读记录字典：
   只在调用方已确认**牌面可见**时下发（网页载荷）；**记录流仍不下发**（本判据默认
   ``face_visible=False``，故 ``visible_record`` 的标签 delta 保持原样）。未登记的类型
   fail-closed（``tag_visible``）。
+- **交换 / 扣置的牌面**（ai-view 票 12）：牌移动的牌面可见性不再只按**区域**回答——
+  ``(HAND → PROCESSING, LOSE)`` 是"扣置"进去的那一腿，它的牌面由**持久公开事实**
+  回答（:func:`public_face_card_ids`：``CardTagType.PUBLIC_FACE``），不看查看者身份
+  （效果区只回答"场上公开的是什么"）；``(PROCESSING → HAND, PUT)`` 的回手腿读同一份
+  交换前的公开性（``exchange_faces``），非公开的牌只给**收到它的本人**。规则按
+  ``(from_zone, to_zone, reason)`` + 牌面公开性判，**不认技能 id**。
 - ``viewer is None`` = 没有查看者（全知）：不裁剪（内部调用 / 测试需要原始记录）。
 
 两个下发口**必须同源**，否则同一件事在事件流与日志里口径不一：
@@ -37,7 +43,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
-from sgs.data import hero_placement_decls
+from sgs.data import CardTagType, hero_placement_decls
 
 __all__ = [
     "PUBLIC_ZONES",
@@ -47,15 +53,74 @@ __all__ = [
     "hero_zone_visible",
     "identity_visible",
     "placement_visibility",
+    "public_face_card_ids",
     "tag_visible",
+    "visible_card_ids",
 ]
 
 PUBLIC_ZONES: Final[frozenset[str]] = frozenset({"discard", "processing", "equip", "judge"})
-"""牌面一旦进入这些区域就是公开事实；手牌 / 牌堆仍是隐藏区。"""
+"""牌面一旦进入这些区域就是公开事实；手牌 / 牌堆仍是隐藏区。
+
+票 12 起这条按**区**的判据不是全部：处理区仍算公开区，但**扣置**进去的牌是例外——
+:func:`cards_visible` 的交换规则先回答那一档（形状 + 持久公开事实）。
+"""
 
 
-def cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
-    """这条牌移动的**牌面身份**对 ``viewer`` 是否公开。
+def public_face_card_ids(state: Any) -> frozenset[int]:
+    """带**持久公开事实**的牌 id（ai-view 票 12 的唯一读点）。
+
+    事实 = :attr:`~sgs.data.CardTagType.PUBLIC_FACE` 标签（明置），与区域无关。``state``
+    缺失 / 没有 ``card_tags`` ⇒ 空集（调用方 fail-closed：看不出的牌面按不公开处理）。
+    只读 duck-typed 的两格（``state.card_tags`` 与 ``tag.tag_type``），故 ``GameState``
+    与测试替身同一份读法。
+    """
+    if state is None:
+        return frozenset()
+    tags = getattr(state, "card_tags", None) or {}
+    wanted = CardTagType.PUBLIC_FACE.value
+    return frozenset(
+        int(card_id)
+        for card_id, card_tags in tags.items()
+        if any(
+            str(getattr(tag.tag_type, "value", tag.tag_type)) == wanted
+            for tag in card_tags
+        )
+    )
+
+
+def _card_ids(record: Mapping[str, Any]) -> tuple[int, ...]:
+    """一条移动记录里的实体牌 id（畸形条目跳过：判据不因脏载荷崩）。"""
+    out: list[int] = []
+    for card in record.get("cards") or ():
+        if not isinstance(card, Mapping) or "card_id" not in card:
+            continue
+        try:
+            out.append(int(card["card_id"]))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+def _move_shape(record: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """``(来源区, 目标区, 原因)`` 三个字符串；缺项给 ``None``（不猜）。"""
+    from_zone = record.get("from_zone") or {}
+    to_zone = record.get("to_zone") or {}
+    reason = record.get("reason")
+    return (
+        getattr(from_zone.get("zone"), "value", from_zone.get("zone")),
+        getattr(to_zone.get("zone"), "value", to_zone.get("zone")),
+        getattr(reason, "value", reason),
+    )
+
+
+def visible_card_ids(
+    record: Mapping[str, Any],
+    viewer: int | None,
+    *,
+    state: Any = None,
+    exchange_faces: Mapping[int, bool] | None = None,
+) -> tuple[int, ...]:
+    """这条牌移动里**牌面可见**的那些牌 id（按记录顺序；空元组 = 一张都看不到）。
 
     ``record`` 是 ``card_move`` 的 JSON 形态（``from_zone`` / ``to_zone`` 各带 ``zone``
     与 ``seat``）；``viewer`` = 查看者座位，``None`` = 没有查看者 / 全知。
@@ -64,23 +129,74 @@ def cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
     （牌堆 / 手牌）只放行查看者自己经手的那一侧；**武将牌上的牌区**（``hero``，2026-10
     用户口径）**只给宿主本人**——只要移动任一侧是 ``hero``，就按 :func:`hero_zone_ref_visible`
     回答，不再让"来源手牌是自己的"绕开宿主裁剪。
+
+    票 12 的两条**交换形状**先于区域判据（按形状 + 公开性，不认技能 id），且是**逐牌**
+    回答（一手牌里可能混着明置的与普通的）：
+
+    - ``(HAND → PROCESSING, LOSE)`` = **扣置 / 交换的第一腿**。牌面公开性读**交换前**的
+      持久事实（``state`` 的 ``PUBLIC_FACE`` 标签）：公开的那几张照发，其余只给张数
+      （**不按查看者身份开洞**——双方对自己的手牌 / 收到的牌的知情来自各自的手牌视图，
+      不来自效果区）。
+    - ``(PROCESSING → HAND, PUT)`` = **交换的回手腿**。``exchange_faces``（
+      :func:`sgs_web.projection.processing_entry_faces`：每张牌在处理区期间牌面是否公开）
+      里标成 ``False`` 的牌对第三方不公开；**收到它的本人**照发（既有手牌可见性——
+      他本来就要在自己的手牌视图里看到这张牌）。``exchange_faces`` 缺省 = 不是本判据
+      认识的交换（例如五谷从牌堆亮出后取走），落回区域判据、行为与引入前一致。
     """
     if viewer is None:
-        return True
+        return _card_ids(record)
+    ids = _card_ids(record)
     to_zone = record.get("to_zone") or {}
     from_zone = record.get("from_zone") or {}
     to = to_zone.get("zone")
     source = from_zone.get("zone")
     if to == "hero" or source == "hero":
         hero_ref = to_zone if to == "hero" else from_zone
-        return hero_zone_ref_visible(hero_ref, viewer)
+        return ids if hero_zone_ref_visible(hero_ref, viewer) else ()
+    source_zone, target_zone, reason = _move_shape(record)
+    if ids and source_zone == "hand" and target_zone == "processing" and reason == "LOSE":
+        # 扣置腿读**持久事实**（交换前是否公开）：逐牌、不按查看者开洞。不用
+        # ``exchange_faces``——那张表是"处理区期间"的现势（处理区里被亮出会翻成公开），
+        # 拿它回看这条**更早**的记录会把之后才公开的牌面提前放出去。
+        public = public_face_card_ids(state)
+        return tuple(card_id for card_id in ids if card_id in public)
+    if (
+        ids
+        and source_zone == "processing"
+        and target_zone == "hand"
+        and reason == "PUT"
+        and exchange_faces is not None
+    ):
+        if to_zone.get("seat") == viewer:
+            return ids
+        return tuple(
+            card_id for card_id in ids if exchange_faces.get(card_id) is not False
+        )
     if to in PUBLIC_ZONES or source in PUBLIC_ZONES:
-        return True
+        return ids
     if to == "hand" and to_zone.get("seat") == viewer:
-        return True
+        return ids
     if source == "hand" and from_zone.get("seat") == viewer:
-        return True
-    return False
+        return ids
+    return ()
+
+
+def cards_visible(
+    record: Mapping[str, Any],
+    viewer: int | None,
+    *,
+    state: Any = None,
+    exchange_faces: Mapping[int, bool] | None = None,
+) -> bool:
+    """这条牌移动的**牌面身份**对 ``viewer`` 是否公开（全部可见才为真）。
+
+    判据住 :func:`visible_card_ids`；本函数是它的布尔形态，供叙事 / 既有调用方使用
+    （叙事在"有一张不公开"时只写张数，故逐牌细节不必下传）。
+    """
+    ids = _card_ids(record)
+    return len(visible_card_ids(
+        record, viewer, state=state, exchange_faces=exchange_faces
+    )) == len(ids)
 
 
 def placement_visibility(skill_instance: str | None) -> str | None:

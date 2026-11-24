@@ -47,6 +47,11 @@
    `view`，**不进记录流**）；询问上的先例是 `skill_id` / `preactivation`。它们**不进记录流**，
    所以改动**不一定**触发金录像字节告警。票面因此必须写明"记牌 / 身份推断的输入变没变"，
    别指望金录像替你报警。
+   **ai-view 票 12 的 `PlayerView.processing_concealed`** 也走这条：交换 / 扣置进处理区的
+   牌 id，`exclude=True`（不进记录流、不进网页载荷），读点表登记为**不读**——处理区仍是
+   全量（`view.processing`），本票只让展示层不画扣置牌的面；把扣置牌从定价 / 记牌里摘出去
+   是另票的读法变更（那一票要让 `_conserved_card_count` / `_visible_card_faces` 一起动，
+   并把 diff 逐条归因）。
 6. **回归**：≥1 条"不犯已知的蠢"用例进 `tests/test_ai_cases.py`；本票进决策 diff 批，diff 非空
    逐条解释（"为什么改对了"比"改了"重要）。
 

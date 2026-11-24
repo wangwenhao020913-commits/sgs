@@ -3926,6 +3926,13 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "（D1），顶牌是无懈即嵌套层；【火攻】也靠它给'弃一张换 1 点伤害'的价；"
                     "记牌也数它（_visible_card_faces 的可见牌面，C1）",
                 ),
+                "processing_concealed": (
+                    False,
+                    "ai-view 票 12 的处理区扣置牌（交换 / 蛊惑）——本票**不改打分**："
+                    "`processing` 仍是全量（区域事实 / 守恒量 / 顶牌判据一字未动），这一格"
+                    "只给网页展示画牌背。要把扣置牌从定价 / 记牌里摘出去（它算不算'已出现'）"
+                    "是另票的定价问题；在那之前读它就是悄悄的读法变更",
+                ),
                 "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
                 "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),
             }

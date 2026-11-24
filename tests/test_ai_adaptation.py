@@ -391,6 +391,11 @@ def test_the_battle_display_fields_added_no_ai_read_point() -> None:
     **网页载荷**字段（``display.pve_seat_display`` / ``projection.visible_snapshot`` 补的
     派生），不进 ``PlayerView`` / ``PlayerPublic`` / 九类询问——AI 看得见的输入一位没变。
     要动这张表（读新字段 / 新询问字段）请另开票：改表就要重评 AI 读法，别在显示票里顺手加。
+
+    **票 23 之后的一处登记**（不是"顺手加"，在票面裁过）：
+
+    - ``PlayerView.processing_concealed``（ai-view 票 12）：交换 / 扣置进处理区的牌 id，
+      登记为**不读**——本票只让网页展示能画牌背，``processing`` 的读点 / 守恒量一字未动；
     """
     table = heuristic._AI_READ_POINTS
     shape = {bucket: tuple(sorted(entries)) for bucket, entries in table.items()}
@@ -403,6 +408,7 @@ def test_the_battle_display_fields_added_no_ai_read_point() -> None:
             "phase",
             "players",
             "processing",
+            "processing_concealed",
             "seat",
             "self_hand",
             "turn_seat",
@@ -480,7 +486,9 @@ def test_the_battle_display_fields_added_no_ai_read_point() -> None:
     # 75 = 74 + qunying 票 11 的 ``PlayPhaseQuery.auto_start``：它**不是**网页载荷字段，而是
     # 新增的询问字段（界面自动展开标记），必须登记（上一条"每个字段都要登记"同理）；
     # 登记为「不读」——AI 的复合候选仍从同一份 ``preactivations`` 填表。
-    assert sum(len(entries) for entries in table.values()) == 75, (
+    # 76 = 75 + ai-view 票 12 的 ``PlayerView.processing_concealed``：协议字段
+    # （``exclude=True``、进询问），登记为「不读」——本票只给网页展示，不改打分。
+    assert sum(len(entries) for entries in table.values()) == 76, (
         "读点总行数变了：新增询问字段要先登记读点（读 / 不读都要一句理由），"
         "网页载荷字段不许进 AI 读点表"
     )

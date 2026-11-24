@@ -110,10 +110,12 @@ from sgs_web.projection import (  # noqa: E402
     live_tag_deltas_after,
     life_loss_events_after,
     pending_payload,
+    processing_entry_faces,
     session_harvest_state,
     skill_events_after,
     visible_record,
     visible_snapshot,
+    window_has_processing_legs,
 )
 from sgs_web.replay import list_runs, load_run, save_run  # noqa: E402
 from sgs_web.script_library import LIBRARY_TABLES, ScriptLibraryStore  # noqa: E402
@@ -626,6 +628,9 @@ class GameRegistry:
 
         **记录流只扫一趟**（table-ux-overhaul 票 01）：`Session.window(after)` 一次给出
         本批切片 / 新游标 / 应答者表 / 序号上界；四条派生通道读**尾部窗口**而不是整条流，
+        **例外 = 票 12 的交换窗口**（`window_has_processing_legs`）：回手腿要读"牌在处理区
+        期间是否公开"，而这个答案可能来自上一批，故只在含交换两条腿的窗口里多扫一次全量
+        记录（普通窗口 / 五谷的取牌窗口之外一次都不多扫）。
         叙事走会话自己的增量缓存。此前这里对记录流扫了 7 趟，其中四条通道把整条流
         `model_dump + json.dumps + json.loads` 一遍（N=6612 时 2.38 s / 单次 view 2.7 s）。
         """
@@ -647,6 +652,15 @@ class GameRegistry:
             **concealed_by_later_reveal(window, session.engine.state),
             **concealed_guohuo_cards(session.engine),
         }
+        # 票 12：交换的**回手腿**要读"每张牌在处理区期间牌面是否公开"——这个表可能跨
+        # 窗口（一张牌在上一批扣置、这一批回手），故按**需要时**扫一次全量记录；普通窗口
+        # （没有交换的两条腿）一个字节都不多扫。这是 `view()` 唯一一次"本批之外"的额外
+        # 全量扫描，且只在交换窗口发生（`window_has_processing_legs`）。
+        exchange_faces = (
+            processing_entry_faces(session.records(), session.engine.state)
+            if window_has_processing_legs(window)
+            else None
+        )
         records = [
             payload
             for record in window
@@ -659,6 +673,9 @@ class GameRegistry:
                     # UI1/UI2：未验明的【蛊惑】扣置牌**不给牌面**（处理区是公开区，
                     # 但扣置是"背面朝上"进去的）——事件流与舞台同一份判据。
                     concealed=concealed,
+                    # 票 12：交换的回手腿按"交换前的公开性"裁——非公开的牌对第三方
+                    # 只给张数（与舞台的 `processing_concealed` 同一份事实）。
+                    exchange_faces=exchange_faces,
                 )
             )
             is not None

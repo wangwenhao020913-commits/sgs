@@ -466,11 +466,19 @@ class CardTagReader(str, Enum):
     ``HAND_COUNT`` 会把带标记的牌排除出手牌计数（马良的"自书"牌仍是普通手牌）、
     ``FORBIDDEN_AS_SLASH`` 会禁掉这张牌。它**不写技能名**：判据认事实不认名字，
     换一条技能用同一个值也成立。
+
+    ``PUBLIC_FACE``（ai-view 票 12）= **这张牌的牌面是公开事实**（明置）。读点：
+    ``sgs_web.visibility.public_face_card_ids``（记录流的下发判据，经
+    ``visible_card_ids`` 的扣置腿 / ``cards_visible`` 回答）、以及引擎侧
+    ``Engine._note_processing_faces``（把"处理区里牌面不公开"的集合维护进
+    ``Engine.processing_concealed`` → ``PlayerView.processing_concealed``，舞台据此
+    不画牌面）。它不是手牌计数 / 禁令读点：带它的牌仍是普通手牌。
     """
 
     HAND_COUNT = "hand_count"
     FORBIDDEN_AS_SLASH = "forbidden_as_slash"
     SKILL_LOCAL = "skill_local"
+    PUBLIC_FACE = "public_face"
 
 
 class CardTagClear(str, Enum):
@@ -522,6 +530,12 @@ class CardTagType(str, Enum):
       寿命 = **离开手牌即清**（``LEAVE_ZONE``，由载体在 ``MOVE_AFTER`` 里调
       ``clear_card_tags(..., cards=…)``）+ **回合开始时清除**（由载体自己的 ``TURN_START``
       簿记钩子兑现）。活载体 = ``hero.maliang.zishu``。
+    - ``PUBLIC_FACE``：**明置的牌**（ai-view 票 12，用户 2026-11-24 口径）：这张牌的牌面
+      是**公开事实**，交换（手牌 / 装备区 → 效果区 → 对方手牌）时效果区按它决定正面 / 背面。
+      寿命 = **进入弃牌堆即清**（``ENTER_DISCARD``）——交换要**经过**处理区，故不能选
+      ``LEAVE_ZONE``（那会在 ``hand → processing`` 那一刻清掉）；牌被使用 / 打出后本来就在
+      公开区，进弃牌堆时随标签清除。**本票只落读写接缝**：写入方 = ``Engine.mark_card_face_public``
+      （明置技能 / 界面入口另票），故 ``carrier`` 为 ``None``。
     """
 
     LUOSHEN_HAND = "luoshen_hand"
@@ -529,6 +543,7 @@ class CardTagType(str, Enum):
     UNTIL_PLAYED = "until_played"
     DINGLUAN = "dingluan"
     ZISHU = "zishu"
+    PUBLIC_FACE = "public_face"
 
 
 class CardTagSpec(_FrozenModel):
@@ -608,6 +623,21 @@ CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
             visibility=CardTagVisibility.FACE_VISIBLE,
             disappears_with_source=True,
             carrier="hero.maliang.zishu",
+        ),
+        # 明置（ai-view 票 12）：牌面是**公开事实**，交换经过效果区时按它画正面。
+        # 寿命 = 进入弃牌堆即清：交换必须穿过 hand → processing → hand，故不能选 LEAVE_ZONE。
+        # 可见性取 **HIDDEN**（不是 PUBLIC）：这条事实的读者是**可见性判据**（记录流 / 视图），
+        # 显示层不需要给牌面挂徽章；而 tag_add 记录自带完整 CardRef，PUBLIC 会把一张
+        # 仍在手牌里的牌的牌面直接广播出去、FACE_VISIBLE 会让它随牌面载荷出现一个没有
+        # 登记显示名的徽章。事实本身仍经 tag_add / tag_remove 进**引擎**记录流（可审计、
+        # 可回放重建），只是不进玩家载荷。
+        # 不随来源消失：本票只落接缝（写入方 = `Engine.mark_card_face_public`），
+        # 将来由明置技能写入时按技能自己的寿命另定；在这里随来源消失会连"谁也能清"都说不清。
+        CardTagType.PUBLIC_FACE: CardTagSpec(
+            reader=CardTagReader.PUBLIC_FACE,
+            clear_trigger=CardTagClear.ENTER_DISCARD,
+            visibility=CardTagVisibility.HIDDEN,
+            disappears_with_source=False,
         ),
     }
 )

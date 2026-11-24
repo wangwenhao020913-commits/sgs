@@ -31,7 +31,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from sgs.data import (
@@ -260,6 +260,7 @@ def _processing_display(
     lookup: Mapping[int, CardRef] | None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef],
     concealed: Mapping[int, str] | None = None,
+    concealed_processing: Iterable[int] = (),
 ) -> list[Any]:
     """处理区要画的牌：**正在结算的虚拟 / 转化牌**顶掉它们的来源实体牌。
 
@@ -273,6 +274,12 @@ def _processing_display(
     画成"声明的牌名"（:func:`hidden_guohuo_payload`）——**扣置者自己也算"谁"**。
     舞台只回答"这张牌现在**对场上公开的是什么**"，答案在验明那一刻变一次，与查看者无关。
     扣置者本来就认识那张牌，画两套只会让同一张牌在舞台与事件流里各说一套。
+
+    ``concealed_processing``（ai-view 票 12）：处理区里**牌面不公开**的牌 id
+    （``PlayerView.processing_concealed`` / 引擎按移动形状维护）。它们**整张不画**——
+    没有可公开的牌名（与蛊惑的"声明牌名"不同），牌面 / 花色 / 点数一个都不给；
+    张数与牌背由记录流的扣置移动（``cards=[]`` + ``card_count``）表达。蛊惑的声明牌名
+    优先于这一档（先判 ``concealed``）：那张牌虽然也不公开，但"声明成什么"是公开事实。
     """
     if not isinstance(cards, list):
         return cards
@@ -297,16 +304,20 @@ def _processing_display(
             virtual, lookup=lookup
         )
         covered.update(sources)
+    hidden_faces = {int(card_id) for card_id in concealed_processing}
     out: list[Any] = []
     for index, card in enumerate(cards):
         hidden = None
+        card_id = int(card.get("card_id", 0)) if isinstance(card, dict) else 0
         if isinstance(card, dict) and concealed:
-            card_id = int(card.get("card_id", 0))
             declared = concealed.get(card_id)
             if declared is not None:
                 hidden = hidden_guohuo_payload(card_id, declared, lookup=lookup)
         if hidden is not None:
             out.append(hidden)
+            continue
+        if card_id in hidden_faces:
+            # 票 12：扣置进处理区的牌——舞台上连牌面都不画（不造占位假牌）。
             continue
         replacement = replacements.get(index)
         if replacement is not None:
@@ -673,6 +684,7 @@ def decorate_snapshot(
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
     concealed: Mapping[int, str] | None = None,
+    concealed_processing: Iterable[int] = (),
     distance_bonuses: Mapping[int, DistanceBonus] | None = None,
     pve: PveConfig | None = None,
 ) -> dict[str, Any]:
@@ -686,6 +698,9 @@ def decorate_snapshot(
     按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
     ``concealed`` 是**未验明**的【蛊惑】扣置牌（:func:`sgs_web.projection.concealed_guohuo_cards`）：
     ``processing`` 里那几张改画"声明的牌名"（对谁都不给源牌牌面）。
+    ``concealed_processing``（票 12）是处理区里**牌面不公开**的牌 id
+    （``PlayerView.processing_concealed``）：舞台整张不画（不伪造牌面），张数由记录流表达；
+    与 ``concealed`` 重叠时后者优先（声明的牌名是公开事实）。
     ``distance_bonuses``（票 26）是**按座位现算**的双向距离增减（缺省/缺座 = 两侧 0）：
     由投影层调 :func:`sgs.effects.distance_bonus` 后传进来，展示层不自己读引擎状态。
     ``pve``（M7 票 23）是 header 里的 PvE 配置：有它才派生出剧本战斗的三处显示
@@ -698,6 +713,7 @@ def decorate_snapshot(
         lookup=lookup,
         virtual_cards=virtual_cards,
         concealed=concealed,
+        concealed_processing=concealed_processing,
     )
     seated = payload.get("players")
     if isinstance(seated, list):
@@ -758,6 +774,9 @@ def decorate_pending(
             heroes=heroes,
             virtual_cards=virtual_cards,
             concealed=concealed,
+            # 票 12：内嵌视角同样不给扣置进处理区的牌面（同一份
+            # `PlayerView.processing_concealed`；蛊惑的声明牌名仍优先）。
+            concealed_processing=getattr(query.view, "processing_concealed", ()),
             distance_bonuses=distance_bonuses,
             pve=pve,
         )
