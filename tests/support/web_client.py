@@ -419,8 +419,9 @@ _FIRE_TAPES = (
     # 取首个未在用的 **seed 16**（探针 `.scratch/huo-shenzhouyu-mobile/scan_fire_seed.py`）。
     # tape-lineup 票 01（显式点将 `_TAPE_HEROES`）：seed 16 的人类整局用不出【火攻】⇒ 仍按
     # **同一份固定脚本、同一组判据**（对 AI 用火攻 / 目标亮牌 / 没被无懈 / 人类无同花色 /
-    # 零伤害 / 零非法应答）从 1 起重扫，首个命中 **seed 8**（4 已被自己那条占用；探针
-    # `.scratch/tape-lineup/scan_tapes.py`，判据 = `fire_attack_tape` 自身返回 0）。
+    # 零伤害 / 零非法应答）从 1 起重扫 1–300，首个命中 **seed 8**（4 已被自己那条占用；探针
+    # `.scratch/tape-lineup/scan_tapes.py`，判据 = `fire_attack_tape` 自身返回 0；探针在
+    # 首个可用命中即停，故只记首个——要继续列后续命中就把探针里的 break 去掉）。
     (8, False, False),
 )
 
@@ -799,9 +800,9 @@ ai-view 票 07（身份行为后验进 ``_identity_relation``）再换种：seed
 
 tape-lineup 票 01（显式点将 `_TAPE_HEROES`）：seed 29 走到了自救窗口，但【酒】没有回复到 1
 （判据不放宽：人类 0 血 + 求桃窗口里的【酒】目标恒为自己 + 回复到 1）。仍按**同一判据、同一
-固定策略**从 1 起重扫（探针 `.scratch/tape-lineup/scan_tapes.py`，判据 = `_wine_tape_near_death`
-自身返回 0，与 `--tape wine` 同序），首个未在用的命中是 **seed 7**（火攻 4 / 8、出牌阶段 65
-已占用）。"""
+固定策略**从 1 起重扫 1–300（探针 `.scratch/tape-lineup/scan_tapes.py`，判据 = `_wine_tape_near_death`
+自身返回 0，与 `--tape wine` 同序；探针在首个可用命中即停），首个未在用的命中是 **seed 7**
+（火攻 4 / 8、出牌阶段 65 已占用）。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:
@@ -1022,7 +1023,8 @@ def wine_tape(base: str) -> int:
 #     随后【杀】收局；对手的暗手在整个过程中不外泄；
 #   - ``reforge``：一次 ``Reforge`` 真实往返（独立 Action、弃一张摸一张、无无懈窗口）；
 #   - ``wine``：出牌阶段一次【酒】真实往返（``wine_change`` / ``wine_active``）+【杀】收局。
-# 与 08a / 08c 的 seed 4/37/16 tape 的区别：这三条**不经过种子扫描**，手牌 / 体力 /
+# 与 08a / 08c 的 seed 4 / 8（火攻）与 65 / 7（酒）tape 的区别：这三条**不经过种子扫描**，
+# 手牌 / 体力 /
 # 牌堆全部在 fixture 里写死，视频证据之外的 A2 判据由本函数承担。
 # ---------------------------------------------------------------------------
 

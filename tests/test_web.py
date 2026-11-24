@@ -745,7 +745,8 @@ def test_the_ban_set_never_enters_the_record_stream() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6b-3. 显式阵容（tape-lineup 票 01）：建局字段 ``heroes`` 按座位序钉死 8 席
+# 6b-3. 显式阵容（tape-lineup 票 01）：建局字段 ``heroes`` 按座位序钉死整局阵容
+#       （这里用小局：4 席验正面对照、2 席验拒绝路径；8 席那份在 web_client 的 tape 里）
 # ---------------------------------------------------------------------------
 
 
@@ -776,17 +777,23 @@ def test_the_session_api_pins_an_explicit_lineup() -> None:
 
 
 @pytest.mark.parametrize(
-    ("label", "heroes"),
+    ("label", "heroes", "needle"),
     [
-        ("长度不符", ["guanyu", "zhangfei", "zhaoyun"]),
-        ("含未知 id", ["guanyu", "nobody"]),
-        ("真名重复", ["guanyu", "jie_guanyu"]),
-        ("不是数组", "guanyu"),
-        ("含空串", ["guanyu", ""]),
+        # 前两档钉**接入层自己的形状校验**：删掉 `_parse_hero_lineup` 后，`"guanyu"`
+        # 会被展开成 6 个单字符 id、`""` 会被引擎当作未知 id —— 不再产出这两句文案。
+        ("不是数组", "guanyu", "必须是武将 id 的数组"),
+        ("含空串", ["guanyu", ""], "非空字符串"),
+        # 长度也由接入层先报（文案与引擎的"显式指定的武将数…"不同）。
+        ("长度不符", ["guanyu", "zhangfei", "zhaoyun"], "显式阵容的武将数"),
+        # 后两档落引擎的 fail-closed（接入层不另抄真名表）。
+        ("含未知 id", ["guanyu", "nobody"], "nobody"),
+        ("真名重复", ["guanyu", "jie_guanyu"], "真名"),
     ],
 )
-def test_the_session_api_rejects_a_bad_lineup(label: str, heroes: object) -> None:
-    """非法阵容 ⇒ 400，且注册表里**没有**留下半局会话（同建局"先加载后登记"）。"""
+def test_the_session_api_rejects_a_bad_lineup(
+    label: str, heroes: object, needle: str
+) -> None:
+    """非法阵容 ⇒ 400（原因可读），且注册表里**没有**留下半局会话（先加载后登记）。"""
     from sgs_web.serve import GameRegistry
 
     registry = GameRegistry(runs_dir="/tmp/unused")
@@ -803,6 +810,7 @@ def test_the_session_api_rejects_a_bad_lineup(label: str, heroes: object) -> Non
     )
 
     assert status == 400, f"{label}：{body}"
+    assert needle in body["error"], f"{label}：{body['error']}"
     assert registry.sessions == {}, f"{label}：拒绝路径不得留下半局会话"
 
 

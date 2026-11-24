@@ -9,7 +9,7 @@
 ===============  ==================================  ==================================
 方法              路径                                 作用
 ===============  ==================================  ==================================
-``POST``         ``/api/sessions``                   建局；返回首个挂起与快照
+``POST``         ``/api/sessions``                   建局（可带 API-only 的 ``heroes`` 阵容）；返回首个挂起与快照
 ``GET``          ``/api/sessions/<id>?after=&logs=`` 取增量；**顺带判定超时**
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
 ``POST``         ``/api/sessions/<id>/preview``      预发动清单一步的**只读**预览（票 11）
@@ -310,6 +310,9 @@ def _parse_hero_lineup(raw: object, *, player_count: int) -> tuple[str, ...]:
     :func:`sgs.data.deal_heroes` fail-closed（同一个 ``ValueError`` 出口），接入层不另抄
     一份"谁跟谁同真名"的数据规则。字段缺席 ⇒ ``()``，与不传逐字节等价。
 
+    显式阵容下 ``banned_heroes`` **不参与**（禁将只作用于随机配将，见 ``deal_heroes``）；
+    它与 ``heroes`` + ``my_hero`` 不同——后者是两种互斥的发放入口，引擎会 fail-closed。
+
     这是 **API-only** 的测试字段（tape-lineup 票 01）：开局页不下发、不进本地将池存档。
     """
     if raw is None:
@@ -540,16 +543,16 @@ class GameRegistry:
         # 未知档位在这里抛 DataLoadError，由 HTTP 层映射成 400——**先加载、后登记**，
         # 故失败的请求不会在 registry 里留下半局会话。
         pack = load_content_pack(deck_profile=deck_profile)
-        player_count = int(body.get("player_count", 8))
-        # 显式阵容（tape-lineup 票 01）：**API-only** 的测试字段，按座位序钉死整局武将，
-        # 与默认将池解耦。缺席 = 空元组，随机发放那条路径一字未变。
-        heroes = _parse_hero_lineup(body.get("heroes"), player_count=player_count)
         # 会话表的**读改**（编号 / 登记 / 回收）与请求路径共用一把锁（settle-opening-race
         # 票 01）：`_prune_abandoned` 会遍历 `sessions`，与并发建局的写入撞上就是
         # "dictionary changed size during iteration"（同样会把连接打掉）。引擎初始化不占锁。
         with self._lock:
             self._counter += 1
             session_number = self._counter
+        player_count = int(body.get("player_count", 8))
+        # 显式阵容（tape-lineup 票 01）：**API-only** 的测试字段，按座位序钉死整局武将，
+        # 与默认将池解耦。缺席 = 空元组，随机发放那条路径一字未变。
+        heroes = _parse_hero_lineup(body.get("heroes"), player_count=player_count)
         session = create_session(
             seed=body.get("seed"),
             player_count=player_count,
