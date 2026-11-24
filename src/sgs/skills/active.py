@@ -3923,6 +3923,11 @@ def _guohuo_declaration_table(state: GameState) -> dict[str, str]:
     范围 = **基本牌 + 普通锦囊**（排除延时锦囊），且**本牌堆里真有这种牌**——与界【龙胆】
     的 ``_product_in_pack`` 同一判据（108 档没有【酒】，把它列进选项会产出一张牌堆里不存在
     的虚拟牌）。
+
+    **本表不筛"需要附带指定"的牌**（【借刀杀人】的 Bn）：有 designation 段的入口据此照用
+    （【蛊惑】的段 4b、【佐幸】的 designation 段），没有那一问的入口必须再筛一道
+    （:func:`needs_designation`，见 `_qianxun_declaration_table` 与 `ai-view` 票 10 的
+    实机崩溃）——否则"选项 ⇒ 使用"这条链会在 `resolve_borrowed_sword` 处 fail-closed。
     """
     table: dict[str, str] = {}
     known: set[str] = set()
@@ -9427,16 +9432,27 @@ def _qianxun_cost_options(
 
 
 def _qianxun_declaration_table(state: GameState) -> dict[str, str]:
-    """效果① 的牌名闭集：``显示名 → 牌型 id``，范围 = 本牌堆真有的**基本牌 + 普通锦囊**。
+    """效果① 的牌名闭集：``显示名 → 牌型 id``，范围 = 本牌堆真有的**基本牌 + 普通锦囊**，
+    且**不需要附带指定**（票 10）。
 
     **用户 2026-11-21 实机报障后改口（Q12′）**：牌面从"视为使用一张非装备牌"改成"视为使用
     一张**基本牌或普通锦囊牌**"——**不产生虚拟的延时类锦囊**（虚拟延时锦囊在判定 / 移动 /
     展示三处都会出 bug；代价③ 那条路是**转化牌**、有来源实体牌，不受这条限制）。
 
-    与【蛊惑】的 `_guohuo_declaration_table` 因此**逐字相同**（基本牌 + 非延时锦囊、且本牌堆
-    真有）——直接复用它，不另写第二份（同一条"牌堆里没有【酒】就不列出"的判据）。
+    与【蛊惑】的 `_guohuo_declaration_table` 因此**共用**"基本牌 + 非延时锦囊、且本牌堆
+    真有"那一段（同一条"牌堆里没有【酒】就不列出"的判据），但**多一道筛**：本技能的效果①
+    没有附带指定步（:func:`_qianxun_use_virtual` 只交 targets），故【借刀杀人】这类
+    ``needs_designation`` 为真的牌名**不能进表**——进了表就必然在
+    ``resolve_borrowed_sword`` 处 fail-closed（`ai-view` 票 10 的实机崩溃，seed
+    5509461767695346078）。判据与出牌阶段的裸候选同一条（:func:`needs_designation`），
+    不按牌名白名单；将来再有"必须一并指定"的牌自动被挡。**【蛊惑】/【佐幸】有
+    designation 段，它们的表照旧含它**——筛的是"本技能有没有那一问"，不是那张牌本身。
     """
-    return _guohuo_declaration_table(state)
+    return {
+        name: type_id
+        for name, type_id in _guohuo_declaration_table(state).items()
+        if not needs_designation(pure_virtual_card(state, type_id))
+    }
 
 
 def _qianxun_unusable_names(state: GameState, seat: int) -> frozenset[str]:

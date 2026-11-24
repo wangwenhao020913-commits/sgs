@@ -874,8 +874,14 @@ def needs_designation(card: CardRef) -> bool:
     ``borrowed_sword_target``——与 :func:`designation_actions_for` **同一个判据**，
     故"哪些牌只经清单"与"哪些牌有附带指定池"不会各说各话。规则层不认具体牌名。
 
-    用途只有一处：出牌阶段的裸候选生成（:func:`_play_phase`）跳过这类牌——它们的
-    合法动作是三元组 ``(牌, A, Bn)``，单靠"牌 + 目标"表达不了，入口恒是清单。
+    两个读方，判据同一条：
+
+    - **出牌阶段的裸候选生成**（:func:`_play_phase`）跳过这类牌——它们的合法动作是三元组
+      ``(牌, A, Bn)``，单靠"牌 + 目标"表达不了，入口恒是清单；
+    - **不带附带指定步的"牌名选项 ⇒ 使用"面**（群英·陆逊【谦逊】效果①：
+      ``active._qianxun_declaration_table``）把这类牌名从闭集里剔除——列进去就必然在
+      :func:`~sgs.effects.ops.resolve_borrowed_sword` 处 fail-closed（`ai-view` 票 10）。
+      有 designation 段的入口（【蛊惑】/【佐幸】）不需要这一筛。
     """
     return "borrowed_sword_target" in behavior_for(card).target_filters
 

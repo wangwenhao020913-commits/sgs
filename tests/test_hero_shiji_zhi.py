@@ -677,6 +677,45 @@ def test_zuoxing_name_list_is_the_normal_tricks_and_disables_unusable_ones():
     assert "无懈可击" in query.disabled, "出牌阶段没有使用时机 ⇒ 置灰"
 
 
+def test_zuoxing_borrowed_sword_asks_for_the_designation_before_using_it():
+    """【佐幸】的牌名面里选【借刀杀人】⇒ 必须先问附带指定 Bn，再发起使用（`ai-view` 票 10）。
+
+    与【蛊惑】段 4b 同一档：牌名面里出现要附带指定的牌时，"选项 ⇒ 使用"这条链**必须**
+    有那一问——没有就崩在 `resolve_borrowed_sword` 的 W5-02b fail-closed（2026-11-24 实机
+    bug 的同族另一条链）。这里钉住"佐幸这条链自己没有那个洞"：问 `:designation`（池 =
+    持刀者的攻击范围）⇒ 持刀者没有【杀】⇒ 交刀，全程不崩。
+    """
+    weapon = cards_of_type(PACK, "double_sword")[0]
+    state = _state(_seats(), deck=_deck_with(exclude=(weapon,)), turn_seat=1)
+    state.player(0).equip = [weapon]  # 座 0 持武器 ⇒【借刀杀人】有合法目标
+    engine = Engine.from_state(state, seed=7)
+    engine.grant_skill(1, ZUOXING)
+    _drive_until(
+        engine,
+        [
+            Script(),
+            Script({"activate": ZUOXING, "name": "借刀杀人", "designation": "seat:1"}),
+        ],
+        lambda e: e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE"
+        and weapon not in state.player(0).equip,
+    )
+    asked = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SELECT_OPTION"
+        and _step_key(record.query.skill_id) == "designation"
+    ]
+    assert asked, "牌名面里选了要附带指定的牌 ⇒ 必须先问 Bn（与【蛊惑】段 4b 同形）"
+    assert [item.choice for item in asked[0].legal_actions] == ["seat:1"], (
+        "Bn 的候选池 = 持刀者的攻击范围"
+    )
+    assert weapon not in state.player(0).equip, "持刀者没有可用的【杀】⇒ 交刀"
+    assert weapon in state.player(1).hand, "交刀 = 装备区的武器进**使用者**的手牌"
+    assert state.player(0).hp_max == 2, "佐幸的代价照付（神郭嘉 -1 上限）"
+
+
 # ---------------------------------------------------------------------------
 # 陈震【歃盟】（shiji-zhi-luotong-chenzhen 票 02；用户 2026-11-14 一次签 Q1–Q7）
 #

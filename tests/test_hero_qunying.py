@@ -489,6 +489,30 @@ def test_qianxun_effect_one_name_table_excludes_delayed_tricks() -> None:
     assert all(value not in {"qinggang_sword", "eight_diagrams"} for value in table.values())
 
 
+def test_qianxun_effect_one_name_table_skips_cards_that_need_a_designation() -> None:
+    """票 10：效果① 的牌名表**不收**要附带指定的牌（【借刀杀人】的 Bn 无处可选）。
+
+    谦逊的"选项 ⇒ 使用"这条链**没有**附带指定步（`_qianxun_use_virtual` 只交 targets），
+    故列进去就必然在 `resolve_borrowed_sword` fail-closed（实机 bug 的根因）。判据与出牌
+    阶段裸候选同源（`needs_designation`）；【蛊惑】/【佐幸】有 designation 段，它们的牌名表
+    照旧含【借刀杀人】——两处的差别只是"这个技能有没有那一问"，不是判据各写一套。
+    """
+    from sgs.effects import needs_designation
+    from sgs.skills import active as module
+    from sgs.skills.virtual import pure_virtual_card
+
+    state = _state()
+    table = module._qianxun_declaration_table(state)
+    assert "借刀杀人" not in table, "效果① 不能选需要附带指定的牌"
+    assert all(
+        not needs_designation(pure_virtual_card(state, type_id))
+        for type_id in table.values()
+    ), "牌名表里一个需要附带指定的都不许剩（新增此类牌自动被挡）"
+    assert "借刀杀人" in module._guohuo_declaration_table(state), (
+        "同一牌堆里【蛊惑】的表仍含它：那边有 designation 段，不收才是错的"
+    )
+
+
 def test_qianxun_effect_one_greys_names_without_a_legal_target() -> None:
     """效果① 的置灰：出牌阶段的【闪】/【无懈可击】没有目标池 ⇒ 列出来但点不动。"""
     from sgs.skills import active as module
@@ -571,6 +595,8 @@ class _PlayScript:
         self.answered: list[str] = []
         self.probe = probe
         self.hand_before_type: int | None = None
+        # 这一局收到的全部 ``SELECT_OPTION`` 询问（票 10 读**选项面本身**用）。
+        self.option_queries: list[Any] = []
 
     def respond(self, query: Any) -> Any:
         kind = str(getattr(query.kind, "value", query.kind))
@@ -580,6 +606,7 @@ class _PlayScript:
                     return action
             return next(a for a in query.legal_actions if isinstance(a, EndPhase))
         if kind == "SELECT_OPTION":
+            self.option_queries.append(query)
             if str(getattr(query, "skill_id", "") or "").endswith(":type") and self.probe:
                 self.hand_before_type = int(self.probe())
             wanted = self.options.pop(0) if self.options else None
@@ -605,11 +632,17 @@ def _play_state(
     hand_types: tuple[str, ...] = ("slash", "dodge"),
     seats: int = 3,
     judge: bool = True,
+    other_equip: tuple[str, ...] = (),
 ) -> GameState:
     """出牌阶段局面。``judge=True`` 给座 0 一张判定牌——**故意**让它 ≠ 弃光后的手牌数（0），
-    免得【连营】③ 在"弃置所有手牌"之后顺手再触发一次摸牌，把效果③ 的读数搅乱。"""
+    免得【连营】③ 在"弃置所有手牌"之后顺手再触发一次摸牌，把效果③ 的读数搅乱。
+
+    ``other_equip`` = 其他座位装备区里要放的牌名（按 ``cards_of_type`` 的第一张）；它们
+    照 **``deck_excluding``** 的老路从牌堆里扣掉——构造局面也不许同一张牌出现在两个区。
+    """
     hand = tuple(cards_of_type(PACK_160, type_id)[0] for type_id in hand_types)
     judge_card = cards_of_type(PACK_160, "indulgence")[0] if judge else None
+    equipped = tuple(cards_of_type(PACK_160, type_id)[0] for type_id in other_equip)
     specs = [
         SeatSpec(
             hero=HERO,
@@ -618,7 +651,9 @@ def _play_state(
         )
     ]
     specs.extend(SeatSpec() for _ in range(seats - 1))
-    excluded = (*hand, judge_card) if judge_card is not None else hand
+    for seat, card_id in enumerate(equipped, start=1):
+        specs[seat] = SeatSpec(equip=(card_id,))
+    excluded = (*hand, *((judge_card,) if judge_card is not None else ()), *equipped)
     return build_state(
         pack=PACK_160,
         seats=specs,
@@ -707,6 +742,53 @@ def test_qianxun_uses_a_pure_virtual_card_of_the_chosen_name() -> None:
     assert player.hp == 3, "代价②：1 点无来源火焰伤害"
     assert len(player.hand) >= held + 2, "虚拟【无中生有】摸两张"
     assert module._qianxun_used_effects(state, 0) == {module.QIANXUN_EFFECT_CARD}
+
+
+def test_qianxun_effect_one_option_face_never_offers_borrowed_sword() -> None:
+    """票 10 的复现格：牌名弹窗里出现【借刀杀人】⇒ 选它必然崩（引擎 fail-closed）。
+
+    局面让【借刀杀人】**真有合法目标**（座 1 持武器、攻击范围内有【杀】目标）——于是它
+    不会被"此刻没有合法目标"那条置灰，只有"牌名表不收需要附带指定的牌"这一条能挡住它。
+    判据读**真实产出路径**（`CODING_STANDARDS.md` §6）：被检查的是这一问的候选面，不是
+    某个私有表。
+    """
+    from sgs.effects import check_targets
+    from sgs.skills import active as module
+    from sgs.skills.virtual import pure_virtual_card
+
+    # 座 1 持武器 ⇒【借刀杀人】有合法目标（Bn 的池由**持刀者的攻击范围**给出，与持刀者
+    # 手里有没有【杀】无关：那条判据只读武器 + 范围）。武器走 ``deck_excluding`` 的老路
+    # 从牌堆扣掉——构造局面也不许同一张牌出现在两个区。
+    state = _play_state(other_equip=("double_sword",))
+    assert check_targets(state, 0, pure_virtual_card(state, "borrowed_sword")), (
+        "局面成立的前提：【借刀杀人】此刻有合法目标"
+    )
+    engine = Engine.from_state(state, seed=34)
+    script = _PlayScript(
+        (module.QIANXUN_COST_DAMAGE, module.QIANXUN_EFFECT_CARD, "无中生有")
+    )
+    run_queries(
+        engine,
+        [script, _PlayScript((), skill_id="none"), _PlayScript((), skill_id="none")],
+        lambda e: bool(module._qianxun_used_effects(e.state, 0))
+        and e.pending is not None
+        and str(getattr(e.pending.kind, "value", e.pending.kind)) == "PLAY_PHASE",
+    )
+    name_queries = [
+        query
+        for query in script.option_queries
+        if str(getattr(query, "skill_id", "") or "").endswith(":name")
+    ]
+    assert name_queries, "效果① 的牌名弹窗必须发出来（否则下文就没有断言对象）"
+    offered = {
+        action.choice
+        for action in name_queries[0].legal_actions
+        if isinstance(action, SelectOption)
+    }
+    assert "借刀杀人" not in offered, (
+        f"选项面里不许出现要附带指定的牌（候选 = {sorted(offered)!r}）"
+    )
+    assert "无中生有" in offered, "别的牌名照旧可选"
 
 
 def test_qianxun_moving_a_transformed_delayed_trick_keeps_the_product() -> None:
