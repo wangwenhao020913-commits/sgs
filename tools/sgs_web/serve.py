@@ -33,6 +33,10 @@
 ``POST``         ``/api/script-runs/<id>/suspend``   离开牌桌（作废战斗会话，不写档）
 ===============  ==================================  ==================================
 
+``POST /api/sessions`` 另收一个**可选**的 ``heroes``（座位序的武将 id 数组，长度 = 座位数）：
+显式阵容优先于随机发放，用于把种子型 tape 与默认将池解耦。它是 **API-only** 字段
+（tape-lineup 票 01）——开局页不下发、不进本地将池存档；缺席时行为与引入它之前逐字节相同。
+
 剧本模式那一段的语义、两次 rename 与「同一 ``runs/`` 只许一个 ``serve.py``」的进程级前提
 都住 :mod:`sgs_web.script_runs`。**所有写端点带 ``expected_revision``**（不匹配 ⇒ 409，body
 带当前 ``revision`` 与摘要）；剧本模式的三种错误语义见 :class:`sgs_web.script_runs.ScriptHttpError`。
@@ -298,6 +302,30 @@ def _known_hero_ids() -> set[str]:
     return set(enabled_hero_ids())
 
 
+def _parse_hero_lineup(raw: object, *, player_count: int) -> tuple[str, ...]:
+    """建局请求体里的 ``heroes`` → **座位序**的武将 id 元组（只校验形状，非法 ⇒ 400）。
+
+    与禁将（``banned_heroes``）同一条接入层姿态：必须是字符串数组（不是 str）、每项非空、
+    长度等于座位数。**只**做这三件形状校验——未知 id / 真名重复由引擎的
+    :func:`sgs.data.deal_heroes` fail-closed（同一个 ``ValueError`` 出口），接入层不另抄
+    一份"谁跟谁同真名"的数据规则。字段缺席 ⇒ ``()``，与不传逐字节等价。
+
+    这是 **API-only** 的测试字段（tape-lineup 票 01）：开局页不下发、不进本地将池存档。
+    """
+    if raw is None:
+        return ()
+    if isinstance(raw, str) or not isinstance(raw, Sequence):
+        raise ValueError(f"显式阵容必须是武将 id 的数组：{raw!r}")
+    lineup: list[str] = []
+    for hero_id in raw:
+        if not isinstance(hero_id, str) or not hero_id:
+            raise ValueError(f"显式阵容的武将 id 必须是非空字符串：{hero_id!r}")
+        lineup.append(hero_id)
+    if len(lineup) != player_count:
+        raise ValueError(f"显式阵容的武将数 {len(lineup)} 与座位数 {player_count} 不一致")
+    return tuple(lineup)
+
+
 def load_hero_presets(path: Path = DEFAULT_HERO_PRESETS_PATH) -> dict[str, Any]:
     """读将池存档；返回 ``{"slot_count", "active", "slots"}``（``slots[i].banned_heroes``）。
 
@@ -512,6 +540,10 @@ class GameRegistry:
         # 未知档位在这里抛 DataLoadError，由 HTTP 层映射成 400——**先加载、后登记**，
         # 故失败的请求不会在 registry 里留下半局会话。
         pack = load_content_pack(deck_profile=deck_profile)
+        player_count = int(body.get("player_count", 8))
+        # 显式阵容（tape-lineup 票 01）：**API-only** 的测试字段，按座位序钉死整局武将，
+        # 与默认将池解耦。缺席 = 空元组，随机发放那条路径一字未变。
+        heroes = _parse_hero_lineup(body.get("heroes"), player_count=player_count)
         # 会话表的**读改**（编号 / 登记 / 回收）与请求路径共用一把锁（settle-opening-race
         # 票 01）：`_prune_abandoned` 会遍历 `sessions`，与并发建局的写入撞上就是
         # "dictionary changed size during iteration"（同样会把连接打掉）。引擎初始化不占锁。
@@ -520,8 +552,11 @@ class GameRegistry:
             session_number = self._counter
         session = create_session(
             seed=body.get("seed"),
-            player_count=int(body.get("player_count", 8)),
+            player_count=player_count,
             ai=str(body.get("ai", "heuristic")),
+            # 显式阵容优先于随机池（见 :func:`_parse_hero_lineup`）：不传时是 ``()``，
+            # 与"从默认启用池随机发"的三态一字不差。
+            heroes=heroes,
             human_seat=int(body.get("human_seat", 0)),
             my_hero=body.get("my_hero") or None,
             # 禁将（M6 票 13）：**版本粒度、只作用于随机配将**；随建局请求冻结进会话配置，

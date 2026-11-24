@@ -134,6 +134,24 @@ browser_interact click|fill|press # 点座位 / 手牌 / 按钮，填输入框
 9. 超时代答：另开一局同种子、思考时限 `10` 秒；初始【英姿】询问**不操作**，等 10–15 秒，
    观察询问自动推进；出牌 / 弃牌阶段同理（本局实测会自动结束出牌、自动弃 2 张）。
 
+### 整局阵容（API-only）
+
+开局的「开局点将」只钉**人类座位**一个，其余座位仍从默认将池随机发。要复跑一条
+**种子型 tape**（`tests/support/web_client.py` 的 `--tape fire_attack` / `--tape wine`），
+或任何要求"8 席都可复现"的配方，给 `POST /api/sessions` 加可选的
+`heroes`（**座位序**的武将 id 数组，长度 = `player_count`）：建局响应的 `heroes`
+会逐位回显，证明没走随机池。示例：
+
+```json
+{"player_count": 8, "ai": "heuristic", "seed": 4, "human_seat": 0,
+ "deck_profile": "standard_ex_160", "timeout_seconds": null,
+ "heroes": ["guanyu", "zhangfei", "zhaoyun", "machao",
+            "huangyueying", "sunquan", "huatuo", "lvbu"]}
+```
+
+它是**测试用 API-only 字段**：开局页不下发、不进本地将池存档，也不改变"不传时从默认池
+随机发"的旧口径。改这份名单等于换了对局面——种子型 tape 要按同一份脚本、同一组判据重扫。
+
 ## 5 · 证据与记录
 
 本次 U3 的示例截图（可直接按同样场景复拍）：

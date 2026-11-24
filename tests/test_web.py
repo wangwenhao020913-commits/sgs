@@ -744,6 +744,68 @@ def test_the_ban_set_never_enters_the_record_stream() -> None:
     assert dump_journal(configured.records()) == dump_journal(plain.records())
 
 
+# ---------------------------------------------------------------------------
+# 6b-3. 显式阵容（tape-lineup 票 01）：建局字段 ``heroes`` 按座位序钉死 8 席
+# ---------------------------------------------------------------------------
+
+
+def test_the_session_api_pins_an_explicit_lineup() -> None:
+    """带 ``heroes`` ⇒ 200 且响应的 ``heroes`` 与请求**逐位相同**（没走随机池）。
+
+    「逐位相同」是这条判据的全部：引擎的随机发放只保证不重复，不保证座位序；
+    只有真的按显式请求落地，响应才会与请求列表一字不差。
+    """
+    from sgs_web.serve import GameRegistry
+
+    lineup = ["guanyu", "zhangfei", "zhaoyun", "machao"]
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(
+        registry,
+        "/api/sessions",
+        {
+            "player_count": 4,
+            "ai": "random",
+            "seed": 20261103,
+            "timeout_seconds": None,
+            "heroes": lineup,
+        },
+    )
+
+    assert status == 200, body
+    assert body["heroes"] == lineup
+
+
+@pytest.mark.parametrize(
+    ("label", "heroes"),
+    [
+        ("长度不符", ["guanyu", "zhangfei", "zhaoyun"]),
+        ("含未知 id", ["guanyu", "nobody"]),
+        ("真名重复", ["guanyu", "jie_guanyu"]),
+        ("不是数组", "guanyu"),
+        ("含空串", ["guanyu", ""]),
+    ],
+)
+def test_the_session_api_rejects_a_bad_lineup(label: str, heroes: object) -> None:
+    """非法阵容 ⇒ 400，且注册表里**没有**留下半局会话（同建局"先加载后登记"）。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(
+        registry,
+        "/api/sessions",
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261103,
+            "timeout_seconds": None,
+            "heroes": heroes,
+        },
+    )
+
+    assert status == 400, f"{label}：{body}"
+    assert registry.sessions == {}, f"{label}：拒绝路径不得留下半局会话"
+
+
 def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     """开局页将池（M6 票 13）：标准 + 界版的**启用版本并集**，按**真名**分组。
 

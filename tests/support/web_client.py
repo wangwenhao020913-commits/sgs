@@ -350,7 +350,7 @@ def play(
 # 两条固定种子，都走**真 HTTP**：每次询问一条 POST、提交的动作原样取自该询问的
 # ``legal_actions``；断言亮牌 / 同花色弃牌 / 放弃 / 无同花色自动放弃的可观测事实。
 #   - seed 4：人类**对自己**用火攻 ⇒ 自己亮牌 + 弃同花色 ⇒ 恰 1 点火焰伤害；
-#   - seed 37：人类**对 AI** 用火攻 ⇒ AI 亮牌；人类没有同花色 ⇒ 引擎不发弃牌询问，
+#   - seed 8：人类**对 AI** 用火攻 ⇒ AI 亮牌；人类没有同花色 ⇒ 引擎不发弃牌询问，
 #     事件流写「放弃（无可弃的同花色牌）」。
 # 种子由 ``tools/acceptance_seed.py --players 8 --deck-profile standard_ex_160 --card
 # fire_attack`` 起步、再用固定脚本在这两个种子上确认（同 seed 可复现）。
@@ -372,8 +372,33 @@ def play(
 # ⇒ 47 又失效。仍按同一份固定脚本、同一组判据（对自己用火攻 / 自己亮牌 / 有同花色弃牌询问 /
 # 恰 1 点火焰伤害 / 零非法应答）重扫 1–259，命中 4 / 37 / 44 / 105 / 119 / 200 / 225 / 259，
 # 取首个未在用的 **seed 4**（探针同上，判据逐字未改）。
-# 这类夹具依赖 AI 的行为面是既定性质：改打分就要照同一条口径重扫，**不许放宽判据**。
+# tape-lineup 票 01（默认池 121 / 79）：三条种子型 tape 改为**显式点将**（`_TAPE_HEROES`），
+# 与默认将池解耦——此后往池里加武将不再重排这三条 tape 的配将面。钉阵容这一下本身换了
+# 对局面，故仍按**同一份固定脚本、同一组判据**重扫了一次：火攻·对自己 seed 4 未变；
+# 火攻·对 AI 16 → 8；酒·出牌阶段 65 未变；酒·濒死自救 29 → 见 `_WINE_TAPE_NEAR_DEATH_SEED`
+# （探针 `.scratch/tape-lineup/scan_tapes.py`，判据 = 对应 tape 函数自身返回 0）。
+# 这类夹具依赖 AI 的行为面是既定性质：改打分（或换 `_TAPE_HEROES` 名单）就要照同一条口径
+# 重扫，**不许放宽判据**。
 # ---------------------------------------------------------------------------
+
+_TAPE_HEROES: tuple[str, ...] = (
+    # tape-lineup 票 01：三条**种子型** tape 的固定点将阵容（座位序、人类恒坐 0）。
+    # **固定 = 与默认将池解耦**：此后往默认池里加武将，不再重排这三条 tape 的配将面，
+    # 因而不必再重扫种子（此前靠 `banned_heroes` 把池钉回"加武将之前"，每加一将补一行）。
+    # 名单要求：8 名、真名互异、全部**标准版**——不加界版 / 移动版，避开版本并存面。
+    # **改这份名单 = 换了一个对局面**：必须按同一份固定脚本、同一组判据重扫三条 tape 的
+    # 种子（见 `_FIRE_TAPES` / `_WINE_TAPE_SEED` / `_WINE_TAPE_NEAR_DEATH_SEED` 上方的记录），
+    # 并把命中与探针路径写回注释。
+    "guanyu",  # 座位 0 = 人类
+    "zhangfei",
+    "zhaoyun",
+    "machao",
+    "huangyueying",
+    "sunquan",
+    "huatuo",
+    "lvbu",
+)
+
 
 _FIRE_TAPES = (
     # (seed, 目标是不是自己, 是否期望出现同花色弃牌询问)
@@ -392,7 +417,11 @@ _FIRE_TAPES = (
     # seed 46 的人类整局没有可用【火攻】局面 ⇒ tape 失效。判据**逐字不动**，用同一支探针
     # 重扫 1–259，命中 16 / 65 / 81 / 99 / 105 / 107 / 116 / 128 / 176 / 225，
     # 取首个未在用的 **seed 16**（探针 `.scratch/huo-shenzhouyu-mobile/scan_fire_seed.py`）。
-    (16, False, False),
+    # tape-lineup 票 01（显式点将 `_TAPE_HEROES`）：seed 16 的人类整局用不出【火攻】⇒ 仍按
+    # **同一份固定脚本、同一组判据**（对 AI 用火攻 / 目标亮牌 / 没被无懈 / 人类无同花色 /
+    # 零伤害 / 零非法应答）从 1 起重扫，首个命中 **seed 8**（4 已被自己那条占用；探针
+    # `.scratch/tape-lineup/scan_tapes.py`，判据 = `fire_attack_tape` 自身返回 0）。
+    (8, False, False),
 )
 
 
@@ -461,68 +490,14 @@ def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -
     return actions[0], "first"
 
 
-_FIRE_TAPE_BANNED_HEROES = (
-    # 雷包（lei-batch 票 01）。
-    "haozhao",
-    "zhangxiu",
-    "zhugezhan",
-    # 神话再临·林包·移动版（lin-batch 票 01 / 02 / 03）：新武将进默认池会重排随机配将。
-    "shen_caocao_mobile",
-    "sunjian_mobile",
-    "xuhuang_mobile",
-    # lin-batch2 票 01：林包移动版曹丕移动版（seed=46 那一局不加这条就整局用不出【火攻】）。
-    "caopi_mobile",
-    # lin-batch2 票 02：林包移动版董卓移动版（8 体力 + 每回合崩坏 ⇒ 同样会重排随机配将；
-    # 新武将进默认池就往这里追加是既定规矩）。
-    "dongzhuo_mobile",
-    # lin-batch2 票 03：林包移动版贾诩移动版（加武将重排随机配将 ⇒ 追加，**不重扫 seed**）。
-    "jiaxu_mobile",
-    # yijiang-2014-round3 票 01 / 03：一将成名-2014·吴懿 + 曹真移动版进默认池（108 → 109）。
-    "wuyi",
-    "caozhen_mobile",
-    # jie-yijiang-2014-wuyi-caozhen 票 03：界曹真移动版进默认池（112 → 113）。
-    # 按本表 docstring 的规矩**只追加禁将、不重扫 seed**。
-    "jie_caozhen_mobile",
-    # jie-yijiang-2014-wuyi-caozhen 票 01：界吴懿移动版进默认池（113 → 114）。
-    "jie_wuyi_mobile",
-    # yijiang-2011-xusheng-chunhua 票 01：徐盛移动版进默认池（114 → 115）。按本表规矩
-    # **只追加禁将、不重扫 seed**（tape 钉的是火攻的界面与记录流，不是将池）。
-    "xusheng_mobile",
-    # 票 03：界徐盛移动版进默认池（115 → 116）。
-    "jie_xusheng_mobile",
-    # 票 02：张春华移动版进默认池（116 → 117）。
-    "zhangchunhua_mobile",
-    # mou-gong-tong 票 01：谋攻篇-同包·谋刘赪进默认池（118 → 119）。按本表规矩**只追加禁将、
-    # 不重扫 seed**（tape 钉的是火攻的界面与记录流，不是将池）。
-    "mou_liucheng",
-    # qunying 票 01 / 05：群英包「锋势」陆逊、祢衡进默认池（120 → 121）。按本表规矩
-    # **只追加禁将、不重扫 seed**（票 01 当时漏了这一行；祢衡进池后 seed=4 / 16 两条 tape
-    # 整局没再用出【火攻】，补上两行把池钉回加群英包之前）。
-    "qunying_luxun",
-    "qunying_niheng",
-)
-"""火攻 tape 的**禁将清单** = 「加武将之前」的默认池（版本粒度、只作用于随机配将）。
-
-新武将进默认池时**往这里追加**（见 :func:`fire_attack_tape` 的 docstring）：tape 钉的是
-火攻的界面与记录流，不是将池；重扫 seed 会把"加武将"和"tape 改坏"两件事混成一次红。
-林包三将分票落地，故 02 / 03 也各追加自己那一行（`sunjian_mobile` / `xuhuang_mobile`）；
-lin-batch2 票 01 的曹丕移动版同理（实测：不加 ⇒ `seed=46 目标=AI` 那条 tape 整局没有
-用出【火攻】）。
-"""
-
-
 def fire_attack_tape(base: str) -> int:
     """两条固定种子的火攻 tape；全部经真 HTTP，任何违规立即 FAIL。
 
-    **禁将钉死"加武将前"的将池**（lei-batch 票 01）：这两条 tape 钉的是**火攻的界面与
-    记录流**（亮牌 / 同花色弃牌 / 放弃），不是将池；而随机配将会随池子变大重排整局，
-    让"整局没摸到【火攻】"变成假红（真发生过：加郝昭后 seed=37 那一局不再用出火攻）。
-    故这里显式禁掉后加的雷包武将，把局面钉回原来的 72 人池。**再加武将时把它加进这条
-    禁将清单**，不要重扫种子。
-
-    lin-batch（神话再临·林包·移动版，神曹操 / 孙坚 / 徐晃）同样按这条规矩追加：新武将进默认池
-    会重排随机配将，tape 钉的是火攻的界面与记录流、不是将池 —— 加 `_FIRE_TAPE_BANNED_HEROES`，
-    **不重扫 seed**。
+    **显式点将**（tape-lineup 票 01）：建局体带 ``heroes=_TAPE_HEROES``，把 8 个座位钉在
+    **同一份固定阵容**上，因此默认将池增减武将不再改变这三条种子型 tape 的对局面
+    （此前靠 ``banned_heroes`` 把池"钉回加武将之前"，每加一将就要维护一行禁将）。
+    建局成功后回显 ``heroes`` 必须与 ``_TAPE_HEROES`` 逐位相同——证明没走随机池；
+    不符即 FAIL 这条 tape。
     """
     failures = 0
     for seed, target_self, expect_discard in _FIRE_TAPES:
@@ -536,8 +511,8 @@ def fire_attack_tape(base: str) -> int:
                 "human_seat": 0,
                 "timeout_seconds": None,
                 "deck_profile": "standard_ex_160",
-                # 见 docstring：钉死加武将前的将池（版本粒度、只作用于随机配将）。
-                "banned_heroes": _FIRE_TAPE_BANNED_HEROES,
+                # 见 docstring：显式点将，与默认将池解耦（加武将不再改变这一局）。
+                "heroes": list(_TAPE_HEROES),
             },
         )
         if status != 200:
@@ -546,6 +521,10 @@ def fire_attack_tape(base: str) -> int:
             continue
         if body.get("deck_profile") != "standard_ex_160":
             print(f"FAIL 火攻 tape {label}：档位不是 standard_ex_160：{body.get('deck_profile')}")
+            failures += 1
+            continue
+        if body.get("heroes") != list(_TAPE_HEROES):
+            print(f"FAIL 火攻 tape {label}：建局回显的阵容不是固定点将：{body.get('heroes')}")
             failures += 1
             continue
         # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
@@ -746,7 +725,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 29
+_WINE_TAPE_NEAR_DEATH_SEED = 7
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 jie-yijiang-2014-wuyi-caozhen 票 01（默认池 112/74 → 114/75，界一将成名-2014·移动版加
@@ -816,7 +795,13 @@ ai-view 票 07（身份行为后验进 ``_identity_relation``）再换种：seed
 前结束，按**同一判据、同一固定策略**从 1 起重扫（探针
 ``.scratch/ai-view/scan_wine_near_death.py``，逐字复用 ``_wine_tape_near_death`` 的兜底策略
 与命中断言），命中 **29 / 34**；取首个未在用的 **seed 29**（29 未被其余 tape 占用：火攻
-4 / 16、出牌阶段 65）。"""
+4 / 16、出牌阶段 65）。
+
+tape-lineup 票 01（显式点将 `_TAPE_HEROES`）：seed 29 走到了自救窗口，但【酒】没有回复到 1
+（判据不放宽：人类 0 血 + 求桃窗口里的【酒】目标恒为自己 + 回复到 1）。仍按**同一判据、同一
+固定策略**从 1 起重扫（探针 `.scratch/tape-lineup/scan_tapes.py`，判据 = `_wine_tape_near_death`
+自身返回 0，与 `--tape wine` 同序），首个未在用的命中是 **seed 7**（火攻 4 / 8、出牌阶段 65
+已占用）。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:
@@ -829,6 +814,9 @@ def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, i
             "human_seat": 0,
             "timeout_seconds": None,
             "deck_profile": "standard_ex_160",
+            # tape-lineup 票 01：两段【酒】tape 与火攻 tape 共用同一份固定点将，
+            # 与默认将池解耦（加武将不再重排这一局的配将面）。
+            "heroes": list(_TAPE_HEROES),
         },
     )
     if status != 200:
@@ -836,6 +824,9 @@ def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, i
         return None
     if body.get("deck_profile") != "standard_ex_160":
         print(f"FAIL 酒 tape：档位不是 standard_ex_160：{body.get('deck_profile')}")
+        return None
+    if body.get("heroes") != list(_TAPE_HEROES):
+        print(f"FAIL 酒 tape：建局回显的阵容不是固定点将：{body.get('heroes')}")
         return None
     # 票 14：建局响应止于 GAME_START —— 取一次增量才拿到人类的第一个询问。
     body = settle_after_create(base, body)
