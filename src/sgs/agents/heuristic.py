@@ -90,6 +90,14 @@
 **全体存活的 AoE 不 veto**（目标挑不了，只按逐目标期望差分）。实机依据 = seed 7032 里
 忠臣三次回头打主公（当时主公是唯一合法【杀】目标）＋同一局拆主公的【过河拆桥】。
 
+**内奸护主硬 veto（`ai-view` 票 11）**：挂在**同一格**、共用同一个
+:data:`_LORD_VETO_PENALTY`——内奸在**还有别人活着**（存活人数 > 2）时也不能把主公当目标：
+主公一死，只要内奸之外还有别人活着（反贼 / 忠臣都算），立刻由反贼获胜
+（``victory.py`` 的主公死亡分支）。只有 1v1（只剩主公与内奸）放开，那是内奸"杀主公即胜"
+的唯一赢法。原因同票 01：关系项压不住斩杀项（实机 seed 1066672543218525911：
+``3 + 1 + 6.5 − 1.6667 = +8.83``）。同样不碰响应窗口、不 veto 全体强制目标
+（:func:`_renegade_lord_veto_applies` 本体）。
+
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
 横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
@@ -565,7 +573,11 @@ seed 7032 里忠臣回头打主公（主公是当时唯一合法【杀】目标�
 """
 
 _LORD_VETO_PENALTY = -50.0
-"""主忠方把**主公**当目标时的硬 veto 分（Q4）：**不是价格**，是"这个候选不可选"。
+"""把**主公**当目标时的硬 veto 分（Q4）：**不是价格**，是"这个候选不可选"。
+
+主忠方恒生效；内奸在**还有别人活着**时共用同一个常量（`ai-view` 票 11）——两者都是
+"这条候选不可选"，语义相同，故不另立一个数（若日后要区分，先拆成两个字面量并同步两处
+docstring）。
 
 只需严格低于任何可选的合法候选（``EndPhase`` = 0、最贵的一张牌的负分也只有 −6 上下），
 不必与 :data:`_ILLEGAL_PENALTY` 同值——那条是"这条应答本身不合法"，语义不同，各有各的
@@ -1953,10 +1965,11 @@ def _score_play_phase(query: Query, action: Action) -> float:
     次序不是死的：装备在"先装后杀才斩得掉"时会被抬到那条【杀】之前（D4，票 25），
     见 :func:`_equip_setup_score`。
 
-    **主公 veto（`ai-view` 票 01 / Q4）**作用在**挑目标**这一层、而不是某项价格里：
-    主忠方把主公当目标的有害候选直接拿 :data:`_LORD_VETO_PENALTY`（见
-    :func:`_lord_veto_applies`）。写成"再大一点的负分"在斩杀那一格会被
-    :data:`_LETHAL_STRIKE_VALUE` 翻回去——忠臣照样一刀砍死 1 体力的主公。
+    **主公 veto（`ai-view` 票 01 / Q4 / 票 11）**作用在**挑目标**这一层、而不是某项价格里：
+    主忠方、以及**还有别人活着时的内奸**（票 11），把主公当目标的有害候选直接拿
+    :data:`_LORD_VETO_PENALTY`（见 :func:`_lord_veto_applies`）。写成"再大一点的负分"在
+    斩杀那一格会被 :data:`_LETHAL_STRIKE_VALUE` 翻回去——忠臣照样一刀砍死 1 体力的主公，
+    内奸同样（票 11 的实机：``4.0 + 6.5 − 1.6667 = +8.83``）。
     """
     view = query.view
     if isinstance(action, EndPhase):
@@ -2587,6 +2600,15 @@ _LORD_ONLY = frozenset({_LORD})
 """
 
 
+def _alive_count(view: PlayerView) -> int:
+    """存活座位数（公开面 ``PlayerPublic.alive``）。
+
+    两个读方共用：内奸行的分母 ``D = 存活人数 − 1``（:func:`_renegade_balance`）与
+    "还有别人活着吗"的硬 veto 阈值（:func:`_renegade_lord_off_limits`，`ai-view` 票 11）。
+    """
+    return sum(1 for player in view.players if player.alive)
+
+
 def _renegade_balance(view: PlayerView) -> tuple[int, int, int] | None:
     """内奸行的局面读数 ``(D, E[主公侧], E[反贼侧])``；算不出 ⇒ ``None``（票 32）。
 
@@ -2619,8 +2641,7 @@ def _renegade_balance(view: PlayerView) -> tuple[int, int, int] | None:
     )
     lord_side += sum(1 for identity in remaining if identity in _LORD_SIDE)
     rebel_side += sum(1 for identity in remaining if identity in _REBEL_SIDE)
-    alive = sum(1 for player in view.players if player.alive)
-    return alive - 1, lord_side, rebel_side
+    return _alive_count(view) - 1, lord_side, rebel_side
 
 
 def _renegade_hostility_from_balance(
@@ -2654,7 +2675,9 @@ def _renegade_hostility(view: PlayerView, theirs: str) -> float:
 
     - ``H(→主公) = min(spread, 0)`` **只要反贼侧还有人活着**（护主护栏：主公早死反贼就赢，
       这一刀不能打）；反贼侧清空时才放开（只剩主公 ⇒ ``+1``，:func:`_identity_relation`
-      按 ``(max(H,0), max(−H,0))`` 给到 ``(1, 0)``）；
+      按 ``(max(H,0), max(−H,0))`` 给到 ``(1, 0)``）。**护栏只压权重、压不住斩杀项**
+      （``4.0 + 6.5 − 5.0``）：真正的"不许打"是 :func:`_renegade_lord_veto_applies` 的
+      规则级 veto（`ai-view` 票 11），别以为把 H 调到 0 就够了；
     - ``H(→忠臣) = spread``：主公侧领先就压忠臣（4 人局 ``+1/3`` 是**正确行为**：反贼一死
       内奸就要 1v2），落后就帮忠臣；
     - ``H(→反贼) = −spread``（与忠臣互为反号）。``H(→内奸) = 0``；跨模式的友 / 敌两格
@@ -2829,20 +2852,57 @@ def _hostile_card(card: CardRef) -> bool:
     return _damage_card(card) or card.type in _NULLIFY_HARMFUL_TRICKS
 
 
-def _lord_is_vetoed_target(view: PlayerView, seat: int) -> bool:
-    """主忠方眼里的主公：**出牌阶段不能作为目标**（Q4 的硬 veto，座位层）。
+def _is_lord_seat(view: PlayerView, seat: int) -> bool:
+    """``seat`` 是不是**本人以外**的已亮明主公（座位层的事实，不含"谁不能打"）。
 
-    座位层的这一份给"计划"用：:func:`_wine_enables_kill` / :func:`_equip_setup_score`
-    是在为**以后那一刀**做铺垫，若那一刀的目标会被 veto 摘掉，这口【酒】/ 这件装备就白出。
-    牌层的那一份（:func:`_lord_veto_applies`）还要看牌名与目标数档位，见它本体。
+    读 ``PlayerPublic.identity``（投影已按"本人 / 主公 / 亮明 / 阵亡"裁过）。``==`` 不是
+    ``is``：``PlayerPublic.identity`` 是 ``Identity`` 枚举成员（str 子类），而 :data:`_LORD`
+    是同一个字面量的 ``str``；``is`` 在两者之间恒 False。
     """
     return (
         seat != view.seat
         and 0 <= seat < len(view.players)
-        and view.players[view.seat].identity in _LORD_SIDE
-        # ``==`` 不是 ``is``：``PlayerPublic.identity`` 是 ``Identity`` 枚举成员（str 子类），
-        # 而 :data:`_LORD` 是同一个字面量的 ``str``；``is`` 在两者之间恒 False。
         and view.players[seat].identity == _LORD
+    )
+
+
+def _renegade_lord_off_limits(view: PlayerView) -> bool:
+    """内奸视角里"主公暂时不能打"的身份前提（`ai-view` 票 11）。
+
+    本人坐内奸位**且存活人数 > 2**（主公与内奸之外还有别人）⇒ 主公一死立刻由反贼获胜：
+    ``sgs.engine.victory`` 的主公死亡分支只在"存活集合恰为 ``{唯一内奸}``"时判内奸胜
+    （同批内奸也死 / 无人存活这两格判主忠方）；**只要内奸之外还有别人活着就一律反贼胜**
+    ——忠臣还活着也一样，反贼全灭也一样。故这一刀对内奸是自杀。
+
+    存活人数 = 2（只剩主公与内奸）⇒ **不拦**：主公一死内奸独活即胜
+    （``lord_dead_sole_renegade_survives``）——内奸必须留着这唯一一条赢法。
+
+    牌层（:func:`_renegade_lord_veto_applies`）与座位层（:func:`_lord_is_vetoed_target`）
+    共读这一处，别在两边各写一个 ``> 2``。
+    """
+    return (
+        view.players[view.seat].identity == _RENEGADE
+        and _alive_count(view) > 2
+    )
+
+
+def _lord_is_vetoed_target(view: PlayerView, seat: int) -> bool:
+    """这次询问里，主公 ``seat`` 能不能被我当作目标（座位层，Q4 + 票 11）。
+
+    - **主忠方**恒不能（Q4 的硬 veto）；
+    - **内奸**只在还有别人活着时不能（:func:`_renegade_lord_off_limits`）；1v1 放开；
+    - 反贼 / PvE（没有 ``lord`` 身份）不受约束。
+
+    座位层的这一份给"计划"用：:func:`_wine_enables_kill` / :func:`_equip_setup_score`
+    是在为**以后那一刀**做铺垫，若那一刀的目标会被 veto 摘掉，这口【酒】/ 这件装备就白出。
+    牌层的那两份（:func:`_lord_veto_applies` / :func:`_renegade_lord_veto_applies`）还要看
+    牌名与目标数档位，见它们本体。
+    """
+    if not _is_lord_seat(view, seat):
+        return False
+    return (
+        view.players[view.seat].identity in _LORD_SIDE
+        or _renegade_lord_off_limits(view)
     )
 
 
@@ -2891,14 +2951,57 @@ def _harmful_trick_relation(action: Action, view: PlayerView) -> float:
     return sum(_relation_term(view, seat) for seat in _chosen_seats(action))
 
 
+def _hostile_card_vetoes_the_lord(
+    view: PlayerView, card: CardRef, targets: Sequence[int]
+) -> bool:
+    """有害牌 × **挑出来的**目标 × 目标含主公：两条主公 veto 共用的牌层判据（票 01 / 票 11）。
+
+    - **有害牌**：:func:`_hostile_card`（伤害牌或有害锦囊）；
+    - **挑目标**：目标集合由牌面**强制**的全体牌（万箭 / 南蛮 / 桃园 / 五谷，``ALL_ALIVE*``
+      档）不算——使用者挑不了目标，取舍交给 :func:`_relation_term` 的逐目标期望差分；
+    - **目标含主公**：``targets`` 是 ``_chosen_seats`` 的结果（含借刀的 Bn），逐座位问
+      :func:`_is_lord_seat`——本函数只回答"打到的是不是主公"，**谁不能打**由两个调用方
+      各自的身份前提给出（主忠方恒是 / 内奸还有他人存活时，见 :func:`_lord_veto_applies`）。
+    """
+    if not _hostile_card(card):
+        return False
+    if behavior_for(card).target_rule.count in (
+        TargetCount.ALL_ALIVE,
+        TargetCount.ALL_ALIVE_WITH_SELF,
+    ):
+        return False
+    return any(_is_lord_seat(view, seat) for seat in targets)
+
+
+def _renegade_lord_veto_applies(
+    view: PlayerView, card: CardRef, targets: Sequence[int]
+) -> bool:
+    """内奸版主公 veto（`ai-view` 票 11）：还有他人存活时，敌意牌不许落在主公身上。
+
+    实机（seed 1066672543218525911）：内奸在有反贼存活时对主公出【杀】，把主公打到 0 体力
+    ⇒ 主公一死反贼立刻获胜，内奸自己什么都没赢到。根因是关系项压不住斩杀项：
+    ``伤害底价 3 + 目标数 1 + 斩杀 6.5 − 关系 1.6667 = +8.83`` ⇒ 打得到就打。故与票 01 的
+    主公 veto 同一形状：在**规则层**把这条候选摘到 :data:`_LORD_VETO_PENALTY`，不是再加权重。
+
+    只多一条身份前提（本人是内奸、且还有别人活着，:func:`_renegade_lord_off_limits`）；
+    牌名 / 目标档位 / 主公座位三份判据与主忠方共用 :func:`_hostile_card_vetoes_the_lord`。
+    **不碰响应窗口**（借刀 / 决斗里被逼出牌是规则），也**不 veto 全体强制目标**（票 01 同一条）。
+    """
+    if not _renegade_lord_off_limits(view):
+        return False
+    return _hostile_card_vetoes_the_lord(view, card, targets)
+
+
 def _lord_veto_applies(view: PlayerView, action: Action) -> bool:
-    """主忠方在**出牌阶段挑目标**时，主公不可作为目标（Q4 的硬 veto）。
+    """主忠方 / 内奸在**出牌阶段挑目标**时，主公不可作为目标（Q4 / `ai-view` 票 11 的硬 veto）。
 
-    三条边界（票面原文逐条落地）：
+    四条边界（票面原文逐条落地）：
 
-    - **主忠方**：本人是主公或忠臣（:data:`_LORD_SIDE`）。反贼 / 内奸不受此约束——内奸
-      "不把主公当优先敌人"是另一笔账（:func:`_renegade_hostility` 的护主护栏），别混进来。
-      PvE 没有 ``lord`` 这个身份 ⇒ 恒不生效。
+    - **主忠方**：本人是主公或忠臣（:data:`_LORD_SIDE`）⇒ 主公恒不可选。PvE 没有 ``lord``
+      这个身份 ⇒ 恒不生效。
+    - **内奸**：本人是内奸时挂在**同一格**，但只在还有别人活着时生效
+      （:func:`_renegade_lord_veto_applies`）——1v1 要留给内奸"杀主公即胜"的唯一赢法。
+      反贼不受此约束（杀掉主公正合其胜法）。
     - **有害牌**：伤害牌（:func:`_damage_card`）与有害锦囊（:data:`_NULLIFY_HARMFUL_TRICKS`）。
       给主公递牌 / 回血的**有益**牌不在此列（无中 / 桃 / 桃园 / 五谷 …），它们本来就该打在
       主公身上。**已知代价**：牌名层的"有害"分不出**效果**层的善意——【过河拆桥】拆掉主公
@@ -2914,14 +3017,12 @@ def _lord_veto_applies(view: PlayerView, action: Action) -> bool:
     【借刀杀人】逼你砍主公是规则，禁不掉（``_score_respond`` 一行不改）。
     """
     card = getattr(action, "card", None)
-    if card is None or not _hostile_card(card):
+    if card is None:
         return False
-    if behavior_for(card).target_rule.count in (
-        TargetCount.ALL_ALIVE,
-        TargetCount.ALL_ALIVE_WITH_SELF,
-    ):
-        return False
-    return any(_lord_is_vetoed_target(view, seat) for seat in _chosen_seats(action))
+    targets = _chosen_seats(action)
+    if view.players[view.seat].identity in _LORD_SIDE:
+        return _hostile_card_vetoes_the_lord(view, card, targets)
+    return _renegade_lord_veto_applies(view, card, targets)
 
 
 _HOSTILE_SEAT_STEPS = (
@@ -4038,7 +4139,9 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     True,
                     "只对存活座位出手（不把伤害算给已阵亡者）；也是身份后验的**分母**——"
                     "_unknown_identity_remainder 只把存活座位算进未知席位，阵亡却身份不可见时"
-                    "直接 fail-closed（票 21）",
+                    "直接 fail-closed（票 21）；全局存活人数另有两个读方（_alive_count）："
+                    "内奸局面读数的分母 D = 存活人数 − 1（票 32）与内奸护主硬 veto 的阈值"
+                    "『还有别人活着』（存活人数 > 2，`ai-view` 票 11）",
                 ),
                 "equip": (True, "装备区牌面：防具 / 武器 / 白银狮子的实际伤害；也进 ``_visible_cards``"),
                 "judge": (True, "判定区是公开信息，进 ``_visible_cards``（选牌步的可见面）"),

@@ -1922,6 +1922,218 @@ def test_t01_an_unknown_seat_stays_worth_targeting():
 
 
 # ---------------------------------------------------------------------------
+# 票 11 内奸护主硬 veto（还有他人存活时不对主公出敌意牌）
+#
+# 实机（seed 1066672543218525911，5p / 回放台）：内奸在有反贼存活时对主公出【杀】，把主公
+# 打到 0 体力 ⇒ 主公一死反贼立刻获胜（``winners=[1,2]``，``reason=lord_dead``），内奸自己
+# 什么都没赢到。根因不是"关系项不够大"：护主护栏已经把主公在内奸眼里压成「友」方向
+# （``_relation_term = −5 × 1/3 = −1.6667``），但伤害底价 / 目标数 / 斩杀三项是
+# ``3 + 1 + 6.5``（斩杀那一项按 C2 的 P(救回) 折成期望后实测总分 **8.3595**；不打折的
+# 算式是 ``3 + 1 + 6.5 − 1.6667 = 8.83``）⇒ 这张【杀】仍当选。
+# 修法与票 01 的主公 veto 同一形状：在**规则层**摘掉"还有别人活着时打主公"这个目标，
+# 不是再加一个权重（关系项调到 −5 也只是 ``4 + 6.5 − 5 = +5.5``）。
+# ---------------------------------------------------------------------------
+
+T11_LORD_SEAT = 0
+"""主公座位（身份局先手）。"""
+
+T11_RENEGADE_SEAT = 4
+"""内奸座位：5 人环上与主公相邻（【杀】够得着），到它的回合要越过 seats 0/1/2 三个回合。"""
+
+T11_SLASH = cards_of_type(PACK, "slash")[1]
+"""内奸手里那张【杀】（避开 D3 / S1 的实体牌 id）。"""
+
+T11_BARBARIANS = cards_of_type(PACK, "barbarian_invasion")[0]
+"""全体强制的【南蛮入侵】（目标集合由牌面决定，不吃主公 veto）。"""
+
+T11_HORSE = cards_of_type(PACK, "dilu")[0]
+"""座位 2（反贼）的 +1 马：把「另一个反贼」挡在【杀】的射程外 ⇒ 主公是唯一合法目标。"""
+
+T11_SEAT_IDS = (
+    Identity.LORD,
+    Identity.REBEL,
+    Identity.REBEL,
+    Identity.LOYALIST,
+    Identity.RENEGADE,
+)
+"""``_t11_seats`` 的逐座位地面真相（仅供用例定位座位；AI 只看得见主公 / 阵亡者 / 自己）。"""
+
+
+def _t11_seats(
+    *,
+    dead: tuple[int, ...] = (3,),
+    renegade_hand: tuple[int, ...] = (T11_SLASH,),
+    lord_hp: int = 1,
+) -> list[SeatSpec]:
+    """5 人身份局：主公 0（``lord_hp``）、反贼 1/2、忠臣 3、内奸 4（AI、5 体力、手里有牌）。
+
+    与实机那一局同形：主公残血、反贼还活着、忠臣已阵亡。``dead`` = 开局即阵亡的座位
+    （0 体力 / ``alive=False``；投影对已阵亡者露出身份，故内奸算得出"反贼侧还有人"）。
+    ``lord_hp`` 只给【酒】那条计划判据用：主公 2 体力、内奸手里有【酒】+【杀】时，
+    不喝【酒】这一刀打不死、喝【酒】正好打死。
+    """
+    hp = {0: lord_hp, 1: 3, 2: 2, 3: 4, 4: 5}
+    return [
+        SeatSpec(
+            hp=0 if seat in dead else hp[seat],
+            hp_max=hp[seat],
+            hand=(
+                ()
+                if seat in dead or seat != T11_RENEGADE_SEAT
+                else renegade_hand
+            ),
+            equip=() if seat in dead or seat != 2 else (T11_HORSE,),
+            alive=seat not in dead,
+            identity=T11_SEAT_IDS[seat],
+        )
+        for seat in range(len(T11_SEAT_IDS))
+    ]
+
+
+def _t11_query(
+    *,
+    dead: tuple[int, ...] = (3,),
+    renegade_hand: tuple[int, ...] = (T11_SLASH,),
+    lord_hp: int = 1,
+):
+    """推进到内奸（座位 4）的 ``PLAY_PHASE``；牌堆顶 8 张惰性【闪】吸走到此为止的摸牌。"""
+    seats = _t11_seats(dead=dead, renegade_hand=renegade_hand, lord_hp=lord_hp)
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=seats,
+        deck=_deck_with_inert_top(PACK, seats=seats, count=8),
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in seats],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == T11_RENEGADE_SEAT,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达内奸的出牌阶段前就停了"
+    return query
+
+
+def _t11_hostile_candidates(query) -> list[UseCard]:
+    """这条询问里**指向主公**的用牌候选（夹具自检与 D 判据共用）。"""
+    return [
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and T11_LORD_SEAT in action.targets
+    ]
+
+
+def test_the_t11_fixtures_reach_a_renegade_play_phase_with_the_lord_as_the_only_target():
+    """夹具自检：内奸出牌阶段 / 主公是唯一合法【杀】目标 / 关系项已经把它算成「友」。
+
+    与 D1 / D2 / C1 / 票 01 的自检同一姿态：只核形状、不核策略判据。这里额外钉住
+    **红点的来源**：关系项是负的（护主护栏生效），但伤害打分器仍是正分 ⇒ 单靠价格
+    压不住（这正是票面"规则级 veto"的理由）。
+    """
+    query = _t11_query()
+    assert query.kind == "PLAY_PHASE" and query.actor == T11_RENEGADE_SEAT, (
+        "没停在内奸的出牌阶段"
+    )
+    assert [player.identity for player in query.view.players] == [
+        Identity.LORD,
+        None,
+        None,
+        Identity.LOYALIST,
+        Identity.RENEGADE,
+    ], "夹具失效：内奸只该看得见主公、已阵亡的忠臣与自己"
+    assert query.view.players[T11_LORD_SEAT].hp == 1, "夹具失效：主公不再是 1 体力"
+    assert sorted(
+        action.targets
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    ) == [(T11_LORD_SEAT,)], "夹具失效：【杀】的合法目标不再是主公一个人"
+    assert _relation(query.view, T11_LORD_SEAT) == (0.0, pytest.approx(1 / 3)), (
+        "护主护栏：反贼还活着 ⇒ 主公在三方势均力敌的读数里是「友」方向（H = −1/3）"
+    )
+    assert heuristic_scoring._relation_term(query.view, T11_LORD_SEAT) == pytest.approx(
+        -heuristic_scoring._RELATION_FOCUS / 3
+    ), "关系项必须已经是负的——红点不是「关系项没生效」"
+    (hostile,) = _t11_hostile_candidates(query)
+    assert heuristic_scoring._score_attack(hostile, query.view) > 0.0, (
+        "关系项压不住伤害底价 + 斩杀项 ⇒ 打分器本身仍选它（veto 必须是规则级）"
+    )
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
+
+
+def test_t11_a_renegade_ends_the_phase_instead_of_killing_the_lord_while_others_live():
+    """票 11 的 D 判据：还有他人存活时，内奸的【杀】不许落在主公身上。
+
+    修复前：8 个种子**全部**出那张【杀】（探针 `.scratch/ai-view/probe_t11_fixture.py`）。
+    修复后：同一条候选拿 :data:`_LORD_VETO_PENALTY`，内奸改出 ``EndPhase``。
+    """
+    query = _t11_query()
+    (hostile,) = _t11_hostile_candidates(query)
+    assert heuristic_scoring._renegade_lord_veto_applies(
+        query.view, hostile.card, hostile.targets
+    ), "还有别人活着 ⇒ 内奸对主公的这道硬 veto 必须生效"
+    assert heuristic_scoring._score_play_phase(query, hostile) == (
+        heuristic_scoring._LORD_VETO_PENALTY
+    ), "veto 的落点是 play phase 的 scorer，不是伤害打分器里的又一项"
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, EndPhase), (
+            f"内奸不该在有他人存活时杀主公（种子 {seed}），实得 {action!r}"
+        )
+
+
+def test_t11_the_renegade_keeps_the_lord_as_a_target_when_only_they_remain():
+    """1v1 反例：只剩主公与内奸 ⇒ veto 不生效，那一刀仍打主公（且必须打得赢）。
+
+    ``victory.py``：主公死亡瞬间存活集合恰为 ``{内奸}`` ⇒ 内奸胜
+    （``lord_dead_sole_renegade_survives``）。把阈值写成 ``alive >= 2`` 会让内奸永远赢不了
+    1v1，故这里断的是"veto 不在 1v1 里误伤胜利条件"。
+    """
+    query = _t11_query(dead=(1, 2, 3))
+    assert not query.view.players[1].alive and not query.view.players[2].alive
+    (hostile,) = _t11_hostile_candidates(query)
+    assert not heuristic_scoring._renegade_lord_veto_applies(
+        query.view, hostile.card, hostile.targets
+    ), "存活人数 = 2 ⇒ 内奸可以杀主公赢，veto 必须放开"
+    assert not heuristic_scoring._lord_veto_applies(query.view, hostile), (
+        "主公 veto 也不该在 1v1 里误伤（内奸档与主忠方档共读同一个座位判据）"
+    )
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard) and action.targets == (T11_LORD_SEAT,), (
+            f"1v1 里内奸该杀主公（种子 {seed}），实得 {action!r}"
+        )
+
+
+def test_t11_the_renegade_veto_leaves_forced_aoe_target_sets_to_the_price_model():
+    """全体强制目标不 veto：内奸的【南蛮入侵】照旧把主公算进目标集合。
+
+    与票 01 的 ``_lord_veto_applies`` 同一格（``TargetCount.ALL_ALIVE*``）：目标由牌面决定、
+    内奸挑不了，取舍交给逐目标的关系差分（否则内奸手里有 AoE 就永远不能出）。
+    """
+    query = _t11_query(renegade_hand=(T11_BARBARIANS,))
+    (aoe,) = [
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "barbarian_invasion"
+    ]
+    assert T11_LORD_SEAT in aoe.targets, "夹具失效：南蛮的目标集合不再含主公"
+    assert not heuristic_scoring._lord_veto_applies(query.view, aoe), (
+        "全体存活的强制目标集合不进 veto——它们的取舍走逐目标期望差分"
+    )
+    assert not heuristic_scoring._renegade_lord_veto_applies(
+        query.view, aoe.card, aoe.targets
+    )
+    assert heuristic_scoring._score_play_phase(query, aoe) != (
+        heuristic_scoring._LORD_VETO_PENALTY
+    )
+
+
+# ---------------------------------------------------------------------------
 # S1 技能表 top3（票 22）：据守 / 贯石斧 / 谦逊
 #
 # 三条「有条目但太粗」的常量换成**读得出代价**的打分器（spec §6.1 S1）：

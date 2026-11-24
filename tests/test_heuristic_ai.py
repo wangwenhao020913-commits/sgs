@@ -1766,6 +1766,86 @@ def test_the_guard_takes_the_lord_off_the_enemy_side_while_a_rebel_lives():
     )
 
 
+def _ex160_card_id(type_id: str) -> int:
+    """``standard_ex_160`` 里第一张 ``type_id`` 的 ``card_id``（【酒】只在这一档）。"""
+    return next(
+        index
+        for index, card in enumerate(PACK_EX_160.deck.cards)
+        if card.type == type_id
+    )
+
+
+def _renegade_wine_query(*, dead: tuple[int, ...] = ()):
+    """4 人局、内奸（座位 0）手里【酒】+【杀】，主公（座位 1，2 体力）在【杀】的射程内。
+
+    座位 3 的忠臣也在射程内但 4 体力（【酒】补不成斩杀），故"加这一口正好打死"的唯一
+    目标是主公。``dead`` = 开局即阵亡的座位（1v1 对照用：只剩主公与内奸）。
+    """
+    wine = _ex160_card_id("wine")
+    slash = _ex160_card_id("slash")
+    seats = [
+        SeatSpec(identity=Identity.RENEGADE, hand=(wine, slash)),
+        SeatSpec(
+            hp=0 if 1 in dead else 2,
+            hp_max=4,
+            alive=1 not in dead,
+            identity=Identity.LORD,
+        ),
+        SeatSpec(
+            hp=0 if 2 in dead else 4,
+            hp_max=4,
+            alive=2 not in dead,
+            identity=Identity.REBEL,
+        ),
+        SeatSpec(
+            hp=0 if 3 in dead else 4,
+            hp_max=4,
+            alive=3 not in dead,
+            identity=Identity.LOYALIST,
+        ),
+    ]
+    state = build_state(
+        pack=PACK_EX_160,
+        rule_config=RuleConfig(player_count=4),
+        seats=seats,
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK_EX_160.deck.cards))
+            if card_id not in (wine, slash)
+        ),
+        turn_seat=0,
+    )
+    for player in state.players:
+        player.identity_visible = True
+    return _play_phase_query(state)
+
+
+def test_the_renegade_does_not_wine_up_for_a_vetoed_lord_strike():
+    """票 11 的计划面：主公那一刀会被 veto 摘掉 ⇒ 不为它白喝【酒】。
+
+    ``_wine_enables_kill`` 跳过 :func:`_lord_is_vetoed_target` 判成"打不得"的目标（票 01
+    的一致性）；内奸还有他人存活时那一格也是"打不得"（票 11）⇒ 同一口【酒】的分数是
+    :data:`_WINE_WASTE_PENALTY`。1v1 对照（只剩主公与内奸）里这一口恢复"补刀酒"，证明本
+    用例测的是"谁不能打"，不是"【酒】永远不会为任何人喝"。
+    """
+    query = _renegade_wine_query()
+    assert heuristic_scoring._lord_is_vetoed_target(query.view, 1), (
+        "内奸还有别人活着 ⇒ 座位层把主公判成'打不得'（酒 / 装备计划共用这一格）"
+    )
+    assert not heuristic_scoring._wine_enables_kill(query), (
+        "唯一能被【酒】补成斩杀的目标是被 veto 的主公 ⇒ 不许为它喝"
+    )
+    assert heuristic_scoring._score_wine(query, query.view) == (
+        heuristic_scoring._WINE_WASTE_PENALTY
+    )
+
+    duel = _renegade_wine_query(dead=(2, 3))
+    assert not heuristic_scoring._lord_is_vetoed_target(duel.view, 1)
+    assert heuristic_scoring._wine_enables_kill(duel), (
+        "1v1 放开 veto ⇒ 这一口【酒】正好把 1 点补成斩杀，恢复'补刀酒'"
+    )
+
+
 def test_an_unknown_seat_is_the_rows_expectation_over_the_remaining_roster():
     """未知座位 = 该行对剩余多重集的期望；``H(座位) = P敌 − P友 = Σ H(c) / |剩余|``。
 
@@ -2570,9 +2650,9 @@ HEURISTIC_SOURCE = ROOT / "src" / "sgs" / "agents" / "heuristic.py"
 PARITY_SEEDS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
 """parity 批次：5 人全启发式、开武将池。8 个种子实测覆盖九类询问（``DISTRIBUTE`` 除外）。"""
 
-PARITY_CANDIDATES = 5404
-PARITY_DIGEST = "629b7faa7546a56de367597770412ce3916d604ac4cc107d24fb1b3efc85c533"
-"""**分项改写之前**（``master@b65b75f``）录下的（候选数, sha256）；票 07 按新读数重录。
+PARITY_CANDIDATES = 5529
+PARITY_DIGEST = "116008a33c750dcffe7463dcdb1dbabdaccbaeb10ede6cc3be28a8d478c910ec"
+"""**分项改写之前**（``master@b65b75f``）录下的（候选数, sha256）；票 07 / 票 11 按新读数重录。
 
 逐行 = ``kind|actor|seq|action repr|score repr``：**分数是 float**，改写只许改内部结构、
 不许动任何一个数（票面"逐询问同一 float"）。改权重的票会正当地改这个摘要——那时按新读数
@@ -2582,6 +2662,13 @@ PARITY_DIGEST = "629b7faa7546a56de367597770412ce3916d604ac4cc107d24fb1b3efc85c53
 走向不同 ⇒ 候选集合 / 条数变化（5319 → 5404）。这是**行为改动**（spec §2.6），不是
 `Score` 累加次序的回归；分项自洽（`test_every_candidate_score_is_the_sum_of_its_own_items`）
 仍全绿，故重录基线摘要。
+
+**票 11 的重录**：内奸护主硬 veto（还有他人存活时不对主公出敌意牌）⇒ 出牌阶段的目标取舍
+改变 ⇒ 后续局面的候选集合随之不同（5404 → 5529）。同样是**行为改动**（票 11 的 D 判据），
+分项自洽仍全绿（探针 `.scratch/ai-view/parity_t11.py` 复核 ``violations = 0``）。
+分数面也**不是**逐值不变：`_lord_is_vetoed_target` 还被 `_wine_enables_kill` /
+`_equip_setup_score` 读，内奸不再为"那一刀会被 veto 摘掉"的主公目标铺垫 ⇒ 对应的【酒】/
+装备先手分项会变。两处都落在 ``PLAY_PHASE`` 的候选上，不涉及别的询问类型。
 """
 
 
