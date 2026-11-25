@@ -110,7 +110,9 @@ def _batch() -> _Batch:
             store = features.frame(query, action)
             batch.candidates += 1
             batch.b_keys.update(key for key, _value in store.items)
-            got = features.candidate_score(store)
+            # 08b 起 B 族权重不再是 1.0：这里的等价性判据留在**提取层**（分项之和 == 既有分），
+            # 不再经权重；"整数权重 vs 浮点参考"那条 parity 住 test_ai_weights_parity.py。
+            got = features.unweighted_candidate_score(store)
             batch.lines.append(
                 f"{kind}|{query.actor}|{query.seq}|{action!r}|{got!r}|{store.items!r}"
             )
@@ -118,7 +120,9 @@ def _batch() -> _Batch:
                 batch.violations.append(
                     f"{kind}@{query.actor}#{query.seq}: 候选分 {got!r} != 既有分 {float(value)!r}"
                 )
-            if features.linear(store) != got + features.position_score(store):
+            if features.linear(store) != features.candidate_score(
+                store
+            ) + features.position_score(store):
                 batch.linear_breaks.append(f"{kind}@{query.actor}#{query.seq}")
             # A / C 只读 view ⇒ 同一询问的全部候选上**逐键逐值**相同。
             here = tuple(store.position().items())
@@ -389,30 +393,32 @@ print(json.dumps(rows, sort_keys=True))
     assert len(outputs[0]) > 1000, "子进程没打印出读数；脚本可能没跑起来"
 
 
-def test_the_extractor_is_not_wired_into_the_decision_path():
-    """本票**不接进决策路径**：``heuristic.py`` 不 import ``features`` / ``weights``。
+def test_the_weights_table_is_wired_into_the_decision_path():
+    """08b 的接线：``heuristic.py`` **只** import ``weights``（B 族读口），不 import ``features``。
 
-    读点表因此不动、行为逐 float 不变（票面 ``Human: 不适用`` 的依据）。08b 接线时要同票
-    改这一条（并把读点表该翻的行翻掉）。
+    B 族的值必须来自既有的 ``Score.add`` 分项（票 02 的 trace），所以决策路径不需要特征
+    提取器本身；``features`` 是工具侧 / parity 用的另一条入口。空表时 ``respond`` 走原来的
+    快路径（逐 float 等于 08a），有拟合值时走 ``_weighted_candidate_score``。
     """
     source = (ROOT / "src" / "sgs" / "agents" / "heuristic.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    targets = {"features", "weights"}
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.module in targets:  # from .features import …
+            if node.module in {"features", "weights"}:
                 imported.add(node.module)
-            for alias in node.names:  # from . import features / from sgs.agents import features
-                if alias.name in targets:
+            for alias in node.names:
+                if alias.name in {"features", "weights"}:
                     imported.add(alias.name)
         elif isinstance(node, ast.Import):
-            for alias in node.names:  # import sgs.agents.features
-                if alias.name.rsplit(".", 1)[-1] in targets:
-                    imported.add(alias.name)
+            for alias in node.names:
+                name = alias.name.rsplit(".", 1)[-1]
+                if name in {"features", "weights"}:
+                    imported.add(name)
 
-    assert not imported, (
-        f"heuristic 已经 import 了 {sorted(imported)}：那是 08b 的接线，本票不许提前接"
+    assert "weights" in imported, "08b 必须把权重表接进决策路径"
+    assert "features" not in imported, (
+        "决策路径只该读 weights；features 是工具侧的提取入口，接进来会多算一遍 A / C"
     )
 
 
@@ -773,13 +779,13 @@ def test_an_unregistered_or_shaped_skill_still_reads_a_nonzero_anchor():
 
 def test_appending_a_row_never_changes_an_existing_value():
     """**只许尾部追加**：新增一行键不改任何既有键的数值（``fit`` 返回新表，旧表逐位不变）。"""
-    table = weights.SHARED_B.fit(weights.b_key("第一行"), 2.0).fit(
-        weights.b_key("第二行"), 3.0
+    table = weights.SHARED_B.fit(weights.b_key("第一行"), 2000).fit(
+        weights.b_key("第二行"), 3000
     )
     before_keys = table.keys()
     before_values = table.values()
 
-    after = table.fit(weights.b_key("第三行"), 4.0)
+    after = table.fit(weights.b_key("第三行"), 4000)
 
     assert after.keys() == (*before_keys, weights.b_key("第三行"))
     assert after.values()[: len(before_values)] == before_values
@@ -789,23 +795,23 @@ def test_appending_a_row_never_changes_an_existing_value():
 
 def test_a_duplicate_or_foreign_family_row_fails_closed():
     """重复键 / 串族 / 非 float 一律构造期炸（静默覆盖会让"哪个数算数"没人答得上来）。"""
-    table = weights.SHARED_B.fit(weights.b_key("一行"), 1.5)
+    table = weights.SHARED_B.fit(weights.b_key("一行"), 1500)
 
     with pytest.raises(ValueError):
-        table.fit(weights.b_key("一行"), 2.5)
+        table.fit(weights.b_key("一行"), 2500)
     with pytest.raises(ValueError):
-        table.fit(weights.c_key("move:DRAW", "self"), 1.0)
+        table.fit(weights.c_key("move:DRAW", "self"), 1000)
     with pytest.raises(ValueError):
         weights.WeightTable(
             name="bad",
             families=(weights.FAMILY_B,),
-            rows=((weights.b_key("x"), float("nan")),),
+            rows=((weights.b_key("x"), 1.5),),
         )
     with pytest.raises(ValueError):
         weights.WeightTable(
             name="bad",
             families=(weights.FAMILY_B,),
-            rows=((weights.c_key("move:DRAW", "self"), 1.0),),
+            rows=((weights.c_key("move:DRAW", "self"), 1000),),
         )
 
 
@@ -814,9 +820,13 @@ def test_the_mode_blocks_are_one_per_mode():
     assert set(weights.MODE_BLOCKS) == set(Mode)
     for mode, table in weights.MODE_BLOCKS.items():
         assert table.families == (weights.FAMILY_A, weights.FAMILY_C), mode
-        assert table.rows == (), f"{mode} 的拟合值表在 08a 必须是空的（没有学出来的数值）"
+        for key, value in table.rows:
+            assert weights.family(key) in (weights.FAMILY_A, weights.FAMILY_C)
+            assert isinstance(value, int) and not isinstance(value, bool)
     assert weights.SHARED_B.families == (weights.FAMILY_B,)
-    assert weights.SHARED_B.rows == ()
+    for key, value in weights.SHARED_B.rows:
+        assert weights.family(key) == weights.FAMILY_B
+        assert isinstance(value, int) and not isinstance(value, bool)
 
 
 def test_the_shared_b_block_is_read_for_every_mode():
@@ -824,9 +834,9 @@ def test_the_shared_b_block_is_read_for_every_mode():
     key = weights.b_key("伤害牌底价")
     key_a = weights.a_key("hero.caocao.jianxiong", "DAMAGE_TAKE", 0, "move:LOSE", "self")
 
-    assert {weights.weight(key, mode) for mode in Mode} == {weights.B_ANCHOR}
-    # A 族的锚由键自身决定，也不随模式变（块只影响"有没有拟合值"）。
-    assert {weights.weight(key_a, mode) for mode in Mode} == {4.0}
+    assert len({weights.weight(key, mode) for mode in Mode}) == 1
+    # A 族的读法不随模式变（B 共享、A / C 分块；只有身份局那块可能有拟合值）。
+    assert len({weights.weight(key_a, mode) for mode in Mode}) == 1
 
 
 # ---------------------------------------------------------------------------

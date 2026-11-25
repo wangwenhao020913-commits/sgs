@@ -55,6 +55,8 @@ from types import MappingProxyType
 
 from sgs.data import Mode
 
+from .weights_data import IDENTITY_AC_ROWS, SHARED_B_ROWS
+
 __all__ = [
     "A_SKILL_ANCHOR_FALLBACK",
     "B_ANCHOR",
@@ -95,6 +97,14 @@ FAMILY_A = "a"
 
 _SEP = "|"
 """键的分隔符。三族的**机械类别**（``move:DRAW`` 一类）自带冒号，故分隔符不能是冒号。"""
+
+WEIGHT_SCALE = 1000
+"""拟合值的**整数刻度**（`ai-view` 票 08b）：仓里存 ``round(w × 1000)``，读口除回来。
+
+整数不是为了省内存，是为了**逐字节可复现**：浮点 ``repr`` 跨平台 / 跨 numpy 版本会漂，
+而"拟合产出的 ``weights.py`` 逐字节相同"是票面的一条验收。整数另让"整数权重 vs 浮点参考
+逐条同决策"这条 parity 可机械断言（见 ``tests/test_ai_weights_parity.py``）。
+"""
 
 RELATION_CLASSES: tuple[str, ...] = (
     "self",
@@ -336,25 +346,27 @@ class WeightTable:
                     "权重表按名字寻址，重复键等于两条互相覆盖的账"
                 )
             seen[key] = index
-            if not isinstance(value, float) or not math.isfinite(value):
-                raise ValueError(f"表 {self.name!r} 的 {key!r} 不是有限 float：{value!r}")
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"表 {self.name!r} 的 {key!r} 不是整数刻度值（×{WEIGHT_SCALE}）：{value!r}"
+                )
 
     def keys(self) -> tuple[str, ...]:
         """已有拟合值的键（追加序）。"""
         return tuple(key for key, _value in self.rows)
 
-    def values(self) -> tuple[float, ...]:
-        """已有拟合值（与 :meth:`keys` 同序）；"尾部追加不改既有数值"的判据读它。"""
+    def values(self) -> tuple[int, ...]:
+        """已有拟合值的**整数刻度**（与 :meth:`keys` 同序）；"尾部追加不改既有数值"的判据读它。"""
         return tuple(value for _key, value in self.rows)
 
-    def value(self, key: str) -> float | None:
-        """这个键的拟合值；``None`` = **没有样本**（读方回落到 :func:`anchor`）。"""
+    def value(self, key: str) -> int | None:
+        """这个键的拟合值（整数刻度）；``None`` = **没有样本**（读方回落到 :func:`anchor`）。"""
         for candidate, value in self.rows:
             if candidate == key:
                 return value
         return None
 
-    def fit(self, key: str, value: float) -> "WeightTable":
+    def fit(self, key: str, value: int) -> "WeightTable":
         """**尾部追加**一行（返回新表；既有行逐位不变）。
 
         重复键 ⇒ ``ValueError``：同一条账写两次，后者会静默盖掉前者，而"哪个数算数"就没人
@@ -368,17 +380,22 @@ class WeightTable:
         )
 
 
-SHARED_B = WeightTable(name="shared_b", families=(FAMILY_B,))
+SHARED_B = WeightTable(
+    name="shared_b", families=(FAMILY_B,), rows=SHARED_B_ROWS
+)
 """**B 族（局面轴）**的拟合值表，跨模式共享（spec §2.7：牌价值 / 期望伤害 / P(闪) 跨模式稳定）。
 
-本票为空（无任何学出来的数值）⇒ 每个 B 键读 :data:`B_ANCHOR` = 1.0 ⇒ 打分逐 float 等于
-今天的 ``Score`` 总分。
+行由 ``tools/sgs_train/fit.py`` 生成（``weights_data.py``）。**空表** = 还没有拟合数据
+⇒ 每个 B 键读 :data:`B_ANCHOR` = 1.0 ⇒ 打分逐 float 等于今天的 ``Score`` 总分；有行时
+``weight`` 交回 ``行值 / WEIGHT_SCALE``。
 """
 
 NO_IDENTITY_AC = WeightTable(name="no_identity_ac", families=(FAMILY_A, FAMILY_C))
 """无身份局的 A + C 族（"对敌 / 对友做这件事值多少分"带着各模式的胜负结构）。"""
 
-IDENTITY_AC = WeightTable(name="identity_ac", families=(FAMILY_A, FAMILY_C))
+IDENTITY_AC = WeightTable(
+    name="identity_ac", families=(FAMILY_A, FAMILY_C), rows=IDENTITY_AC_ROWS
+)
 """身份局的 A + C 族。"""
 
 PVE_AC = WeightTable(name="pve_ac", families=(FAMILY_A, FAMILY_C))
@@ -405,7 +422,8 @@ def table_for(mode: Mode) -> WeightTable:
 
 
 def weight(key: str, mode: Mode = Mode.IDENTITY) -> float:
-    """**读一个键的权重**：有拟合值读拟合值，没有就读 :func:`anchor`（0 样本不归零）。
+    """**读一个键的权重**：有拟合值读拟合值（整数刻度 ÷ :data:`WEIGHT_SCALE`），没有读
+    :func:`anchor`（0 样本不归零）。
 
     B 族查 :data:`SHARED_B`（跨模式共享），A / C 族查该模式的块。这是唯一的读取口——
     08b 把它接进打分路径时，读法不再有第二种。
@@ -414,4 +432,25 @@ def weight(key: str, mode: Mode = Mode.IDENTITY) -> float:
         fitted = SHARED_B.value(key)
     else:
         fitted = table_for(mode).value(key)
-    return anchor(key) if fitted is None else fitted
+    return anchor(key) if fitted is None else fitted / WEIGHT_SCALE
+
+
+@lru_cache(maxsize=4096)
+def b_weight_cached(item: str) -> float:
+    """``b|<项名>`` 的权重的缓存读口（打分路径专用）。
+
+    打分时每个候选的每个 ``Score.add`` 项都要查一次权重：键空间是**有限闭集**（项名由源码
+    里的字面量决定），``lru_cache`` 因此不会变成无界缓存。**只给 B 族**——B 族跨模式共享、
+    与 ``mode`` 无关，缓存键只有项名一个，天然无歧义；A / C 族的读法照旧走
+    :func:`weight`（它们不是决策路径上的热读口）。
+    """
+    return weight(b_key(item))
+
+
+def has_fitted_b() -> bool:
+    """B 族**有没有**拟合值（决策路径据此决定要不要走"带权打分"那条更贵的路）。
+
+    空表（08a 的落地态）= 今天的分数逐 float 不变，``HeuristicPlayer.respond`` 不打开
+    trace、不多分配一个元组。
+    """
+    return bool(SHARED_B.rows)

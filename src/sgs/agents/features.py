@@ -272,6 +272,20 @@ def extract(query: Query, action: Action) -> Mapping[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def unweighted_candidate_score(candidate: FeatureFrame) -> float:
+    """**不带权**的候选分：``Σ 项值``，逐 float 等于 08a 落地态 / 既有 ``Score`` 总分。
+
+    它只用于**提取层**的等价性判据（项名 / 次序 / 漏项）：08b 起 B 族权重不再是 1.0，
+    ``candidate_score`` 已经不等于既有分，而"特征提取得对不对"仍要一条与权重无关的尺子。
+    写法刻意与 :func:`candidate_score` 逐字同构（``total += value * 1.0``），故 1 ulp 口径
+    也相同——``sum(items)`` 会在嵌套 ``Scored`` 展平后差 1 ulp，不能用。
+    """
+    total = 0.0
+    for _key, value in candidate.items:
+        total += value * 1.0
+    return total
+
+
 def candidate_score(candidate: FeatureFrame, mode: Mode = Mode.IDENTITY) -> float:
     """**候选分**：B 族逐项加权求和（``Σ w·f``），按 ``Score`` 的 trace 序累加。
 

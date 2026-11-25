@@ -814,6 +814,7 @@ FEATURES_FUNCTIONS = frozenset(
         "_scored_items",
         "extract",
         "candidate_score",
+        "unweighted_candidate_score",
         "position_score",
         "linear",
     }

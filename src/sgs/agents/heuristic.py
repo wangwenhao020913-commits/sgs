@@ -178,6 +178,7 @@ from sgs.state import (
 )
 
 from . import identity as identity_model
+from . import weights as weight_policy
 
 __all__ = ["SKILL_VALUES", "HeuristicPlayer", "Score"]
 
@@ -1546,6 +1547,29 @@ class Score:
         finally:
             cls._tracing = previous
 
+
+
+
+def _weighted_candidate_score(
+    scorer: Callable[[Query, Action], float], query: Query, action: Action
+) -> float:
+    """带权候选分：``Σ 项值 × weight(b|项名)``（`ai-view` 票 08b）。
+
+    只在 :func:`sgs.agents.weights.has_fitted_b` 为真时走这条路（有拟合值的版本）；空表时
+    ``respond`` 直接用打分器的 float，**逐 float 等于 08a 的落地态**、也不多分配一次 trace。
+
+    trace 必须打开：B 族的值**只**来自既有的 ``Score.add`` 分项（票 02），这里不另算任何
+    几何 / 概率 / 记牌量（spec §2.7 的"B 族不许另算"）。项名即键名，查表走缓存读口。
+    """
+    with Score.tracing():
+        value = scorer(query, action)
+    items = getattr(value, "items", None)
+    if items is None:
+        raise ValueError(f"{query.kind} 的打分器没有交出分项：带权打分只能从 Score trace 派生")
+    total = 0.0
+    for name, item in items:
+        total += item * weight_policy.b_weight_cached(name)
+    return total
 
 def _item_score(name: str, value: float) -> float:
     """**单分项**分数的快捷写法（常量分支 / 委托分支用）。
@@ -6095,7 +6119,12 @@ class HeuristicPlayer:
         if not actions:
             raise ValueError(f"{query.kind} 询问没有候选行动，参与者无法应答")
         scorer = _SCORERS[QueryKind(query.kind)]
-        scores = [scorer(query, action) for action in actions]
+        if weight_policy.has_fitted_b():
+            scores = [
+                _weighted_candidate_score(scorer, query, action) for action in actions
+            ]
+        else:
+            scores = [scorer(query, action) for action in actions]
         best = max(scores)
         winners = [action for score, action in zip(scores, actions) if score == best]
         return winners[self._rng.randbelow(len(winners))]
