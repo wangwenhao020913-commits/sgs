@@ -3060,6 +3060,11 @@ def _scored_batch() -> tuple[list[str], list[str]]:
     lines: list[str] = []
     violations: list[str] = []
     original = heuristic_scoring._SCORERS
+    original_has_fitted_b = heuristic_scoring.weight_policy.has_fitted_b
+    # 08c 起 B 族有拟合权重：``respond`` 会走带权分支、8 局轨迹随权重变，而本摘要钉的是
+    # **打分器自己的 float**（票 02 的 parity），不是某一版权重下的决策路径。压回手写路径
+    # 后询问序列与落权重前逐字相同，摘要仍只对分项改写负责。
+    heuristic_scoring.weight_policy.has_fitted_b = lambda: False
 
     def wrap(kind, scorer):
         def recorded(query, action):
@@ -3103,6 +3108,7 @@ def _scored_batch() -> tuple[list[str], list[str]]:
             )
     finally:
         heuristic_scoring._SCORERS = original
+        heuristic_scoring.weight_policy.has_fitted_b = original_has_fitted_b
     return lines, violations
 
 
@@ -5478,43 +5484,57 @@ def test_every_activatable_skill_can_be_ai_filled_and_validated_at_least_once():
         "覆盖表里有数据里不存在 / 已锁定的技能：" + "；".join(_coverage_strays(_COVERAGE_CASES))
     )
 
-    for skill_id in sorted(_COVERAGE_CASES):
-        state, query, frame = _COVERAGE_CASES[skill_id]()
-        action = HeuristicPlayer(_stream(0)).respond(query)
+    original_has_fitted_b = heuristic_scoring.weight_policy.has_fitted_b
+    # 覆盖判据测的是"AI 能不能把清单**填完**并过同一个校验器"，不是"这一版权重下这条
+    # 技能划不划算"。08c 落仓行为克隆权重后，【贯石斧】在这一构造场景按手写价刚好够发动、
+    # 按拟合价不发动——那是策略读数的合法变化，不该让覆盖表替它报警。压回手写路径后，
+    # 每条技能仍走同一条填表 / 校验路径。
+    heuristic_scoring.weight_policy.has_fitted_b = lambda: False
+    try:
+        for skill_id in sorted(_COVERAGE_CASES):
+            _assert_skill_activation_covers(skill_id)
+    finally:
+        heuristic_scoring.weight_policy.has_fitted_b = original_has_fitted_b
 
-        assert isinstance(action, ActivateSkill), (
-            f"{skill_id}：AI 至少该选 ActivateSkill 而不是 Pass，实得 {action!r}"
+
+def _assert_skill_activation_covers(skill_id: str) -> None:
+    """单条技能的覆盖断言（从 ``test_every_activatable_skill...`` 抽出来，便于统一压权重）。"""
+    state, query, frame = _COVERAGE_CASES[skill_id]()
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), (
+        f"{skill_id}：AI 至少该选 ActivateSkill 而不是 Pass，实得 {action!r}"
+    )
+    assert action.skill_id == skill_id, f"{skill_id}：AI 发动的不是这条技能"
+    flow = flow_for(skill_id, query.timing)
+    if flow is None or not flow.steps:
+        # 没有可填的清单 ⇒ 骨架候选就是它与 AI 的**全部**交互形态，不是"退化的弱分支"。
+        # 两类都走这里：没有流水线的装备技（雌雄 / 寒冰），和**零步流水线**（朱雀羽扇，
+        # 票 09：只问"是否发动"，确认后在 effect 里把帧里的牌换成火【杀】）。
+        assert action in query.legal_actions, (
+            f"{skill_id}：没有清单的技能只能答候选里的骨架动作"
         )
-        assert action.skill_id == skill_id, f"{skill_id}：AI 发动的不是这条技能"
-        flow = flow_for(skill_id, query.timing)
-        if flow is None or not flow.steps:
-            # 没有可填的清单 ⇒ 骨架候选就是它与 AI 的**全部**交互形态，不是"退化的弱分支"。
-            # 两类都走这里：没有流水线的装备技（雌雄 / 寒冰），和**零步流水线**（朱雀羽扇，
-            # 票 09：只问"是否发动"，确认后在 effect 里把帧里的牌换成火【杀】）。
-            assert action in query.legal_actions, (
-                f"{skill_id}：没有清单的技能只能答候选里的骨架动作"
-            )
-            continue
-        # 有清单 ⇒ 必须把表**填完**（复合动作不在候选里）并过同一个校验器。
-        # "答骨架"在这里是退化，不是可选分支。
-        assert is_structured_activation(query, action), (
-            f"{skill_id}：有清单却没填复合动作（不许退化成挑骨架）"
+        return
+    # 有清单 ⇒ 必须把表**填完**（复合动作不在候选里）并过同一个校验器。
+    # "答骨架"在这里是退化，不是可选分支。
+    assert is_structured_activation(query, action), (
+        f"{skill_id}：有清单却没填复合动作（不许退化成挑骨架）"
+    )
+    assert action not in query.legal_actions, (
+        f"{skill_id}：有清单时应当填复合动作，而不是挑骨架候选"
+    )
+    assert (
+        validate_activation(
+            state,
+            query.actor,
+            skill_id,
+            action.picks,
+            action.choices,
+            timing=query.timing,
+            frame=frame,
         )
-        assert action not in query.legal_actions, (
-            f"{skill_id}：有清单时应当填复合动作，而不是挑骨架候选"
-        )
-        assert (
-            validate_activation(
-                state,
-                query.actor,
-                skill_id,
-                action.picks,
-                action.choices,
-                timing=query.timing,
-                frame=frame,
-            )
-            is None
-        ), f"{skill_id}：AI 填的复合动作没过校验器"
+        is None
+    ), f"{skill_id}：AI 填的复合动作没过校验器"
 
 
 def test_the_coverage_table_goes_red_when_an_activatable_skill_is_missing():

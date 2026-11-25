@@ -1,27 +1,34 @@
-"""离线拟合权重（`ai-view` 票 08b；spec §2.7 / §2.8）：自弈样本 → 整数权重。
+"""离线拟合权重（`ai-view` 票 08c；spec §2.7 / §2.8）：自弈样本 → 整数权重。
 
 **两段式**（采集贵、拟合便宜，spec §2.8）：
 
-1. ``collect`` —— 跑自弈批，把**每个决策**的
-   ``(B 族逐项, A + C 族计数, 阵营结局)`` 写成 ``jsonl.gz``。这一段必须用**仓内**
-   ``.venv``（它要 ``import sgs``）；多进程采集，进程数 = ``--workers``。
+1. ``collect`` —— 跑自弈批，把**每个询问**的
+   ``(选中候选的 B 分项, 至多 K 个其它候选的 B 分项, 阵营结局)`` 写成 ``jsonl.gz``。
+   这一段必须用**仓内** ``.venv``（它要 ``import sgs``）；多进程采集，进程数 = ``--workers``。
 2. ``fit`` —— 读样本、拟合、量化成**整数**、打印 ``weights_data.py`` 的整块源码。这一段用
    **训练 venv**（numpy；§2.8 的常设约束：训练栈不进 ``SGS/.venv``）：仓库外那个
    ``../.venv-train``，命令见票面。
 
-**拟合目标**（spec §2.7 的橡皮筋，本票把量纲钉死）：
+**拟合目标**（票 08c：成对偏好 / 行为克隆，替换 08b 的终局值回归）：
 
-    minimize  Σ_n (ŷ_n − w·x_n)² + λ·Σ_k (w_k − anchor_k)²
+    minimize  Σ_pairs softplus(−S·(s_chosen − s_alt)) + λ_B·Σ(w − anchor)²
 
-- ``ŷ = ±S``（阵营胜负），``S`` = 样本里**选中候选分的中位数**。为什么不直接拟合 ``±1``：
-  B 族的特征值就是今天的分（几到几十分），``w = 1`` 必须读出"手写价"；把目标缩到分数量级
-  之后，**anchor = 1.0 与拟合值同量纲**，稀有键读到的是真正的"手写价的量级"，而不是被
-  放大 20 倍的先验。``S`` 由数据派生、写进报告，不手拍。
-- ``anchor`` = ``sgs.agents.weights.anchor``（**同一函数**，不抄第二份）：B = 1.0、
-  C = 既有关系系数、A = ``SKILL_VALUES`` 的手写值（形状档落众数）。
+- 每一对是**同一次询问**里的"选中动作 vs 另一个候选"：**选中动作恒为被偏好的一方**
+  （行为克隆），``S`` = 样本里**选中候选分的中位数**（08b 的同一口径）。``w = 1`` 必须读出
+  "手写价"，故目标量纲取分数本身，而不是 ±1（理由见 08b 的模块 docstring）。
+- **口径裁定**：票面第 2 条把 ``y = ±S``（结局）写在 softplus 的方向位，与第 1 句「结局只作
+  **样本权重**」冲突；2026-11-26 用户裁定取**行为克隆**口径（票面 ``## Comments``）：结局不进
+  方向位，本轮也不额外加权（等权 = 所选选项的读数；胜负加权留给后续票）。样本表里仍保留
+  每局的 ``y = ±1``（采集口径不变），拟合只读 ``S``。
+- **没有截距**——只约束候选间的**差**，故 anchor = 1.0 在差尺度上天然成立，不会被结局的均值
+  压平（08b 值回归的根因）。
+- 其余候选**按值域截断**：每条询问只留**手写分最高**的 ``K`` 个（``--alternatives``，
+  缺省 8）。选中动作永远在样本里（它可能来自 AI 自己拼的复合候选，不在 ``legal_actions``
+  里——那时它仍是第 0 号候选）。
+- ``anchor`` = ``sgs.agents.weights.anchor``（**同一函数**，不抄第二份）：本票只拟合 B 族
+  （锚 1.0）；A / C 族沿用 08b 第一轮的值，由 ``fit --ac-report`` 从那份报告里原样搬进
+  渲染结果（票 09 的输入，与决策无关）。
 - 0 样本的键**不进表** ⇒ 读方回落 ``anchor``（票面"0 样本不归零"）。
-- ``λ`` 由**按局分组**的 K 折交叉验证扫（同一种子的所有座位步同折——同局样本强相关，
-  随机切折会泄漏）。
 
 **整数量化**：仓库里的表存 ``round(w × WEIGHT_SCALE)``（``WEIGHT_SCALE = 1000``），读口
 除回去。整数是为了**逐字节可复现**（浮点 repr 跨平台会漂），并让"整数权重 vs 浮点参考"
@@ -30,14 +37,15 @@
 用法（采集在仓根、用仓内 venv）::
 
     PYTHONPATH=tools .venv/bin/python -m sgs_train.fit collect \\
-        --games 512 --players 5 --seed-start 90000 --workers 8 \\
-        --out .scratch/ai-view/t08b/samples.jsonl.gz
+        --games 4000 --players 5 --seed-start 90000 --workers 10 \\
+        --out .scratch/ai-view/t08c/samples.jsonl.gz
 
 拟合（用仓外训练 venv；numpy 只在这条命令里被 import）::
 
     PYTHONPATH=src:tools /home/admin2026/code/.venv-train/bin/python -m sgs_train.fit fit \\
-        --samples .scratch/ai-view/t08b/samples.jsonl.gz \\
-        --out /tmp/weights_data.py --report .scratch/ai-view/t08b/fit-report.json
+        --samples .scratch/ai-view/t08c/samples.jsonl.gz --lambda-b 10000 \\
+        --ac-report .scratch/ai-view/t08b/fit-report.json \\
+        --out /tmp/weights_data.py --report .scratch/ai-view/t08c/report-1e4.json
 """
 
 from __future__ import annotations
@@ -45,55 +53,47 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import math
 import statistics
 import sys
 import time
-from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from array import array
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 __all__ = [
-    "FOLD_COUNT",
+    "ALTERNATIVES",
     "LAMBDA_GRID",
     "SCHEMA",
-    "Samples",
+    "PairSamples",
     "collect_games",
-    "fit_weights",
-    "load_samples",
+    "fit_pairwise",
+    "load_pair_samples",
     "main",
     "render_weights_data",
 ]
 
-SCHEMA = "sgs.fit.samples.v1"
-"""样本文件的 schema 标（换字段口径必须换它：老文件不许被新拟合器静默读成新口径）。"""
+SCHEMA = "sgs.fit.samples.v2"
+"""样本文件的 schema 标（v2 = 成对偏好：``c`` 选中候选 + ``o`` 其它候选）。
 
-FOLD_COUNT = 4
-"""交叉验证折数：**按局（seed）分组**。"""
-
-LAMBDA_GRID: tuple[float, ...] = (
-    1e-1,
-    3e-1,
-    1.0,
-    3.0,
-    10.0,
-    30.0,
-    100.0,
-    300.0,
-    1e3,
-    3e3,
-)
-
-CV_STRIDE = 5
-"""交叉验证只取 **1 / CV_STRIDE** 的局（``seed % CV_STRIDE == 0``）。
-
-λ 是一条标量，不需要全量样本才选得稳；全量只在最后拟合一次（见 :func:`fit_weights`）。
-这一条是实测的：全量 × 10 个 λ × 4 折要跑几小时，抽样后 ≈10 分钟，λ 的最优点几乎不动。
+换字段口径必须换它：老文件不许被新拟合器静默读成新口径。
 """
-"""``λ`` 的扫描网格（对数等距）。数据量涨一个数量级时，最优 λ 大致同向移动一格，
-故网格留得宽、由 CV 自己挑，不按样本数手算。"""
+
+ALTERNATIVES = 8
+"""每条询问保留的**其它候选**上限（``K``，票面建议 6–8）。
+
+"按值域截断"= **手写分最高**的 K 个：低分候选与选中候选的差通常很大、对成对损失的贡献
+接近 0，但每条都要算一遍特征与梯度。截断只影响采集体积，不影响"选中永远在样本里"。
+"""
+
+LAMBDA_GRID: tuple[float, ...] = (1e3, 3e3, 1e4, 3e4, 1e5, 3e5)
+"""B 族 λ 的候选网格（票 08c）：1e3–1e5 是预注册网格；**3e5 是 2026-11-26 用户裁定补的**。
+
+补的理由（见票面 ``## Comments`` 与 ``## Answer``）：行为克隆口径下 1e5 仍差 D4 一条 0.1 分
+margin 的用例（79/80），3e5 是第一个三条判据全过的候选。网格仍按"跑完不许改"执行一次，
+不因为结果再动。"""
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +137,51 @@ def _factory(spec: Any) -> list[Any]:
     return players
 
 
-def _collect_one(payload: tuple[int, int, str]) -> dict[str, Any]:
-    """跑**一局**并交出它的样本行（纯数据、可 pickle 回父进程）。"""
-    seed, players, mode = payload
-    from sgs.agents import heuristic as heuristic_scoring
+def _b_items(features: Any, query: Any, action: Any) -> list[list[Any]]:
+    """一个候选的 B 族分项（同名项累加；键与值都保持既有打分的原样）。
+
+    ``features._scored_items`` 是 :func:`sgs.agents.features.frame` 的**同一个** trace 入口
+    （同一个打分器、同一条派发），``features.b_family`` 是同一个改名 / 归并函数；这里只跳过
+    A / C 两族——它们在一条询问的**全部候选**上逐键相同，成对损失只约束候选差，存下来是纯浪费。
+    """
+    grouped = features.b_family(features._scored_items(query, action))
+    return [[key, float(value)] for key, value in grouped.items()]
+
+
+def _sample_row(
+    seed: int, seat: int, query: Any, action: Any, y: int, alternatives: int
+) -> dict[str, Any]:
+    """一次询问的样本行：选中候选 + 手写分最高的 ``alternatives`` 个其它候选。"""
     from sgs.agents import features
+    from sgs.agents import heuristic as heuristic_scoring
+
+    kind = heuristic_scoring.QueryKind(query.kind)
+    scorer = heuristic_scoring._SCORERS[kind]
+    ranked = [
+        (float(scorer(query, other)), position, other)
+        for position, other in enumerate(query.legal_actions)
+        if other != action
+    ]
+    # 平局按候选原序（确定性）：同一份样本表在任何进程里逐字节相同。
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return {
+        "s": seed,
+        "p": seat,
+        "k": kind.name,
+        "q": int(query.seq),
+        "y": y,
+        "v": float(scorer(query, action)),
+        "c": _b_items(features, query, action),
+        "o": [
+            _b_items(features, query, other)
+            for _score, _position, other in ranked[:alternatives]
+        ],
+    }
+
+
+def _collect_one(payload: tuple[int, int, str, int]) -> dict[str, Any]:
+    """跑**一局**并交出它的样本行（纯数据、可 pickle 回父进程）。"""
+    seed, players, mode, alternatives = payload
     from sgs.data import Mode
     from sgs_batch import GameSpec, run_one
 
@@ -156,24 +196,7 @@ def _collect_one(payload: tuple[int, int, str]) -> dict[str, Any]:
         won = won_by_seat.get(seat)
         y = 1 if won else -1
         for query, action in sink:
-            store = features.frame(query, action)
-            scorer = heuristic_scoring._SCORERS[heuristic_scoring.QueryKind(query.kind)]
-            with heuristic_scoring.Score.tracing():
-                value = scorer(query, action)
-            rows.append(
-                {
-                    "s": seed,
-                    "p": seat,
-                    "k": heuristic_scoring.QueryKind(query.kind).name,
-                    "q": int(query.seq),
-                    "y": y,
-                    "v": float(value),
-                    "b": [[key, float(item)] for key, item in store.items],
-                    "ac": [
-                        [key, float(item)] for key, item in store.position().items()
-                    ],
-                }
-            )
+            rows.append(_sample_row(seed, seat, query, action, y, alternatives))
     del _SINKS[:]
     return {"seed": seed, "error": None, "samples": rows}
 
@@ -184,12 +207,15 @@ def collect_games(
     players: int = 5,
     mode: str = "identity",
     workers: int = 8,
+    alternatives: int = ALTERNATIVES,
     out_path: Path,
     progress: bool = True,
 ) -> dict[str, Any]:
     """跑整批自弈并写 ``jsonl.gz``；返回摘要（局数 / 样本数 / 失败种子）。"""
+    if alternatives < 1:
+        raise SystemExit(f"--alternatives 必须 ≥ 1：{alternatives}")
     seed_list = list(seeds)
-    payloads = [(seed, players, mode) for seed in seed_list]
+    payloads = [(seed, players, mode, alternatives) for seed in seed_list]
     failures: list[tuple[int, str]] = []
     samples = 0
     games = 0
@@ -204,6 +230,7 @@ def collect_games(
                     "schema": SCHEMA,
                     "players": players,
                     "mode": mode,
+                    "alternatives": alternatives,
                     "games_requested": len(payloads),
                 },
                 ensure_ascii=False,
@@ -224,7 +251,7 @@ def collect_games(
                 elapsed = time.perf_counter() - started
                 rate = index / elapsed if elapsed else 0.0
                 print(
-                    f"  {index}/{len(payloads)} 局 · {samples} 样本 · "
+                    f"  {index}/{len(payloads)} 局 · {samples} 询问 · "
                     f"{rate:.1f} 局/s · 失败 {len(failures)}",
                     file=sys.stderr,
                 )
@@ -232,6 +259,7 @@ def collect_games(
         "schema": SCHEMA,
         "players": players,
         "mode": mode,
+        "alternatives": alternatives,
         "games": games,
         "samples": samples,
         "failures": failures,
@@ -246,216 +274,236 @@ def collect_games(
 
 
 @dataclass
-class Samples:
-    """一次拟合的样本面（先读进内存，再交 numpy）。
+class PairSamples:
+    """一次成对拟合的样本面（紧凑平铺：候选 × 特征 + 询问 × 候选对）。
 
-    ``rows`` = 每个样本的 ``(键下标列表, 值列表, 目标, 局种子)``；``keys`` = 键名字典；
-    ``scale`` = 目标量纲 ``S``（选中候选分的中位数，见模块 docstring）。
+    - ``index`` / ``values`` / ``starts``：**候选**的稀疏特征（CSR 形状；候选按出现序）；
+    - ``query_sign`` / ``query_value``：每个询问的结局符号（±1）与选中候选分（定 S 用）；
+    - ``chosen``：每个询问的选中候选下标；
+    - ``pair_query`` / ``pair_alt``：每一对 = ``(询问, 另一个候选)``（选中侧由 ``chosen`` 查）。
+
+    用 ``array`` 而不是 Python 对象：10⁶ 量级的询问 × 9 个候选，``list[tuple[...]]`` 会
+    吃掉十几 GB；平铺数组在 numpy 侧可零拷贝。
     """
 
     keys: dict[str, int] = field(default_factory=dict)
-    rows: list[tuple[list[int], list[float], float, int]] = field(default_factory=list)
+    index: array = field(default_factory=lambda: array("i"))
+    values: array = field(default_factory=lambda: array("d"))
+    starts: array = field(default_factory=lambda: array("q"))
+    query_sign: array = field(default_factory=lambda: array("b"))
+    query_value: array = field(default_factory=lambda: array("d"))
+    chosen: array = field(default_factory=lambda: array("i"))
+    pair_query: array = field(default_factory=lambda: array("i"))
+    pair_alt: array = field(default_factory=lambda: array("i"))
     scale: float = 0.0
+    games: int = 0
 
-    def index(self, key: str) -> int:
-        found = self.keys.get(key)
-        if found is None:
-            found = len(self.keys)
-            self.keys[key] = found
-        return found
+    @property
+    def queries(self) -> int:
+        return len(self.query_sign)
+
+    @property
+    def pairs(self) -> int:
+        return len(self.pair_query)
+
+    @property
+    def candidates(self) -> int:
+        return len(self.starts) - 1
 
 
-def load_samples(path: Path) -> Samples:
-    """读 ``jsonl.gz``：``ŷ`` 先记 ``y·v``（后面按中位数把 ``S`` 补上）。"""
-    store = Samples()
-    scores: list[float] = []
-    raw: list[tuple[list[int], list[float], int, int]] = []
+def load_pair_samples(path: Path) -> PairSamples:
+    """读 v2 ``jsonl.gz``；``S`` 取**选中候选分 > 0** 的中位数（口径同 08b）。"""
+    store = PairSamples()
+    seeds: set[int] = set()
     opener = gzip.open if path.suffix == ".gz" else open
+
+    def add(entries: Sequence[Sequence[Any]], where: str) -> int:
+        candidate = len(store.starts)
+        store.starts.append(len(store.index))
+        if not entries:
+            raise SystemExit(f"{where} 的候选没有任何 B 分项：B 族只能从打分器 trace 派生")
+        for key, value in entries:
+            found = store.keys.get(str(key))
+            if found is None:
+                found = len(store.keys)
+                store.keys[str(key)] = found
+            store.index.append(found)
+            store.values.append(float(value))
+        return candidate
+
     with opener(path, "rt", encoding="utf-8") as handle:
         header = json.loads(handle.readline())
         if header.get("schema") != SCHEMA:
             raise SystemExit(f"样本 schema 不是 {SCHEMA}：{header.get('schema')!r}")
-        for line in handle:
+        for line_number, line in enumerate(handle, start=2):
             row = json.loads(line)
-            index: list[int] = []
-            values: list[float] = []
-            for key, value in row["b"]:
-                index.append(store.index(key))
-                values.append(float(value))
-            for key, value in row["ac"]:
-                index.append(store.index(key))
-                values.append(float(value))
-            raw.append((index, values, int(row["y"]), int(row["s"])))
-            scores.append(float(row["v"]))
-    positive = [score for score in scores if score > 0]
-    scale = statistics.median(positive) if positive else 0.0
-    if scale <= 0:
-        raise SystemExit("样本里没有正的候选分：无法定目标量纲 S")
-    store.rows = [(idx, vals, y * scale, seed) for idx, vals, y, seed in raw]
-    store.scale = scale
+            query = len(store.query_value)
+            seeds.add(int(row["s"]))
+            store.query_sign.append(int(row["y"]))
+            store.query_value.append(float(row["v"]))
+            where = f"seed={row['s']} seat={row['p']} seq={row['q']}"
+            store.chosen.append(add(row["c"], where))
+            for alternative in row["o"]:
+                store.pair_query.append(query)
+                store.pair_alt.append(add(alternative, where))
+    store.starts.append(len(store.index))
+    store.games = len(seeds)
+    positive = [float(value) for value in store.query_value if value > 0]
+    if not positive:
+        raise SystemExit("样本里没有正的选中候选分：无法定目标量纲 S")
+    store.scale = statistics.median(positive)
+    if store.scale <= 0:
+        raise SystemExit("目标量纲 S 非正：样本表坏了")
     return store
 
 
-def _build_arrays(np: Any, rows: Sequence[tuple[list[int], list[float], float, int]]) -> Any:
-    """样本面 → 五个平铺数组（``index`` / ``values`` / 每行起点 / 每元素所属行 / 目标）。"""
-    index: list[int] = []
-    values: list[float] = []
-    starts: list[int] = []
-    target: list[float] = []
-    for row_index, value_row, y, _seed in rows:
-        starts.append(len(index))
-        index.extend(row_index)
-        values.extend(value_row)
-        target.append(y)
-    flat_index = np.asarray(index, dtype=np.int64)
-    flat_values = np.asarray(values, dtype=np.float64)
-    flat_starts = np.asarray(starts, dtype=np.int64)
-    row_index = np.repeat(
-        np.arange(len(rows), dtype=np.int64),
-        np.diff(np.append(flat_starts, len(flat_index))),
-    )
-    return flat_index, flat_values, flat_starts, row_index, np.asarray(
-        target, dtype=np.float64
-    )
+def _matrix(np: Any, samples: PairSamples) -> Any:
+    """候选特征 → 稠密 ``(候选数, 键数)`` 矩阵（B 键只有几十个，稠密比稀疏快得多）。
+
+    每个候选至少一个分项（:func:`load_pair_samples` 已断言），故 ``starts`` 严格递增。
+    """
+    starts = np.frombuffer(samples.starts, dtype=np.int64)
+    index = np.frombuffer(samples.index, dtype=np.int32)
+    values = np.frombuffer(samples.values, dtype=np.float64)
+    candidates = len(starts) - 1
+    counts = np.diff(starts)
+    if np.any(counts <= 0):
+        raise SystemExit("样本里有空候选：starts 必须严格递增")
+    rows = np.repeat(np.arange(candidates, dtype=np.int64), counts)
+    matrix = np.zeros((candidates, len(samples.keys)), dtype=np.float64)
+    matrix[rows, index.astype(np.int64)] = values
+    return matrix
 
 
-def _solve_ridge(
-    np: Any,
-    index: Any,
-    values: Any,
-    starts: Any,
-    row_index: Any,
-    target: Any,
-    anchor: Any,
-    penalty: Any,
-    *,
-    iterations: int = 120,
-) -> Any:
-    """共轭梯度解 ``(XᵀX + λI) w = Xᵀy + λ anchor``（矩阵自由，每步只过一遍 nnz）。"""
-    dim = anchor.shape[0]
-
-    diagonal = np.bincount(index, weights=values * values, minlength=dim)
-    diagonal = diagonal + penalty
-    diagonal = np.where(diagonal > 0, diagonal, 1.0)
-
-    def xtx(vector: Any) -> Any:
-        xv = np.add.reduceat(values * vector[index], starts)
-        return np.bincount(index, weights=values * xv[row_index], minlength=dim)
-
-    def apply(vector: Any) -> Any:
-        return xtx(vector) + penalty * vector
-
-    rhs = np.bincount(index, weights=values * target[row_index], minlength=dim)
-    rhs = rhs + penalty * anchor
-    w = anchor.copy()
-    residual = rhs - apply(w)
-    # Jacobi 预条件：对角 = XᵀX 的对角 + λ（截距列不带惩罚）。不用它时病态矩阵要几百步。
-    scaled = residual / diagonal
-    direction = scaled.copy()
-    rz = float(residual @ scaled)
-    ceiling = float(rhs @ rhs) or 1.0
-    for _ in range(iterations):
-        if float(residual @ residual) <= 1e-24 * ceiling:
-            break
-        applied = apply(direction)
-        denom = float(direction @ applied)
-        if denom <= 0:
-            break
-        alpha = rz / denom
-        w += alpha * direction
-        residual -= alpha * applied
-        scaled = residual / diagonal
-        new_rz = float(residual @ scaled)
-        beta = new_rz / rz
-        direction = scaled + beta * direction
-        rz = new_rz
-    return w
+def _sigmoid(np: Any, z: Any) -> Any:
+    """数值稳定的 logistic（正负两段各自 exp，避免 ``exp(大正数)`` 溢出）。"""
+    out = np.empty_like(z)
+    positive = z >= 0
+    out[positive] = 1.0 / (1.0 + np.exp(-z[positive]))
+    exponent = np.exp(z[~positive])
+    out[~positive] = exponent / (1.0 + exponent)
+    return out
 
 
-def _mean_squared(
-    np: Any, rows: Sequence[tuple[list[int], list[float], float, int]], weights: Any
+def _objective(
+    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, w: Any,
+    anchor: Any, lambda_b: float,
 ) -> float:
-    """在给定样本上的均方误差（目标量纲 = 分）。"""
-    if not rows:
-        return float("nan")
-    total = 0.0
-    for row_index, value_row, y, _seed in rows:
-        predicted = float(
-            np.dot(np.asarray(value_row), weights[np.asarray(row_index, dtype=np.int64)])
-        )
-        total += (y - predicted) ** 2
-    return total / len(rows)
+    """成对 logistic 损失 + 锚先验（标量；线搜索与收敛判据共用）。"""
+    scores = matrix @ w
+    delta = scores[pair_chosen] - scores[pair_alt]
+    z = -y_pair * delta
+    loss = float(np.logaddexp(0.0, z).sum())
+    gap = w - anchor
+    return loss + lambda_b * float(gap @ gap)
 
 
-def fit_weights(
-    samples: Samples,
+def _gradient_hessian(
+    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, w: Any,
+    anchor: Any, lambda_b: float, *, chunk: int = 262_144,
+) -> tuple[Any, Any, float, float]:
+    """返回 ``(∇, ∇², 总目标, 成对损失)``；Hessian 按对分批累加（一次不物化全部候选差）。
+
+    Hessian = ``Σ h_p d_p d_pᵀ + 2λI``（``d_p`` = 选中候选 − 另一候选的特征差、
+    ``h_p`` = σ(1−σ)）；只是候选**差**的函数，故没有截距、也不受"多数决策同分"影响。
+    """
+    scores = matrix @ w
+    delta = scores[pair_chosen] - scores[pair_alt]
+    z = -y_pair * delta
+    data_loss = float(np.logaddexp(0.0, z).sum())
+    gap = w - anchor
+    loss = data_loss + lambda_b * float(gap @ gap)
+    probability = _sigmoid(np, z)
+    coefficient = -y_pair * probability
+    candidates = matrix.shape[0]
+    per_candidate = np.bincount(pair_chosen, weights=coefficient, minlength=candidates)
+    per_candidate -= np.bincount(pair_alt, weights=coefficient, minlength=candidates)
+    gradient = matrix.T @ per_candidate + 2.0 * lambda_b * (w - anchor)
+
+    dim = matrix.shape[1]
+    hessian = np.zeros((dim, dim), dtype=np.float64)
+    # 链式法则里 dz/dw = −y·d，故二阶项带 y²（y = ±S，S ≠ 1：漏掉它 Hessian 会小 S² 倍）。
+    weight = probability * (1.0 - probability) * (y_pair * y_pair)
+    total = len(pair_chosen)
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        difference = matrix[pair_chosen[start:stop]] - matrix[pair_alt[start:stop]]
+        hessian += difference.T @ (difference * weight[start:stop, None])
+    hessian = hessian + 2.0 * lambda_b * np.eye(dim)
+    return gradient, hessian, loss, data_loss
+
+
+def fit_pairwise(
+    samples: PairSamples,
     *,
-    folds: int = FOLD_COUNT,
-    lambda_b: float | None = None,
-    lambda_ac: float | None = None,
+    lambda_b: float,
+    max_iterations: int = 60,
+    tolerance: float = 1e-6,
 ) -> dict[str, Any]:
-    """扫 ``λ``、按局分组交叉验证、全量重拟合；返回报告（含浮点权重）。"""
+    """单个 ``λ_B`` 的成对拟合（Newton + Armijo；确定性、不取随机数）；返回报告。"""
     import numpy as np
 
     from sgs.agents import weights as weight_module
 
+    if lambda_b <= 0:
+        raise SystemExit(f"λ_B 必须为正：{lambda_b}")
     keys = tuple(samples.keys)
+    if not keys:
+        raise SystemExit("样本里没有任何 B 键")
+    for key in keys:
+        if weight_module.family(key) != weight_module.FAMILY_B:
+            raise SystemExit(f"成对拟合只收 B 族键，收到 {key!r}")
     anchor = np.asarray([weight_module.anchor(key) for key in keys], dtype=np.float64)
-    # 截距列（值恒 1）：线性模型没有它就拟合不了非零均值（多数决策是 0 分）。
-    # 截距**不带惩罚**（mask=0）——它只吸收结局的均值，不参与候选排序。
-    bias = len(keys)
-    rows = [
-        (idx + [bias], vals + [1.0], y, seed) for idx, vals, y, seed in samples.rows
+    matrix = _matrix(np, samples)
+    pair_chosen = np.frombuffer(samples.chosen, dtype=np.int32)[
+        np.frombuffer(samples.pair_query, dtype=np.int32)
     ]
-    anchor = np.append(anchor, 0.0)
-    mask = np.append(np.ones(len(keys)), 0.0)
-    index, values, starts, row_index, target = _build_arrays(np, rows)
+    pair_alt = np.frombuffer(samples.pair_alt, dtype=np.int32)
+    # 行为克隆：选中候选恒为被偏好方，结局不进方向位（用户 2026-11-26 裁定）。
+    # 样本表里的 query_sign 仍保留每局胜负，供后续票做结局加权；本票等权。
+    y_pair = np.full(len(samples.pair_query), samples.scale, dtype=np.float64)
 
-    fold_rows: dict[int, list[int]] = {fold: [] for fold in range(folds)}
-    for position, (_idx, _val, _y, seed) in enumerate(samples.rows):
-        if seed % CV_STRIDE == 0:
-            fold_rows[seed % folds].append(position)
-
-    cv: list[dict[str, Any]] = []
-    for lam in LAMBDA_GRID:
-        errors: list[float] = []
-        for fold in range(folds):
-            train_rows = [
-                rows[p]
-                for other in range(folds)
-                if other != fold
-                for p in fold_rows[other]
-            ]
-            test_rows = [rows[p] for p in fold_rows[fold]]
-            if not train_rows or not test_rows:
-                continue
-            idx, val, st, ridx, tgt = _build_arrays(np, train_rows)
-            w = _solve_ridge(np, idx, val, st, ridx, tgt, anchor, lam * mask)
-            errors.append(_mean_squared(np, test_rows, w))
-        if errors:
-            cv.append({"lambda": lam, "mse": float(sum(errors) / len(errors))})
-
-    if lambda_b is None or lambda_ac is None:
-        best = min(cv, key=lambda row: (row["mse"], row["lambda"]))
-        lam = float(best["lambda"])
-        if lambda_b is None:
-            lambda_b = lam
-        if lambda_ac is None:
-            lambda_ac = lam
-    # **分族 λ**：B 族（决策路径）的橡皮筋要比 A / C 族（结局读数）强得多——B 的 λ 按
-    # "决策 diff 有界"选（票面预注册），A / C 的 λ 按结局 MSE 选。同一条 λ 会让 B 族塌到 0
-    # （2026-11-26 实测：λ=3 → B 均值 0.11、test_ai_cases 13/80 红）。
-    penalty = np.asarray(
-        [
-            lambda_b if weight_module.family(key) == weight_module.FAMILY_B else lambda_ac
-            for key in keys
-        ]
-        + [0.0],
-        dtype=np.float64,
-    )
-    w = _solve_ridge(np, index, values, starts, row_index, target, anchor, penalty)
-    intercept = float(w[bias])
-    w = w[: len(keys)]
+    w = anchor.copy()
+    history: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    converged = False
+    loss = float("nan")
+    for iteration in range(max_iterations):
+        gradient, hessian, loss, data_loss = _gradient_hessian(
+            np, matrix, pair_chosen, pair_alt, y_pair, w, anchor, lambda_b
+        )
+        norm = float(np.max(np.abs(gradient)))
+        history.append({"iteration": iteration, "loss": loss, "gradient_inf": norm})
+        if norm <= tolerance:
+            converged = True
+            break
+        try:
+            direction = np.linalg.solve(hessian, -gradient)
+        except np.linalg.LinAlgError as error:
+            raise SystemExit(f"Newton 步的 Hessian 奇异（λ_B={lambda_b}）：{error}") from error
+        slope = float(gradient @ direction)
+        if slope >= 0:
+            raise SystemExit(f"Newton 方向不是下降方向（λ_B={lambda_b}）：{slope}")
+        step = 1.0
+        for _ in range(30):
+            candidate = w + step * direction
+            value = _objective(
+                np, matrix, pair_chosen, pair_alt, y_pair, candidate, anchor, lambda_b
+            )
+            if value <= loss + 1e-4 * step * slope:
+                break
+            step *= 0.5
+        else:
+            raise SystemExit(f"线搜索失败（λ_B={lambda_b}，第 {iteration} 步）")
+        if float(np.max(np.abs(step * direction))) <= 1e-12:
+            w = candidate
+            converged = True
+            break
+        w = candidate
+    else:
+        gradient, hessian, loss, data_loss = _gradient_hessian(
+            np, matrix, pair_chosen, pair_alt, y_pair, w, anchor, lambda_b
+        )
 
     fitted = {
         key: float(value)
@@ -466,41 +514,58 @@ def fit_weights(
         key: round(value * weight_module.WEIGHT_SCALE) for key, value in fitted.items()
     }
     return {
-        "schema": "sgs.fit.report.v1",
-        "samples": len(samples.rows),
+        "schema": "sgs.fit.pairwise.report.v1",
+        "samples": samples.queries,
+        "pairs": samples.pairs,
+        "games": samples.games,
         "keys": len(keys),
-        "lambda": None,
         "lambda_b": float(lambda_b),
-        "lambda_ac": float(lambda_ac),
-        "cv": cv,
         "target_scale": samples.scale,
-        "intercept": intercept,
+        "target": "chosen-over-alternative",
+        "outcome": "not used in the pair direction (behavior cloning)",
+        "loss": float(loss),
+        "pair_loss": float(data_loss),
+        "mean_pair_loss": (
+            float(data_loss / samples.pairs) if samples.pairs else float("nan")
+        ),
+        "iterations": len(history),
+        "converged": converged,
+        "gradient_inf": history[-1]["gradient_inf"] if history else float("nan"),
+        "elapsed_s": round(time.perf_counter() - started, 1),
+        "history": history,
         "float_weights": fitted,
         "integer_weights": quantized,
         "anchor": {
-            key: float(value)
-            for key, value in zip(keys, anchor[: len(keys)], strict=True)
+            key: float(value) for key, value in zip(keys, anchor, strict=True)
         },
     }
 
 
-def render_weights_data(report: dict[str, Any]) -> str:
+def render_weights_data(
+    report: dict[str, Any], ac_rows: Iterable[tuple[str, int]] = ()
+) -> str:
     """把报告渲染成 ``src/sgs/agents/weights_data.py`` 的**整块**源码。
 
-    行长固定、键序按字典序（确定性）：同一份报告渲染两次逐字节相同。
+    B 族来自成对拟合（本票），A / C 族由 ``--ac-report`` 从 08b 的首轮报告原样搬入
+    （票面：A/C 是票 09 的输入，与决策无关）。行长固定、键序按字典序——同一份报告渲染
+    两次逐字节相同。
     """
-    shared = sorted(
-        (key, value) for key, value in report["integer_weights"].items() if key.startswith("b|")
-    )
-    mode_blocks = sorted(
-        (key, value) for key, value in report["integer_weights"].items() if not key.startswith("b|")
-    )
+    shared = sorted(report["integer_weights"].items())
+    position = sorted(tuple(row) for row in ac_rows)
+    for key, _value in shared:
+        if not key.startswith("b|"):
+            raise SystemExit(f"成对拟合的报告里混进了非 B 键：{key!r}")
+    for key, _value in position:
+        if key.startswith("b|"):
+            raise SystemExit(f"A / C 块里混进了 B 键：{key!r}")
     lines = [
-        '"""拟合出来的整数权重（`ai-view` 票 08b；生成文件，**不要手改**）。',
+        '"""拟合出来的整数权重（`ai-view` 票 08c；生成文件，**不要手改**）。',
         "",
-        f"样本 {report['samples']} 条 · 键 {report['keys']} 个 · λ_B = {report['lambda_b']!r}"
-        f" / λ_AC = {report['lambda_ac']!r} · 目标量纲 S = {report['target_scale']!r}。",
-        "值为 ``round(w × 1000)``（``sgs.agents.weights.WEIGHT_SCALE``）；读口除回 1000。",
+        "由 ``tools/sgs_train/fit.py`` 整块重写；每行 = ``(键, round(w × 1000))``。",
+        "B 族 = 成对偏好拟合（票 08c）；A / C 族沿用 08b 第一轮的值（票 09 的输入）。",
+        f"样本 {report['samples']} 条询问 / {report['pairs']} 对 · 键 {report['keys']} 个 · "
+        f"λ_B = {report['lambda_b']!r} · 目标量纲 S = {report['target_scale']!r}"
+        "（行为克隆：选中动作恒被偏好）。",
         '"""',
         "",
         "from __future__ import annotations",
@@ -522,7 +587,7 @@ def render_weights_data(report: dict[str, Any]) -> str:
     lines.append(")")
     lines.append("")
     lines.append("IDENTITY_AC_ROWS: tuple[tuple[str, int], ...] = (")
-    lines.extend(f"    ({key!r}, {value})," for key, value in mode_blocks)
+    lines.extend(f"    ({key!r}, {value})," for key, value in position)
     lines.append(")")
     lines.append("")
     return "\n".join(lines)
@@ -531,6 +596,19 @@ def render_weights_data(report: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def _ac_rows(path: Path) -> list[tuple[str, int]]:
+    """从 08b 的拟合报告里取 A / C 族的整数值（B 族由本票重拟合，不收）。"""
+    report = json.loads(path.read_text(encoding="utf-8"))
+    rows = report.get("integer_weights")
+    if not isinstance(rows, dict):
+        raise SystemExit(f"{path} 不是拟合报告（缺 integer_weights）")
+    return [
+        (str(key), int(value))
+        for key, value in rows.items()
+        if not str(key).startswith("b|")
+    ]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -543,16 +621,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     collect.add_argument("--mode", default="identity")
     collect.add_argument("--seed-start", type=int, default=90000)
     collect.add_argument("--workers", type=int, default=8)
+    collect.add_argument(
+        "--alternatives",
+        type=int,
+        default=ALTERNATIVES,
+        help=f"每条询问保留的其它候选上限 K（缺省 {ALTERNATIVES}）",
+    )
     collect.add_argument("--out", type=Path, required=True)
     collect.add_argument("--summary", type=Path, default=None)
 
     fit = sub.add_parser("fit", help="拟合并打印 weights_data.py（训练 venv）。")
     fit.add_argument("--samples", type=Path, required=True)
+    fit.add_argument("--lambda-b", type=float, required=True, help="B 族的 λ（预注册网格之一）")
     fit.add_argument("--out", type=Path, default=None)
     fit.add_argument("--report", type=Path, default=None)
-    fit.add_argument("--folds", type=int, default=FOLD_COUNT)
-    fit.add_argument("--lambda-b", type=float, default=None, help="B 族的 λ（决策路径）")
-    fit.add_argument("--lambda-ac", type=float, default=None, help="A / C 族的 λ（局面读数）")
+    fit.add_argument(
+        "--ac-report",
+        type=Path,
+        default=None,
+        help="08b 第一轮报告：把它的 A / C 族整数值原样并进 weights_data.py",
+    )
+    fit.add_argument("--max-iterations", type=int, default=60)
+    fit.add_argument("--tolerance", type=float, default=1e-6)
 
     args = parser.parse_args(argv)
     if args.command == "collect":
@@ -561,6 +651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             players=args.players,
             mode=args.mode,
             workers=args.workers,
+            alternatives=args.alternatives,
             out_path=args.out,
         )
         text = json.dumps(summary, ensure_ascii=False, indent=2)
@@ -570,11 +661,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.summary.write_text(text + "\n", encoding="utf-8")
         return 0
 
-    samples = load_samples(args.samples)
-    report = fit_weights(
-        samples, folds=args.folds, lambda_b=args.lambda_b, lambda_ac=args.lambda_ac
+    samples = load_pair_samples(args.samples)
+    report = fit_pairwise(
+        samples,
+        lambda_b=args.lambda_b,
+        max_iterations=args.max_iterations,
+        tolerance=args.tolerance,
     )
-    source = render_weights_data(report)
+    source = render_weights_data(
+        report,
+        () if args.ac_report is None else _ac_rows(args.ac_report),
+    )
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(

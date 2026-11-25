@@ -102,8 +102,15 @@ def _batch() -> _Batch:
     观察点是**两处独立入口**：``heuristic._SCORERS``（生产派发表，与 ``respond`` 同一条路）
     给的 float，与 ``features.frame`` 自己走同一条派发算出的特征帧。两者互不引用，故
     "特征漏了一项"会让它们对不上。
+
+    **批次轨迹与权重表无关**：``FRAME_DIGEST`` 钉的是**提取层**（项名 / 次序 / 键形状），
+    不是某一版权重下的决策路径。08c 落仓 B 族权重后 ``respond`` 会走带权分支、轨迹随权重
+    变；把 ``has_fitted_b`` 临时压成 False（= 08a 的手写路径）后，四局询问序列与落权重前
+    逐字相同，摘要因此仍只对提取层负责。
     """
     batch = _Batch()
+    original_has_fitted_b = weights.has_fitted_b
+    weights.has_fitted_b = lambda: False
 
     def run(query) -> None:
         batch.queries += 1
@@ -158,6 +165,7 @@ def _batch() -> _Batch:
             )
     finally:
         HeuristicPlayer.respond = original
+        weights.has_fitted_b = original_has_fitted_b
     return batch
 
 
@@ -736,14 +744,21 @@ def test_a_key_without_samples_reads_its_anchor_not_zero():
     """**0 样本不归零**：没有样本的键读到 ``anchor``（手写值），不是 0 分。
 
     否则新武将上线的头几天，AI 恰好对"最新那条技能"没有任何意见。三族各来一条：B = 1.0、
-    C = 既有关系系数、A = ``SKILL_VALUES`` 的手写值（这里取 4.0 的【奸雄】）。
+    C = 既有关系系数、A = 查不到标量时的典型价（``unregistered_anchor``，今天 2.0）。
+    所选键必须**真的不在** 08b 落仓的 A / C 表里——上线权重后，用``move:LOSE`` 这类
+    已观测事实会测到"拟合值"，而不是"0 样本回锚"。
     """
     keys = {
         weights.b_key("一个还没人登记过的项名"): weights.B_ANCHOR,
-        weights.c_key("move:LOSE", "known_enemy"): weights.C_ANCHORS["known_enemy"],
+        # 事实类用**虚构**的（`move:LOSE` 已经在 08b 的 A / C 首轮拟合里有值了）。
+        weights.c_key("move:__NEVER_OBSERVED__", "known_enemy"): weights.C_ANCHORS[
+            "known_enemy"
+        ],
+        # 查不到的技能读**典型价**（常量档众数 2.0），不是 0；4.0 的【奸雄】常量锚由下一条
+        # `test_an_unregistered_or_shaped_skill_still_reads_a_nonzero_anchor` 覆盖。
         weights.a_key(
-            "hero.caocao.jianxiong", "DAMAGE_TAKE", 0, "move:LOSE", "known_enemy"
-        ): 4.0,
+            "hero.nosuch.never_observed", "TURN_START", 0, "move:DRAW", "self"
+        ): weights.unregistered_anchor(),
     }
 
     for key, expected in keys.items():
@@ -753,9 +768,9 @@ def test_a_key_without_samples_reads_its_anchor_not_zero():
     # "没有样本"是真的：两类表里都没有这一行（不是"表里恰好写了锚"）。
     assert weights.SHARED_B.value(weights.b_key("一个还没人登记过的项名")) is None
     a_key = weights.a_key(
-        "hero.caocao.jianxiong", "DAMAGE_TAKE", 0, "move:LOSE", "known_enemy"
+        "hero.nosuch.never_observed", "TURN_START", 0, "move:DRAW", "self"
     )
-    c_key = weights.c_key("move:LOSE", "known_enemy")
+    c_key = weights.c_key("move:__NEVER_OBSERVED__", "known_enemy")
     assert weights.IDENTITY_AC.value(a_key) is None
     assert weights.IDENTITY_AC.value(c_key) is None
 

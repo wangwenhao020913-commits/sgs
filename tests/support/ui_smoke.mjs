@@ -2944,7 +2944,12 @@ while (!ui.state.view.finished && steps < 4000) {
     if (p.kind === "SELECT_CARDS") {
       ui.state.selectedOption = p.legal_actions.findIndex((a) => a.kind === "SelectCards");
       ui.renderPending(ui.state.view);
-      if ($("t-options").children.length === 0) renderErrors.push("SELECT_CARDS 没有渲染出选择面");
+      // U2 起 SELECT_CARDS 有多条渲染路径：`slots` 才把选择面铺在控件区；`own-hand-pick`
+      // 一类是牌桌上的手牌 / 装备直接点（点一张即提交，提交键按设计恒灰）。这里只对
+      // `slots` 断言控件区有面——别拿一条形状的判据去卡另一条。
+      if (ui.renderKind(p, p.legal_actions) === "slots" && $("t-options").children.length === 0) {
+        renderErrors.push("SELECT_CARDS 没有渲染出选择面");
+      }
     }
     // U2-03：任何一类询问的初始面都不许出现逐条候选按钮（含点过技能 / 选项之后的面）。
     if (candidateRowButtons().length) {
@@ -2988,6 +2993,13 @@ while (!ui.state.view.finished && steps < 4000) {
   } else {
     ui.state.selectedOption = terminal >= 0 ? terminal : 0;
   }
+  if (p.kind === "SELECT_CARDS" && ui.renderKind(p, p.legal_actions) === "own-hand-pick") {
+    // 单张自己区域面：真实交互 = 点一张亮起的牌（`submitOwnHandSinglePick` 把面内位置写进
+    // `picks` 后立刻提交）。驱动方等价地取第 0 槽位——候选本身是逐槽位的一条
+    // `SelectCards{picks:[i]}`，不补 `picks` 时 `buildAction()` 会造出 picks=[] 的非法条。
+    ui.state.selectedOption = p.legal_actions.findIndex((a) => a.kind === "SelectCards");
+    ui.state.picks = [0];
+  }
   const chosen = ui.buildAction()
     || (ui.needsPicker(p) ? p.legal_actions[0] : p.legal_actions[ui.state.selectedOption !== null ? ui.state.selectedOption : 0]);
   // 注意：`SelectCards` 的 buildAction 结果是 `Object.assign({}, 候选, {picks})`，**键序**与
@@ -2995,7 +3007,8 @@ while (!ui.state.view.finished && steps < 4000) {
   const chosenAt = p.legal_actions.findIndex((a) => a.kind === chosen.kind);
   if (chosenAt < 0) { renderErrors.push(`${p.kind}: 选不出一个候选`); break; }
   ui.state.selectedOption = chosenAt;
-  if (chosen.kind === "SelectCards" && ui.stepDialogKind(p) !== ui.DIALOG_KINDS.reveal) {
+  if (chosen.kind === "SelectCards" && ui.renderKind(p, p.legal_actions) === "slots"
+      && ui.stepDialogKind(p) !== ui.DIALOG_KINDS.reveal) {
     // 亮牌模板（U2-11 / 五谷）是内容按钮**一击即提交**：右端提交键恒灰，由
     // `renderReveal` 的牌面 click 送出那一条 `SelectCards`。驱动方在这里只补 `picks`
     // （等价于点了第 N 张亮牌），不拿右端按钮当判据。
@@ -3012,7 +3025,7 @@ while (!ui.state.view.finished && steps < 4000) {
       renderErrors.push(`SelectCards 选够 ${least} 张后提交按钮仍不可点 [spec.total=${JSON.stringify(p.spec && p.spec.total)} slots=${(p.slots||[]).length} picks=${ui.state.picks.length} selectedOption=${ui.state.selectedOption} choice="${$("t-choice").textContent}"]`);
       break;
     }
-  } else if (chosen.kind === "SelectCards") {
+  } else if (chosen.kind === "SelectCards" && ui.renderKind(p, p.legal_actions) === "slots") {
     // 亮牌：等价于"点了第 least 张亮牌"——补 `picks` 后由 `buildAction()` 造同一条
     // `SelectCards`；右端按钮**本来就该是灰的**（一击提交，没有第二个提交点）。
     const least = (p.spec && p.spec.total && p.spec.total[0]) || 1;
@@ -3032,7 +3045,7 @@ while (!ui.state.view.finished && steps < 4000) {
   const action = ui.buildAction();
   if (!action) { renderErrors.push(`${p.kind}: buildAction() 返回 null`); break; }
   if (!p.legal_actions.some((a) => JSON.stringify(a) === JSON.stringify(action))) {
-    renderErrors.push(`${p.kind}: buildAction() 造出了不在候选里的 Action`);
+    renderErrors.push(`${p.kind}: buildAction() 造出了不在候选里的 Action [built=${JSON.stringify(action)} legal=${JSON.stringify(p.legal_actions.map((a) => a.kind + ":" + JSON.stringify(a.picks || a.cards || a.choice || "")))}]`);
     break;
   }
   const before = calls.length;

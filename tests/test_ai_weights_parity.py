@@ -1,4 +1,4 @@
-"""整数权重的 parity 与橡皮筋（`ai-view` 票 08b；spec §2.7 / 票面验收 1、2）。
+"""整数权重的 parity 与橡皮筋（`ai-view` 票 08b / 08c；spec §2.7 / 票面验收 1、2）。
 
 两条判据都**不依赖仓外产物**（`.scratch/` 是 gitignore 的，门禁不能读它）：
 
@@ -6,11 +6,14 @@
    量化格 ``[q − 0.5, q + 0.5] / 1000`` 里，故"两个端点都不改决策"⇒ 格内任何浮点值都不改
    （权重连续变化时 argmax 是分段常值）。这比"和某一组浮点值比"更强，也不需要把浮点表
    复制进仓。
-2. **橡皮筋是连续的**：同一把 ``FIT_LAMBDA`` 下，样本 5 条的键被按在锚附近，样本多的键
-   自由移动。用一维闭式解钉住——不需要 numpy，也不需要重跑拟合。
+2. **橡皮筋是连续的**（票 08c 的成对目标）：同一把 ``FIT_LAMBDA`` 下，样本 5 对的键被按在
+   锚附近，样本多的键自由移动。用一维成对 logistic 的单调梯度求根钉住——不需要 numpy，
+   也不需要重跑拟合。
 """
 
 from __future__ import annotations
+
+import math
 
 import pytest
 
@@ -92,10 +95,36 @@ def test_integer_weights_keep_every_decision_of_the_quantization_cell():
     assert not mismatches, "量化格端点改了决策：" + "；".join(mismatches[:5])
 
 
-def _ridge_one_key(sample_scores: list[float], anchor: float, lam: float) -> float:
-    """一维闭式解：``w = (Σ x·y + λa) / (Σ x² + λ)``（``x = 1`` 每个样本）。"""
-    total = sum(sample_scores)
-    return (total + lam * anchor) / (len(sample_scores) + lam)
+def _sigmoid(value: float) -> float:
+    """一维 logistic（正负两段各自 exp，纯 Python，不 import numpy）。"""
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exponent = math.exp(value)
+    return exponent / (1.0 + exponent)
+
+
+def _pairwise_one_key(sample_scores: list[float], anchor: float, lam: float) -> float:
+    """一维成对 logistic 的闭式求根：``min Σ softplus(−y·u) + λ(u)²``（``u = w − anchor``）。
+
+    每个样本是一对"选中候选有这条键、另一候选没有"：``d = 1``、``y = +S``（行为克隆，
+    08c 的落仓口径）。梯度 ``Σ −y·σ(−y·u) + 2λu`` 对 ``u`` 单调（目标凸），用二分求根；
+    与拟合器的 Hessian 口径（``h = σ(1−σ)·y²``）同一个目标，只是维度为 1、不求数值解。
+    """
+    low, high = -5.0, 5.0
+
+    def gradient(u: float) -> float:
+        total = 2.0 * lam * u
+        for y in sample_scores:
+            total += -y * _sigmoid(-y * u)
+        return total
+
+    for _ in range(200):
+        middle = (low + high) / 2.0
+        if gradient(middle) > 0.0:
+            high = middle
+        else:
+            low = middle
+    return anchor + (low + high) / 2.0
 
 
 def test_the_rubber_band_keeps_five_samples_near_the_anchor():
@@ -105,13 +134,13 @@ def test_the_rubber_band_keeps_five_samples_near_the_anchor():
 
     anchor = 1.0
     scale = 3.5
-    rare = _ridge_one_key([scale, -scale, scale, -scale, scale], anchor, FIT_LAMBDA)
-    common = _ridge_one_key([scale] * 5000, anchor, FIT_LAMBDA)
+    rare = _pairwise_one_key([scale] * 5, anchor, FIT_LAMBDA)
+    common = _pairwise_one_key([scale] * 50_000, anchor, FIT_LAMBDA)
 
     assert abs(rare - anchor) <= 0.1 * anchor, (
         f"5 条样本的键被拉到了 {rare:.3f}（锚 {anchor}）：皮筋没有连续性"
     )
-    assert common > anchor * 1.1, f"5000 条样本的键仍被按在 {common:.3f}：λ 盖过了数据"
+    assert common > anchor * 1.1, f"50000 条样本的键仍被按在 {common:.3f}：λ 盖过了数据"
 
 
 def test_the_shipped_table_is_integer_millis():
