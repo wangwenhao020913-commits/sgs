@@ -722,29 +722,14 @@ IDENTITY_ALLOWED_SGS_MODULES = frozenset({"sgs.data", "sgs.state"})
 
 
 def _identity_visibility_offenders(tree: ast.Module) -> list[str]:
-    """身份信念模块的越权 import（空列表 = 只碰可见面）。抽出来是为了跑合成反例。"""
-    offenders: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if node.level:  # 相对导入留在本子包内
-                continue
-            allowed = IDENTITY_IMPORT_ALLOWLIST.get(node.module or "")
-            if allowed is None:
-                offenders.append(f"{node.lineno} from {node.module} import …")
-                continue
-            offenders.extend(
-                f"{node.lineno} from {node.module} import {alias.name}"
-                for alias in node.names
-                if alias.name not in allowed
-            )
-        elif isinstance(node, ast.Import):
-            offenders.extend(
-                f"{node.lineno} import {alias.name}"
-                for alias in node.names
-                if alias.name.split(".")[0] == "sgs"
-                and alias.name not in IDENTITY_ALLOWED_SGS_MODULES
-            )
-    return offenders
+    """身份信念模块的越权 import（空列表 = 只碰可见面）。抽出来是为了跑合成反例。
+
+    判据与第十节**共用** :func:`_import_offenders`：同一套规则、两张 allowlist。三份
+    差不多一样的扫描器是同一个 bug 的第三份拷贝（票 08 的教训）。
+    """
+    return _import_offenders(
+        tree, IDENTITY_IMPORT_ALLOWLIST, IDENTITY_ALLOWED_SGS_MODULES
+    )
 
 
 def test_the_identity_module_only_imports_the_visible_surface():
@@ -773,3 +758,271 @@ def test_the_identity_import_scan_goes_red_on_an_omniscient_import():
     for needle in ("GameState", "sgs.engine", "sgs.skills"):
         assert needle in reds, f"{needle} 应被判红：{reds}"
     assert not _identity_visibility_offenders(green), "可见面 import 不该被判红"
+
+
+# ---------------------------------------------------------------------------
+# 10. 特征 / 权重模块：B 族**不许另算**（`ai-view` 票 08a）
+# ---------------------------------------------------------------------------
+
+FEATURES = SOURCE_ROOT / "agents" / "features.py"
+"""三族特征提取（票 08a）。它进启发式的传递闭包要等 08b 接线，故**现在就**扫。
+
+与 identity 那一节同姿态：可见面白名单 + 一条本模块特有的纪律。这一节的第二条是本票的
+验收判据——"``features.py`` 里不得出现距离 / 斩杀 / 记牌的重新实现"。判据落成**闭集**
+（函数名白名单 + 局面量的实现名黑名单）而不是"看一眼"：委托与重写用的是同一批名字，
+出现即回来评审。
+"""
+
+WEIGHTS = SOURCE_ROOT / "agents" / "weights.py"
+"""权重结构与先验中心（票 08a）：纯数据 + 键语法 + 锚，故它的白名单比 features 更窄。"""
+
+TRAIN_SERVE_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
+    "__future__": frozenset({"annotations"}),
+    "collections.abc": frozenset({"Mapping", "Sequence"}),
+    "dataclasses": frozenset({"dataclass"}),
+    "functools": frozenset({"lru_cache"}),
+    "math": frozenset(),
+    "types": frozenset({"MappingProxyType"}),
+    # 关系类的闭集要拿身份（``Identity``）与模式（``Mode``）比对；两者都是**规则常数**，
+    # 不是状态 / 记录流。``PlayerView`` / ``PublicEvent`` / ``Action`` / ``Query`` 是询问
+    # 自带的视图、公开事实与协议类型。
+    "sgs.data": frozenset({"Identity", "Mode"}),
+    "sgs.state": frozenset({"Action", "PlayerView", "PublicEvent", "Query"}),
+}
+"""特征 / 权重模块允许的**非相对** import（与启发式的可见面同一条口径）。"""
+
+TRAIN_SERVE_ALLOWED_SGS_MODULES = frozenset({"sgs.data", "sgs.state"})
+"""``import sgs.x`` 形态允许的整包名（``sgs.engine`` / ``sgs.skills`` 一律判红）。"""
+
+LAZY_ONLY_MODULE_IMPORTS = frozenset({"heuristic"})
+"""相对 import 里**只许在函数体内**出现的那几个（08b 起 ``heuristic`` → 这两个模块单向依赖）。
+
+顶层 ``from . import heuristic`` 会立刻成环；函数内的延迟 import 是这条边的唯一出口，两个
+模块的 docstring 都写了它存在的理由（A 族的锚 / ``Score`` / 敌我判据）。
+"""
+
+FEATURES_FUNCTIONS = frozenset(
+    {
+        "relation_class",
+        "_relation",
+        "b_family",
+        "c_family",
+        "a_family",
+        "_involved_seats",
+        "frame",
+        "_scored_items",
+        "extract",
+        "candidate_score",
+        "position_score",
+        "linear",
+    }
+)
+"""``features.py`` 的**顶层函数闭集**：加一个就回来评审（"没有第二套局面量实现"的机械面）。"""
+
+FEATURES_METHODS = frozenset({"b", "position", "as_mapping", "keys"})
+"""``FeatureFrame`` 的方法闭集（帧上的读口只有这四个）。"""
+
+BOARD_QUANTITY_NAMES = frozenset(
+    {
+        "distance",
+        "lethal",
+        "damage_to",
+        "has_card_probability",
+        "dodge_probability",
+        "flash_probability",
+        "unknown_pool",
+        "unknown_card_expectation",
+        "conserved_card_count",
+        "visible_card_faces",
+        "verified_deck_profile",
+        "expected_damage",
+        "card_value",
+    }
+)
+"""**局面量**的实现名（``heuristic.py`` 里那几个算子的名字，去掉前导下划线）。
+
+B 族的值必须来自既有打分器的 trace（同一个函数），故这些名字出现在特征模块里
+**一律回来评审**：委托与重写用的是同一批名字，"不许另算"的判据因此是同一条。
+"""
+
+
+def _import_offenders(
+    tree: ast.Module,
+    allowlist: dict[str, frozenset[str]],
+    allowed_sgs_modules: frozenset[str],
+) -> list[str]:
+    """这棵树的**非相对** import 越权项（空列表 = 只碰可见面）。抽出来是为了跑合成反例。"""
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:  # 相对导入留在本子包内（延迟 import 由下一条断言管）
+                continue
+            allowed = allowlist.get(node.module or "")
+            if allowed is None:
+                offenders.append(f"{node.lineno} from {node.module} import …")
+                continue
+            offenders.extend(
+                f"{node.lineno} from {node.module} import {alias.name}"
+                for alias in node.names
+                if alias.name not in allowed
+            )
+        elif isinstance(node, ast.Import):
+            offenders.extend(
+                f"{node.lineno} import {alias.name}"
+                for alias in node.names
+                if alias.name.split(".")[0] == "sgs"
+                and alias.name not in allowed_sgs_modules
+            )
+    return offenders
+
+
+def _module_level_relative_imports(tree: ast.Module) -> list[tuple[str, int]]:
+    """**模块顶层**（不在任何函数里）的相对 import：``[(模块名, 行号)]``。
+
+    只看``tree.body``的直系语句：``if`` / ``try`` 里包一层仍然是"导入模块时就执行"，
+    但这两个模块里没有那种写法，出现时这条会漏——漏的那一半由"闭集"的两条断言兜住。
+    """
+    found: list[tuple[str, int]] = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level:
+            for alias in node.names:
+                found.append((alias.name, node.lineno))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                found.append((alias.name, node.lineno))
+    return found
+
+
+def _lazy_import_offenders(tree: ast.Module) -> list[str]:
+    """顶层 import 了"只许延迟 import"的模块 ⇒ 一条违规（08b 起会成环）。"""
+    return [
+        f"{lineno} 顶层 import 了 {name}（只许在函数体内延迟 import）"
+        for name, lineno in _module_level_relative_imports(tree)
+        if name in LAZY_ONLY_MODULE_IMPORTS
+    ]
+
+
+def _function_names(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """``(顶层函数名, 类方法名)``。"""
+    definitions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    functions = {node.name for node in tree.body if isinstance(node, definitions)}
+    methods = {
+        child.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        for child in node.body
+        if isinstance(child, definitions)
+    }
+    return functions, methods
+
+
+def _board_quantity_offenders(source: str) -> list[str]:
+    """源码里出现的**局面量实现名**（空列表 = 干净）。抽出来是为了能对它跑合成反例。"""
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        name = None
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = node.name
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+        elif isinstance(node, ast.Name):
+            name = node.id
+        if name is not None and name.lstrip("_") in BOARD_QUANTITY_NAMES:
+            offenders.append(f"{getattr(node, 'lineno', '?')} {name}")
+    return offenders
+
+
+def test_the_feature_and_weight_modules_only_import_the_visible_surface():
+    """`ai-view` 票 08a：两个新模块只碰可见面（视角 / 询问 / 规则常数）。"""
+    for path in (FEATURES, WEIGHTS):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        offenders = _import_offenders(
+            tree, TRAIN_SERVE_IMPORT_ALLOWLIST, TRAIN_SERVE_ALLOWED_SGS_MODULES
+        )
+
+        assert not offenders, f"{path.name} 碰到了全知面：" + "；".join(offenders)
+
+
+def test_the_feature_and_weight_modules_import_the_heuristic_only_lazily():
+    """启发式只许**函数内**延迟 import：08b 起 ``heuristic → features/weights`` 是单向的。"""
+    for path in (FEATURES, WEIGHTS):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        offenders = _lazy_import_offenders(tree)
+
+        assert not offenders, f"{path.name}：" + "；".join(offenders)
+
+
+def test_the_feature_module_defines_no_board_quantity_of_its_own():
+    """**B 族不许另算**：``features.py`` 里没有距离 / 斩杀 / 记牌 / 概率的第二次实现。"""
+    source = FEATURES.read_text(encoding="utf-8")
+    offenders = _board_quantity_offenders(source)
+
+    assert not offenders, (
+        "特征模块里出现了局面量的实现："
+        + "；".join(offenders)
+        + "（B 族的值必须来自既有打分器的 trace，不许另算一份）"
+    )
+    assert len(FEATURES_FUNCTIONS) >= 10, "函数闭集退化了；判据可能失效"
+
+
+def test_the_feature_module_function_set_is_closed():
+    """函数闭集：``features.py`` 的顶层函数与 ``FeatureFrame`` 方法**一个不多**。
+
+    加一个函数 = 回来评审"它算的是既有实现已经算过的东西吗"。这条与上一条是同一份纪律的
+    两半：上一条按**名字**拦已知的局面量，这一条按**清单**拦"换了个名字的新算子"。
+    """
+    tree = ast.parse(FEATURES.read_text(encoding="utf-8"), filename=str(FEATURES))
+    functions, methods = _function_names(tree)
+
+    assert functions == FEATURES_FUNCTIONS, (
+        f"features.py 的函数集变了：多 {sorted(functions - FEATURES_FUNCTIONS)} / "
+        f"少 {sorted(FEATURES_FUNCTIONS - functions)}"
+    )
+    assert methods == FEATURES_METHODS, (
+        f"FeatureFrame 的方法集变了：多 {sorted(methods - FEATURES_METHODS)} / "
+        f"少 {sorted(FEATURES_METHODS - methods)}"
+    )
+
+
+def test_the_board_quantity_scan_goes_red_on_a_second_implementation():
+    """合成反例：在特征模块里写一份"距离 / 斩杀 / 记牌"就必红（判据接线没坏）。"""
+    red = (
+        "def _distance(a, b):\n"
+        "    return min((a - b) % 8, (b - a) % 8)\n"
+        "\n"
+        "def lethal(target):\n"
+        "    return target.hp <= 1\n"
+    )
+    green = (
+        "def relation_class(view, seat):\n"
+        "    return 'self' if seat == view.seat else 'unknown'\n"
+    )
+
+    reds = "\n".join(_board_quantity_offenders(red))
+    for needle in ("_distance", "lethal"):
+        assert needle in reds, f"{needle} 应被判红：{reds}"
+    assert not _board_quantity_offenders(green), "干净的特征函数不该被判红"
+
+
+def test_the_import_and_lazy_scans_catch_a_red_module():
+    """合成反例：顶层 ``from . import heuristic`` 与 ``sgs.engine`` 都必须判红。"""
+    red = ast.parse(
+        "from . import heuristic\n"
+        "from sgs.state import GameState\n"
+        "import sgs.skills\n"
+    )
+    green = ast.parse(
+        "from sgs.data import Identity, Mode\n"
+        "from sgs.state import PlayerView, Query\n"
+        "from . import weights\n"
+    )
+
+    assert _lazy_import_offenders(red), "顶层 import 启发式应被判红"
+    assert _import_offenders(
+        red, TRAIN_SERVE_IMPORT_ALLOWLIST, TRAIN_SERVE_ALLOWED_SGS_MODULES
+    ), "sgs.skills / GameState 应被判红"
+    assert not _lazy_import_offenders(green), "``from . import weights`` 是允许的"
+    assert not _import_offenders(
+        green, TRAIN_SERVE_IMPORT_ALLOWLIST, TRAIN_SERVE_ALLOWED_SGS_MODULES
+    ), "可见面 import 不该被判红"

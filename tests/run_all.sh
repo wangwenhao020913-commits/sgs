@@ -111,6 +111,7 @@ tier_patterns() {
         'tests/test_journal.py' \
         'tests/test_engine_*.py' \
         'tests/test_source_discipline.py' \
+        'tests/test_ai_features.py' \
         'tests/test_skills.py' \
         'tests/test_virtual_ids.py' \
         'tests/test_card_family_sites.py' \

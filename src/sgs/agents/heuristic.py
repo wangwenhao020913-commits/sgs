@@ -4409,12 +4409,19 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
 
 
 def _constant(value: float) -> Callable[[Query, Action, PlayerView], float]:
-    """常量收益的语义条目（大多数"发动即净赚"的技能用它）。"""
+    """常量收益的语义条目（大多数"发动即净赚"的技能用它）。
+
+    打分器上还挂一个 ``anchor`` 属性（`ai-view` 票 08a）：A 族权重的**先验中心**从
+    ``SKILL_VALUES`` 派生时只认常量档（形状档的值依赖局面，**不是一个数**），故这里是
+    手写值的唯一读出口（``sgs.agents.weights`` 的延迟 import 读它）。它**不参与打分**：
+    返回的 float 逐位不变，读点表也不因此新增一行。
+    """
 
     def scorer(query: Query, action: Action, view: PlayerView) -> float:
         del query, action, view
         return _item_score("常量收益", value)
 
+    scorer.anchor = value
     return scorer
 
 
