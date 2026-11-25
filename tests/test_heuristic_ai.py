@@ -2526,6 +2526,278 @@ def test_arrange_puts_the_most_useful_card_on_top():
 
 
 # ---------------------------------------------------------------------------
+# ⑧ 拆 / 顺按目标装备的**效果**定价（`ai-view` 票 14）
+#
+# 两种价必须分开：`_SLOT_VALUES` 回答"我弃哪张最不心疼"（牌本身的残值），拆 / 顺要算的是
+# "对手少掉它之后我少挨多少"——+1 马挡住所有人 1 点距离、防具每回合吃一张【杀】，都该排在
+# "先拿走一张手牌"之前。四条判据：次序断言 / 选牌层（拆顺同面）/ 选位层（拆 + 顺）/
+# 防具同理；反向的"忠臣拆主公"由 `tests/test_ai_cases.py` 的票 01 用例压住（本票不改 veto）。
+# ---------------------------------------------------------------------------
+
+
+def test_the_denial_values_rank_the_equipment_above_a_hand_card():
+    """次序断言：+1 马 > 防具 > 武器 > -1 马 > **一张手牌的期望价**（票 14 的验收）。
+
+    手牌那一侧读生产口径 :func:`_unknown_card_value`：标准 108 档开局全是未知牌 ⇒ 每张约
+    3.08 分。这一条钉的正是"拆马 / 拆甲要排在'先拿走一张手牌'之前"。
+    """
+    values = heuristic_scoring._DENIAL_VALUES
+
+    assert (
+        values["horse_defense"] > values["armor"] > values["weapon"] > values["horse_offense"]
+    ), f"四档次序按票面（+1 马 > 防具 > 武器 > -1 马）：{dict(values)}"
+
+    state = build_state(
+        pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=_deck_excluding()
+    )
+    hand = heuristic_scoring._unknown_card_value(project(state, 0))
+    assert values["horse_offense"] > hand, (
+        f"-1 马（{values['horse_offense']}）也要高于一张手牌的期望价（{hand}）"
+    )
+
+
+@pytest.mark.parametrize(
+    ("type_id", "slot"),
+    [
+        ("dilu", "horse_defense"),
+        ("eight_diagrams", "armor"),
+        ("qinggang_sword", "weapon"),
+        ("chitu", "horse_offense"),
+    ],
+)
+def test_the_denial_table_leaves_the_global_card_value_alone(type_id, slot):
+    """`_card_value` 逐值不变：装备仍按 :data:`_SLOT_VALUES` 的残值计（票 14 的"不做"）。
+
+    这张表还被弃牌 / 制衡 / 火攻弃牌读；本票只在拆 / 顺两条路径换成
+    :data:`_DENIAL_VALUES`，全局牌价一个数不动。
+    """
+    card_id = _ids(type_id)[0]
+    state = build_state(
+        pack=PACK, seats=[SeatSpec(equip=(card_id,)), SeatSpec()],
+        deck=_deck_excluding(card_id),
+    )
+
+    assert heuristic_scoring._card_value(state.card(card_id)) == (
+        heuristic_scoring._SLOT_VALUES[slot]
+    )
+
+
+def _denial_play_state(
+    *, card_type: str = "dismantlement", equips=(), processing: bool = False
+):
+    """5 人身份局、全员亮明：AI = 主公（座位 0），座位 1 / 4 是相邻的反贼、2 忠臣、3 内奸。
+
+    每个座位都发一张手牌（拆 / 顺的目标池才非空——目标区里一张牌都没有的座位不是合法
+    目标）；``equips`` = ``{座位: (card_id, ...)}`` 给指定座位挂装备。``processing=True``
+    把这那个锦囊放进**处理区**（选牌步的语境判据 `_is_denial_pick` 读它），座位 0 另补一张手牌。
+    """
+    trick = _ids(card_type)[0]
+    spare = [index for index in _ids("dodge") if index != trick][: 5 if processing else 4]
+    equip_map = dict(equips)
+    # 【顺手牵羊】只能到距离 1：目标挂 +1 马会把距离抬到 2 ⇒ 给 AI 自己一匹 -1 马，让它仍够得着
+    # "挂着 +1 马的那个敌人"（这也正是票面说的"距离墙"：不先拆掉，顺根本摸不到）。
+    own_equip = (_ids("chitu")[0],) if card_type == "snatch" else ()
+    used = {
+        trick,
+        *spare,
+        *own_equip,
+        *(cid for ids in equip_map.values() for cid in ids),
+    }
+    seats = [
+        SeatSpec(
+            identity=Identity.LORD,
+            hand=(spare[4],) if processing else (trick,),
+            equip=own_equip,
+        ),
+        SeatSpec(identity=Identity.REBEL, hand=(spare[0],), equip=equip_map.get(1, ())),
+        SeatSpec(identity=Identity.LOYALIST, hand=(spare[1],), equip=equip_map.get(2, ())),
+        SeatSpec(identity=Identity.RENEGADE, hand=(spare[2],), equip=equip_map.get(3, ())),
+        SeatSpec(identity=Identity.REBEL, hand=(spare[3],), equip=equip_map.get(4, ())),
+    ]
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=seats,
+        deck=_deck_excluding(*used),
+        processing=(trick,) if processing else (),
+        turn_seat=0,
+    )
+    for player in state.players:
+        player.identity_visible = True
+    return state
+
+
+def _denial_select_face(state, *, target: int = 1) -> SelectCardsQuery:
+    """搭一条拆 / 顺的 ``SELECT_CARDS`` 询问：目标那张**隐藏手牌** + 它装备区的每一件。
+
+    槽位顺序 = 手牌在前、装备在后（引擎铺面的顺序），故"选马"= ``picks == (1,)``。
+    """
+    slots = [Slot(ref=ZoneRef(Zone.HAND, target))]
+    slots.extend(
+        Slot(ref=ZoneRef(Zone.EQUIP, target), card=state.card(card_id))
+        for card_id in state.players[target].equip
+    )
+    spec = SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1))
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=tuple(slots)),
+    )
+    return SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="选择一张牌。",
+        legal_actions=actions,
+        view=project(state, 0),
+        spec=spec,
+        slots=tuple(slots),
+    )
+
+
+@pytest.mark.parametrize("type_id", ["dilu", "eight_diagrams"])
+def test_select_cards_takes_the_equipment_over_a_hidden_hand_card(type_id):
+    """选牌层：敌人手牌 + 敌人 +1 马 / 防具同面 ⇒ AI 拿装备，不拿手牌（票 14 验收）。
+
+    同一条面同时验证两个口径：``zone=Zone.EQUIP`` 的槽走 :data:`_DENIAL_VALUES` 的效果价；
+    不给 ``zone``（预发动填表的旧口径）时那只马仍是 :data:`_SLOT_VALUES` 的 1.2 分，比一张
+    手牌的期望价低——"默认保持旧口径"因此不是靠调用方自觉。
+    """
+    equip_id = _ids(type_id)[0]
+    state = _denial_play_state(equips={1: (equip_id,)}, processing=True)
+    query = _denial_select_face(state)
+    equip = state.card(equip_id)
+
+    view = query.view
+    hidden = heuristic_scoring._step_card_score(None, 1, 0, "", view=view, zone=Zone.HAND)
+    denied = heuristic_scoring._step_card_score(
+        equip, 1, 0, "", view=view, zone=Zone.EQUIP
+    )
+    legacy = heuristic_scoring._step_card_score(equip, 1, 0, "", view=view)
+    assert denied > hidden, f"装备效果价（{denied}）必须压过手牌期望（{hidden}）"
+    assert legacy == heuristic_scoring._card_value(equip, view=view) < hidden, (
+        "不给 zone 时逐值回到旧口径（预发动填表仍按牌价挑）"
+    )
+
+    for seed in range(4):
+        action = HeuristicPlayer(_stream(seed)).respond(query)
+        assert isinstance(action, SelectCards), f"实得 {action!r}"
+        assert action.picks == (1,), f"种子 {seed}：该拿装备，实得 {action.picks}"
+
+
+def test_only_a_dismantlement_or_snatch_select_face_uses_the_equipment_value():
+    """同一张"别人装备 vs 手牌"的面：处理区**不是**拆 / 顺 ⇒ 逐值回到旧口径（票 14 的范围）。
+
+    票面的范围是"只改拆 / 顺这两条路径"：`_is_denial_pick` 读处理区里躺着的那张牌；没有它
+    （【反馈】/【寒冰剑】/【麒麟弓】等）时槽价仍是 `_card_value`（武器 2.0 < 手牌期望 3.08），
+    故 AI 仍先拿手牌——本用例与上一条**同一份面**，只差处理区，方向必须相反。
+    """
+    weapon = _ids("qinggang_sword")[0]
+    state = _denial_play_state(equips={1: (weapon,)})  # 处理区为空：不是拆 / 顺的语境
+    query = _denial_select_face(state)
+
+    assert query.view.processing == (), "对照面：处理区里没有拆 / 顺"
+    for seed in range(4):
+        action = HeuristicPlayer(_stream(seed)).respond(query)
+        assert isinstance(action, SelectCards), f"实得 {action!r}"
+        assert action.picks == (0,), (
+            f"种子 {seed}：不是拆 / 顺的选牌步应当仍按牌价拿手牌，实得 {action.picks}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("card_type", "type_id"),
+    [
+        ("dismantlement", "dilu"),
+        ("snatch", "dilu"),
+        ("dismantlement", "eight_diagrams"),
+        ("snatch", "eight_diagrams"),
+    ],
+)
+def test_dismantlement_and_snatch_target_the_enemy_wearing_the_equipment(card_type, type_id):
+    """选位层：两个相邻的敌人，一个有装备、一个没有 ⇒ 拆 / 顺都挑有装备的那个（票 14 验收）。
+
+    座位 1 与座位 4 都在座位 0 的距离 1 内（【顺手牵羊】的射程；目标挂 +1 马时由 AI 自己的
+    -1 马把净距离拉回 1——这正是"距离墙"本身）⇒ 座位 1 的 +1 马 / 防具把它的分抬到另一个
+    敌人之上；座位 2（忠臣）的负关系项不受影响。
+    """
+    equip_id = _ids(type_id)[0]
+    state = _denial_play_state(card_type=card_type, equips={1: (equip_id,)})
+    query = _play_phase_query(state)
+    candidates = [
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == card_type
+    ]
+    targets = {action.targets for action in candidates}
+    assert {(1,), (4,)} <= targets, (
+        f"夹具失效：{card_type} 的目标池里没有两个相邻敌人：{candidates}"
+    )
+
+    at_horse = next(action for action in candidates if action.targets == (1,))
+    at_empty = next(action for action in candidates if action.targets == (4,))
+    assert heuristic_scoring._score_card_use(query, at_horse) > (
+        heuristic_scoring._score_card_use(query, at_empty)
+    ), "有装备的敌人必须严格高于没有装备的敌人"
+
+    for seed in range(4):
+        action = HeuristicPlayer(_stream(seed)).respond(query)
+        assert isinstance(action, UseCard), f"种子 {seed}：实得 {action!r}"
+        assert action.targets == (1,), f"种子 {seed}：该拆 / 顺有装备的敌人，实得 {action.targets}"
+
+
+def test_only_dismantlement_and_snatch_price_the_target_equipment():
+    """只有拆 / 顺记「目标装备价值」这一项：其余锦囊的项集逐值不变（解释面不被撑宽）。
+
+    若对所有非伤害锦囊都 `add` 一行（哪怕恒 0），【乐不思蜀】/【桃】这些牌的解释分项也会
+    多一格、B 族键空间跟着变宽——分数虽然不动，"其余路径逐值不变"就不是逐项成立了。
+    """
+    horse = _ids("dilu")[0]
+    state = _denial_play_state(card_type="indulgence", equips={1: (horse,)})
+    query = _play_phase_query(state)
+    action = next(
+        candidate
+        for candidate in query.legal_actions
+        if isinstance(candidate, UseCard) and candidate.card.type == "indulgence"
+    )
+
+    with heuristic_scoring.Score.tracing():
+        value = heuristic_scoring._score_card_use(query, action)
+
+    items = dict(value.items)
+    assert "锦囊底价" in items, "对照面：这条牌自己的底价仍在"
+    assert "目标装备价值" not in items, "只有拆 / 顺才记目标装备那一项"
+
+
+def test_the_equipment_term_does_not_bribe_a_dismantle_on_a_confirmed_ally():
+    """确认盟友拿不到"目标装备价值"的补贴（``P(敌) = 0``）⇒ 拆盟友仍低于过牌。
+
+    不乘 ``P(敌)`` 时 ``3.0 + 4.6 − 5.0 = +2.6``：空场里 AI 会为了那匹 +1 马去拆盟友，
+    票 01 的"确认盟友总分低于过牌"被这 4.6 分翻回来。座位 2 是忠臣（AI 主公的盟友），
+    它挂着 +1 马；这一项必须是 0，总分仍严格为负。
+    """
+    equip_id = _ids("dilu")[0]
+    state = _denial_play_state(equips={2: (equip_id,)})
+    query = _play_phase_query(state)
+    action = next(
+        candidate
+        for candidate in query.legal_actions
+        if isinstance(candidate, UseCard)
+        and candidate.card.type == "dismantlement"
+        and candidate.targets == (2,)
+    )
+
+    assert heuristic_scoring._equipment_denial(action, query.view) == 0.0, (
+        "确认盟友的装备不补贴（P(敌) = 0）"
+    )
+    assert heuristic_scoring._score_card_use(query, action) < 0.0, (
+        "拆确认盟友的牌必须严格低于过牌（票 01 的盟友负分不被本票翻回来）"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 不枚举档多选（yijiang-2014-round2 票 21）：AI 自己拼合法集合
 # ---------------------------------------------------------------------------
 
@@ -2747,9 +3019,9 @@ HEURISTIC_SOURCE = ROOT / "src" / "sgs" / "agents" / "heuristic.py"
 PARITY_SEEDS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
 """parity 批次：5 人全启发式、开武将池。8 个种子实测覆盖九类询问（``DISTRIBUTE`` 除外）。"""
 
-PARITY_CANDIDATES = 5529
-PARITY_DIGEST = "116008a33c750dcffe7463dcdb1dbabdaccbaeb10ede6cc3be28a8d478c910ec"
-"""**分项改写之前**（``master@b65b75f``）录下的（候选数, sha256）；票 07 / 票 11 按新读数重录。
+PARITY_CANDIDATES = 4506
+PARITY_DIGEST = "4797255339b56680cc2233a6495e383f86d94d480295d57594e63b0dd6b09b10"
+"""**分项改写之前**（``master@b65b75f``）录下的（候选数, sha256）；票 07 / 11 / 14 按新读数重录。
 
 逐行 = ``kind|actor|seq|action repr|score repr``：**分数是 float**，改写只许改内部结构、
 不许动任何一个数（票面"逐询问同一 float"）。改权重的票会正当地改这个摘要——那时按新读数
@@ -2766,6 +3038,13 @@ PARITY_DIGEST = "116008a33c750dcffe7463dcdb1dbabdaccbaeb10ede6cc3be28a8d478c910e
 分数面也**不是**逐值不变：`_lord_is_vetoed_target` 还被 `_wine_enables_kill` /
 `_equip_setup_score` 读，内奸不再为"那一刀会被 veto 摘掉"的主公目标铺垫 ⇒ 对应的【酒】/
 装备先手分项会变。两处都落在 ``PLAY_PHASE`` 的候选上，不涉及别的询问类型。
+
+**票 14 的重录**：拆 / 顺按目标装备的**效果**定价（`ai-view` 票 14）⇒ 挑目标 / 挑牌换了，
+后续局面随之不同，8 局 parity 批的候选条数从 5529 掉到 **4506**。同样是**行为改动**，不是
+`Score` 的累加次序回归（``test_every_candidate_score_is_the_sum_of_its_own_items`` 仍全绿：
+违例 0）。本票**没有**动全局牌价：``_card_value`` 对四个装备槽的逐值不变另由
+``test_the_denial_table_leaves_the_global_card_value_alone`` 钉住——摘要变的是**决策**，不是
+`_SLOT_VALUES`。
 """
 
 

@@ -307,12 +307,16 @@ def test_a_two_ally_three_enemy_game_runs_to_an_end_with_the_teammate_acting():
     47 的终局从"友方全歼"翻成"主角阵亡"——同批 40–99 里 83 仍满足全部四条断言。同一
     纪律见 `tests/test_all_ai_games.py` 的 `M6_JIE_WEI_B_SEED`：AI 决策面一动，固定种子的
     全 AI 局要重扫种子，而不是放宽判据。扫描器 = ``.scratch/ai-view/scan_pve_seeds2.py``。
+
+    **种子 83 → 96**（`ai-view` 票 14）：拆 / 顺按装备效果定价同样是决策面改动，83 的终局
+    翻成"主角阵亡"；同批 40–99 里只剩 **96** 满足四条断言（扫描器
+    ``.scratch/ai-view/scan14_pve.py``）。判据一个字没放宽。
     """
     rule = _rule(
         (ALLY, ENEMY, ENEMY, ALLY, ENEMY),
         victory=PveVictory(kind=PveVictoryKind.ROUT),
     )
-    seed = 83
+    seed = 96
     engine = Engine.new_game(seed=seed, rule_config=rule, pack=PACK)
 
     engine.run([HeuristicPlayer(ai_stream(seed, seat)) for seat in range(5)])

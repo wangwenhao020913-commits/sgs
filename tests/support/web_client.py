@@ -422,7 +422,12 @@ _FIRE_TAPES = (
     # 零伤害 / 零非法应答）从 1 起重扫 1–300，首个命中 **seed 8**（4 已被自己那条占用；探针
     # `.scratch/tape-lineup/scan_tapes.py`，判据 = `fire_attack_tape` 自身返回 0；探针在
     # 首个可用命中即停，故只记首个——要继续列后续命中就把探针里的 break 去掉）。
-    (8, False, False),
+    # `ai-view` 票 14（拆 / 顺按装备效果定价）：AI 决策面再动，seed 8 的人类整局用不出
+    # 【火攻】⇒ tape 失效。判据**逐字不动**（对 AI 用火攻 / 目标亮牌 / 没被无懈 / 人类无
+    # 同花色 / 零伤害 / 零非法应答），从 1 起重扫 1–300，命中 4 / 65 / 68 / 83 / 93
+    # （4 已被自己那条占用），取首个未在用的 **seed 65**；探针
+    # `.scratch/ai-view/scan14_fire_tape.py`（判据 = `fire_attack_tape` 自身返回 0）。
+    (65, False, False),
 )
 
 
@@ -726,7 +731,7 @@ huo-wolong-yanliang 票 01（默认池 78/49 → 79/50，火包 OL 加卧龙诸�
 票 02（默认池 79/50 → 80/51，加颜良文丑）再换池：seed 8 的首问又变了；同一判据重扫命中
 **46 / 65 / 71 / 84**（46 已被【火攻】tape 占用），取 **seed 65**。"""
 
-_WINE_TAPE_NEAR_DEATH_SEED = 7
+_WINE_TAPE_NEAR_DEATH_SEED = 16
 """濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。
 
 jie-yijiang-2014-wuyi-caozhen 票 01（默认池 112/74 → 114/75，界一将成名-2014·移动版加
@@ -802,7 +807,14 @@ tape-lineup 票 01（显式点将 `_TAPE_HEROES`）：seed 29 走到了自救窗
 （判据不放宽：人类 0 血 + 求桃窗口里的【酒】目标恒为自己 + 回复到 1）。仍按**同一判据、同一
 固定策略**从 1 起重扫 1–300（探针 `.scratch/tape-lineup/scan_tapes.py`，判据 = `_wine_tape_near_death`
 自身返回 0，与 `--tape wine` 同序；探针在首个可用命中即停），首个未在用的命中是 **seed 7**
-（火攻 4 / 8、出牌阶段 65 已占用）。"""
+（火攻 4 / 8、出牌阶段 65 已占用）。
+
+`ai-view` 票 14（拆 / 顺按目标装备的效果定价）再换种：seed 7 走到了自救窗口，但判据不再
+命中（判据不放宽：人类 0 血 + 求桃窗口里的【酒】目标恒为自己 + 回复到 1）。仍按**同一
+判据、同一固定策略**从 1 起重扫 1–300，命中 **16 / 29 / 34 / 39 / 66**，取首个未在用的
+**seed 16**（当前火攻 tape 占用 4 / 65、出牌阶段占用 65）；探针
+`.scratch/ai-view/scan14_wine_tape.py`（判据 = `_wine_tape_near_death` 自身返回 0，与
+`--tape wine` 同序）。"""
 
 
 def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:

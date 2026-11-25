@@ -81,6 +81,16 @@
 且**够得着才算**（射程变短的替换一律不追加分，见 :func:`_keeps_reach`）；装上不改斩杀 /
 射程可能变短 / 非武器 / 已经装着同一件 ⇒ 逐值不变。不做装备的一般优先级，也不做多步规划。
 
+**拆 / 顺按目标装备的效果定价（`ai-view` 票 14）**：拆 / 顺不再只按"锦囊底价 + 敌我关系"
+挑目标，也不再只按 `_SLOT_VALUES` 的残值挑牌——两条路径各补 :data:`_DENIAL_VALUES` 的
+**效果价**（+1 马挡所有人的距离最高、防具每回合吃一张【杀】次之、武器 / -1 马更低，但四档
+都高于一张手牌的期望价）。选位层读 ``PlayerPublic.equip``（读点表 ``"players"`` 里已有的
+字段，不新增读点）并按目标的 ``P(敌)`` 加权（确认盟友拿不到这份补贴，票 01 的"盟友负分"
+不被翻回来）；选牌层读 ``slot.ref.zone``，只在处理区里躺着拆 / 顺时（:func:`_is_denial_pick`）
+对**别人装备区 / 判定区**的槽换价，别人的手牌仍是未知池期望、别的选牌步与预发动填表仍走
+旧口径。全局牌价表 :data:`_CARD_VALUES` / :data:`_SLOT_VALUES` 一个数不动（它们还被弃牌 /
+制衡 / 火攻弃牌读）。
+
 **盟友负分与主公 veto（`ai-view` 票 01）**：I1 那句"打盟友没有额外惩罚"被推翻——伤害牌
 （:func:`_score_attack`，含 AoE 的逐目标）与单体有害锦囊（:func:`_harmful_trick_relation`）
 都过同一个 :func:`_relation_term`（``_RELATION_FOCUS × (P敌 − P友)``），幅度使**确认
@@ -174,6 +184,7 @@ from sgs.state import (
     SlotKind,
     UseCard,
     WindowCause,
+    Zone,
     step_option_key,
 )
 
@@ -232,6 +243,51 @@ _SLOT_VALUES: Mapping[str, float] = MappingProxyType(
     }
 )
 """装备按**槽位**的价值序（票 13 §DISCARD「装备按槽位价值排序」）。"""
+
+_DENIAL_VALUES: Mapping[str, float] = MappingProxyType(
+    {
+        "horse_defense": 4.6,
+        "armor": 4.1,
+        "weapon": 3.7,
+        "horse_offense": 3.4,
+    }
+)
+"""**拆掉 / 顺走**对手一件装备的收益，按槽位定价（`ai-view` 票 14）。
+
+它**不是** :data:`_SLOT_VALUES` 的另一套折扣：那张表回答"我弃哪张牌最不心疼"（牌本身的
+残值），这张表回答"对手少掉它之后，我少挨多少 / 多打得到谁"——两个问题两种价，故刻意
+不并进 `_SLOT_VALUES`（并进去会连带改掉弃牌 / 制衡 / 火攻弃牌一堆无关行为）。
+
+为什么四档都**高于一张手牌的期望价**（标准 108 档开局约 3.08，见
+``_unknown_card_expectation``）：
+
+- **+1 马（``horse_defense``，最高）**：它挡住的是**所有人**的 1 点距离，而且不是"抽到一次
+  就兑现"——装上去就一直是距离墙。距离多 1 往往直接让整条【杀】候选池作废，这是拆名单里
+  最该先拆的一件；
+- **防具（``armor``，次之）**：每回合都可能替主人吃掉一张【杀】（八卦阵判红、仁王盾吃黑
+  【杀】、藤甲吃普通【杀】），是**按回合**付防御的装备，一局下来换算的【杀】不止一张；
+- **武器（``weapon``）**：射程 + 加伤 / 转化（连弩、青龙刀、麒麟弓……），对手的进攻面
+  直接挂在它身上；
+- **-1 马（``horse_offense``，最低但仍高于手牌）**：只在"差 1 点够不着"时兑现，比 +1 马窄；
+  它解锁的是对手的**输出**，不是纯防御，故排最后。
+
+拆主公那一档仍由 :func:`_lord_veto_applies` 的规则级 veto 先摘掉，**优先级不动**（票 01 /
+票 11）：本表只在"这条候选已经过 veto"之后参与挑目标 / 挑牌。
+"""
+
+_DENIAL_ZONES: frozenset[Zone] = frozenset({Zone.EQUIP, Zone.JUDGE})
+"""``SELECT_CARDS`` 的**公开区**：拆 / 顺从这些区拿牌时按"效果价"估，而不是按牌价。
+
+手牌不在其中——别人的手牌是隐藏槽（``card = None``），它的价仍是未知池期望；判定区的
+牌本身是那张延时锦囊（没有槽位），:func:`_denial_value` 找不到槽时回落到牌价，行为逐值
+不变。
+"""
+
+_DENIAL_TRICKS: frozenset[str] = frozenset({"dismantlement", "snatch"})
+"""能把目标**装备区**一张牌拿走的锦囊：【过河拆桥】与【顺手牵羊】（`ai-view` 票 14）。
+
+枚举方式与 :data:`_NULLIFY_HARMFUL_TRICKS` 同一姿态（``frozenset`` 只作成员判定、不迭代）。
+"""
 
 _TRICK_VALUES: Mapping[str, float] = MappingProxyType(
     {
@@ -850,6 +906,19 @@ def _card_value(card: CardRef | None, *, view: PlayerView | None = None) -> floa
     if card.slot is not None:
         return _SLOT_VALUES.get(card.slot.value, _EQUIP_VALUE)
     return _UNREGISTERED_TRICK_VALUE
+
+
+def _denial_value(card: CardRef | None, *, view: PlayerView) -> float:
+    """拆 / 顺拿走 ``card`` 的**效果价**：装备按槽位查 :data:`_DENIAL_VALUES`，其余按牌价。
+
+    只服务"从对手公开区拿走一张"这两条路径（`ai-view` 票 14）。装备的价是"对手少掉它之后
+    的效果"（距离墙 / 每回合吃【杀】/ 输出），不是这件装备当牌值的残值；判定区的牌没有槽位
+    （延时锦囊就是那张牌本身）、未知手牌没有牌面，两者都回落到 :func:`_card_value`——前者的
+    行为因此逐值不变，后者仍是未知池期望（C2，票 23），没有把"看不见的牌"按装备价抬高。
+    """
+    if card is not None and card.slot is not None:
+        return _DENIAL_VALUES.get(card.slot.value, _card_value(card, view=view))
+    return _card_value(card, view=view)
 
 
 def _me(view: PlayerView) -> PlayerPublic:
@@ -1939,6 +2008,37 @@ def _equip_setup_score(query: Query, card: CardRef) -> float:
     return max(_EQUIP_PLAY_VALUE, unlocked + _EQUIP_SETUP_MARGIN)
 
 
+def _equipment_denial(action: Action, view: PlayerView) -> float:
+    """拆 / 顺这一手能从目标装备区拿走什么：目标装备里按 :data:`_DENIAL_VALUES` 最贵的那件。
+
+    `ai-view` 票 14 的选位层：拆有 +1 马的敌人与拆空手敌人原来同分（都只有"锦囊底价 +
+    敌我关系"），于是 AI 永远先拆手牌多的那个。这一项把"目标身上挂着的效果"补进来，
+    目标是**挑一个**座位（单体锦囊），故只取被挑中座位里的最大值，不做求和。
+
+    其余牌名 / 非拆顺动作恒 ``0.0``（逐值不变）；目标是自己时也 ``0.0``。关系项照旧由
+    :func:`_harmful_trick_relation` 单独记；这一项再乘目标的 ``P(敌)``（:func:`_identity_relation`
+    的敌人那一侧）——与 :func:`_relation_term` 同一个权重口径：
+
+    - 已明确认的盟友 ⇒ ``P(敌) = 0`` ⇒ 这一项**不补贴**"拆盟友"，票 01 的"确认盟友总分低于
+      过牌"因此不被这 4.6 分翻回来（不乘的话 ``3.0 + 4.6 − 5.0 > 0``）；
+    - 已明确认的敌人 / PvE 敌人 ⇒ 满额，目标之间就按"拆掉之后我少挨多少"排序；
+    - 未知座位 ⇒ 按后验的 ``P(敌)`` 打折（拿不准就别为那件装备把候选抬过过牌）。
+    """
+    card = getattr(action, "card", None)
+    if card is None or card.type not in _DENIAL_TRICKS:
+        return 0.0
+    best = 0.0
+    for seat in _chosen_seats(action):
+        if seat == view.seat or not 0 <= seat < len(view.players):
+            continue
+        enemy, _ally = _identity_relation(view, seat)
+        if enemy <= 0.0:
+            continue
+        for equip in view.players[seat].equip:
+            best = max(best, enemy * _denial_value(equip, view=view))
+    return best
+
+
 def _score_card_use(query: Query, action: Action) -> float:
     """出牌阶段使用一张牌的局部收益（伤害 ＞ 装备 ＞ 过牌；【桃】只在受伤时用）。
 
@@ -1955,6 +2055,10 @@ def _score_card_use(query: Query, action: Action) -> float:
     :data:`_TRICK_VALUES` 的常量分——拆 / 顺 / 乐 / 兵粮 / 借刀这类牌多一个
     :func:`_harmful_trick_relation`（逐 ``targets + designations``）。伤害牌与【火攻】
     各自在 :func:`_score_attack` / :func:`_score_fire_attack` 里已经算过，不在这里重算。
+
+    **拆 / 顺按目标装备的效果定价（`ai-view` 票 14）**：这两张牌再多读一格
+    ``PlayerPublic.equip``（读点表 ``"players"`` 里已有的公开字段，**不新增读点**），按
+    目标装备里最贵的那件补 :func:`_equipment_denial`；其余牌逐值不变。
     """
     assert isinstance(action, (UseCard, PlayCard))
     view = query.view
@@ -1977,6 +2081,12 @@ def _score_card_use(query: Query, action: Action) -> float:
         # 单体有害锦囊按**目标**过关系项（`ai-view` 票 01）：票面那条实机同样的缺口——
         # 忠臣手里有【过河拆桥】就拆主公。有益 / 自己 / 全体锦囊逐值不变。
         total.add("敌我关系", _harmful_trick_relation(action, view))
+        # 拆 / 顺再补一项"目标身上挂着什么"（`ai-view` 票 14）：+1 马 / 防具的效果价
+        # 远高于一张牌，目标之间因此按"拆掉之后我少挨多少"排序，而不是只看手牌数。
+        # **只给拆 / 顺记这一项**：其余锦囊的项集与解释面逐值不变（记一个恒 0 的项会把
+        # 它们的 B 族键空间也撑宽一格，虽然不改分）。
+        if card.type in _DENIAL_TRICKS:
+            total.add("目标装备价值", _equipment_denial(action, view))
     return _trick_expectation(query, action, total)
 
 
@@ -2284,7 +2394,13 @@ def _step_skill_short(query: Query) -> str:
 
 
 def _step_card_score(
-    card: CardRef | None, owner: int, me: int, short: str, *, view: PlayerView
+    card: CardRef | None,
+    owner: int,
+    me: int,
+    short: str,
+    *,
+    view: PlayerView,
+    zone: Zone | None = None,
 ) -> float:
     """一步选牌的**单张**分值（``_score_select_cards`` 与预发动填表共用的唯一口径）。
 
@@ -2302,8 +2418,16 @@ def _step_card_score(
     ``view`` 只服务**没有牌面**的槽（别人的手牌）：C2（票 23）起它按未知池的期望牌价算；
     有牌面的槽逐值不受影响。
 
+    ``zone``（`ai-view` 票 14）只在**拆 / 顺从别人公开区拿牌**时由 :func:`_score_select_cards`
+    给出（判据 :func:`_is_denial_pick`：处理区里躺着那张拆 / 顺）：装备区 / 判定区的槽走
+    :func:`_denial_value` 的**效果价**（+1 马挡住所有人的距离、防具每回合吃一张【杀】），而不是
+    `_SLOT_VALUES` 的残值。缺省 ``None`` ⇒ 旧口径逐值不变——预发动填表
+    （:func:`_model_card_picks`）与别的选牌步（【反馈】/【寒冰剑】/【麒麟弓】）都不受本票影响。
+
     两处读它（选牌步的打分、预发动填表的"选哪几张"），故两份模型不会漂移。
     """
+    if owner != me and zone in _DENIAL_ZONES:
+        return _denial_value(card, view=view)
     value = _card_value(card, view=view)
     if owner != me:
         return value
@@ -2322,6 +2446,17 @@ def _is_fire_attack_discard(query: SelectCardsQuery) -> bool:
     return query.spec.optional and any(
         card.type == "fire_attack" for card in query.view.processing
     )
+
+
+def _is_denial_pick(query: SelectCardsQuery) -> bool:
+    """这一步是不是**拆 / 顺**那张锦囊在目标区挑牌（`ai-view` 票 14）。
+
+    判据与 :func:`_is_fire_attack_discard` 同一条读法：处理区里躺着那张【过河拆桥】/
+    【顺手牵羊】（处理区是公开信息、此刻正在结算）⇒ 这一步的公开区槽按"拿走之后对手少掉
+    什么"定价。处理区里没有它们（【反馈】/【寒冰剑】/【麒麟弓】/【反间】……）⇒ 逐值回到票 14
+    之前的牌价口径——票面的范围是**只改拆 / 顺这两条路径**，不打宽到别的选牌步。
+    """
+    return any(card.type in _DENIAL_TRICKS for card in query.view.processing)
 
 
 _PINDIAN_SKILLS: frozenset[str] = frozenset(
@@ -2352,6 +2487,12 @@ def _score_select_cards(query: Query, action: Action) -> float:
     单张口径的唯一实现是 :func:`_step_card_score`——W4 评审处置 D.7 起，预发动填表的
     "选哪几张"也读它（不再另写一套）。
 
+    **拆 / 顺的公开区（`ai-view` 票 14）**：处理区里躺着那张拆 / 顺时（:func:`_is_denial_pick`），
+    别人**装备区 / 判定区**的槽交给 :func:`_step_card_score` 的 ``zone`` 参数走
+    :func:`_denial_value` 的**效果价**（+1 马 / 防具远高于一张手牌），别人的手牌槽仍是未知池
+    期望、判定区回落到牌价 ⇒ 同一次询问里"敌人手牌 + 敌人 +1 马"会先拿马。其余选牌步
+    （【反馈】/【寒冰剑】/【麒麟弓】/预发动填表）不传 ``zone``，旧口径逐值不变。
+
     M5-06 的例外是【火攻】的**可选同花色弃牌**（:func:`_is_fire_attack_discard`）：
     "弃一张换 1 点伤害"是一笔正收益，故按 :data:`_FIRE_ATTACK_DISCARD_VALUE - 牌价`
     估值——便宜的同花色牌该弃、贵的（【桃】/【闪】/【无懈】）宁可放弃（``Pass`` = 0）。
@@ -2374,6 +2515,7 @@ def _score_select_cards(query: Query, action: Action) -> float:
     short = _step_skill_short(query) if committed else ""
     pindian = _is_pindian_pick(query)
     fire_attack_discard = not committed and _is_fire_attack_discard(query)
+    denial_pick = not committed and _is_denial_pick(query)
     total = Score()
     if not action.picks:
         total.add("什么都不选", 0.0)
@@ -2394,7 +2536,12 @@ def _score_select_cards(query: Query, action: Action) -> float:
         total.add(
             "选牌",
             _step_card_score(
-                slot.card, slot.ref.seat, query.view.seat, short, view=query.view
+                slot.card,
+                slot.ref.seat,
+                query.view.seat,
+                short,
+                view=query.view,
+                zone=slot.ref.zone if denial_pick else None,
             ),
         )
     if short in _GIVE_STEPS and len(action.picks) >= 2 and _wounded(query.view):

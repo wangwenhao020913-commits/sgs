@@ -32079,13 +32079,17 @@ const seatGlobalsAt = (seat) => {
   return box ? byClass(box, "pve-global").map((node) => node.textContent) : [];
 };
 
-// 剧本种子 **2311 → 2301**（`ai-view` 票 01）：这一节的判据是"打到终局 → 回棋盘结算 →
-// 三选一 → 结果弹窗"，它要求这一场**赢**（服务端对败局不发奖励：`script.settle.picks_on_defeat`）。
-// 票 01 改了 AI 的伤害 / 有害锦囊定价之后，2311 那一场从"友方全歼"翻成"主角阵亡"，
-// 结算因此被服务端按规则拒收（弹窗不落、红字行给原因）。按同一判据在 2300–2419 里重扫，
-// 2301 在第 2 轮赢下这一场；扫描器 = ``.scratch/ai-view/scan_script_battle.py``。判据不放宽。
+// 剧本种子 **2311 → 2301 → 2307**（`ai-view` 票 01 / 票 14）：这一节的判据是"打到终局 →
+// 回棋盘结算 → 三选一 → 结果弹窗"，它要求这一场**赢**（服务端对败局不发奖励：
+// `script.settle.picks_on_defeat`）。票 01 改了 AI 的伤害 / 有害锦囊定价之后，2311 那一场
+// 从"友方全歼"翻成"主角阵亡"；票 14 改了拆 / 顺的装备定价之后，2301 同样翻成主角阵亡。
+// 两次都按同一判据在 2300–2419 里重扫，判据一个字不放宽——2307 是票 14 之后第一个满足
+// "友方全歼"的种子；扫描器 = ``.scratch/ai-view/scan14_script_battle.py``。
+// 注：这一段的 `fallbackActionOf` 按小写 `kind` 找 Pass / EndPhase，而线上动作的 `kind`
+// 是 `Pass` / `EndPhase`（首字母大写）⇒ 实际兜底恒为 `legal_actions[0]`；扫描器按**实际**
+// 口径复现（见脚本 docstring），不在本票顺手改这一段（会连带改掉整节步数，另票）。
 const pveBattleBoard = await postRaw("/api/script-runs", {
-  script_id: "battleprobe", chosen_hero: "jie_liubei", seed: 2301,
+  script_id: "battleprobe", chosen_hero: "jie_liubei", seed: 2307,
 });
 ui.scriptBoardShow(pveBattleBoard);
 
