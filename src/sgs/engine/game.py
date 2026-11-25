@@ -2313,7 +2313,7 @@ class Engine:
         *,
         timing: Timing | None = None,
         frame: Frame | None = None,
-        own_skill: int | None = None,
+        own_seat: int | None = None,
     ) -> bool:
         """这次询问要不要**取消**：应答者已阵亡、且不是**死者本人的死亡时技能派发**。
 
@@ -2327,10 +2327,11 @@ class Engine:
         3. 帧上正在跑的是**死者本人**的技能：``running_skill`` / ``skill_owner`` 由派发环在
            回调前写入（``sgs.skills.catalog._enter_skill_keys``），两条缺一不可。
 
-        ``own_skill`` 是给**发动询问**用的显式归属证明：``ask_skill_activation`` 发问时派发环
-        还没跑回调、两个键尚未写（它们写在回调前），此刻的归属事实是"这张面整张都是死者的
-        技能"（``own_skill = 候选的持有者``）。其余询问一律走帧上的两个键，不传它——多一条
-        放行口就是多一处"窗口内谁都能问死者"的旁路。
+        ``own_seat`` 是给**发动询问**用的显式归属证明（它装的是**座位**，不是技能 id）：
+        ``ask_skill_activation`` 发问时派发环还没跑回调、两个键尚未写（它们写在回调前），
+        此刻的归属事实是"这张面整张都是死者的技能"（``own_seat = 候选的持有者座位``）。
+        其余询问一律走帧上的两个键，不传它——多一条放行口就是多一处"窗口内谁都能问死者"
+        的旁路。
 
         窗口外（包括别的在飞效果）一律不向死者发问；授予口不读这个例外（见各写入口的
         ``alive`` 判据）。
@@ -2342,8 +2343,13 @@ class Engine:
             return True
         if not self._in_death_time_window(actor, timing, frame):
             return True
-        if own_skill is not None:
-            return int(own_skill) != actor
+        # 归属闸的**拒绝方向**在今天将池里没有产品载体：死者只能"在自己的技能跑到一半"时
+        # 阵亡，而唯一死亡时技能是【武魂】，它问的就是自己的持有者 ⇒ 窗口内"问死者、却不是
+        # 死者本人的死亡时技能"只能由合成用例造。这一支是**纵深防御**，
+        # `tests/test_death.py::test_the_death_time_window_only_opens_the_dying_actors_own_skill_dispatch`
+        # 是它唯一的覆盖面。
+        if own_seat is not None:
+            return int(own_seat) != actor
         owner = frame.data.get("skill_owner")
         return (
             frame.data.get(RUNNING_SKILL_KEY) is None
@@ -3828,10 +3834,11 @@ class Engine:
         # 死亡时技能窗口的**发动询问**：派发环此刻还没跑回调，``running_skill`` /
         # ``skill_owner`` 尚未写（它们写在回调前）⇒ 归属证明 = 整张面都是死者本人的技能。
         # 共享技可以让"被问的座位"≠持有者，故混合面不构成证明（传 None ⇒ 按帧上的键判）。
-        face_owner = first.instance.owner
-        if any(candidate.instance.owner != face_owner for candidate in candidates):
-            face_owner = None
-        if self._refuse_ask(actor, timing=timing, frame=frame, own_skill=face_owner):
+        # ``face_seat`` 装的是**座位**（候选实例的持有者），不是技能 id。
+        face_seat = first.instance.owner
+        if any(candidate.instance.owner != face_seat for candidate in candidates):
+            face_seat = None
+        if self._refuse_ask(actor, timing=timing, frame=frame, own_seat=face_seat):
             return Cancelled
         skill_ids = tuple(candidate.skill_id for candidate in candidates)
         # 「可以 / 必须」是效果属性（与 ``locked`` 正交）：缺省口径 = 面里只要有一条"必须发动"，

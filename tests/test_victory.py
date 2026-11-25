@@ -463,33 +463,67 @@ def test_a_non_lord_dying_on_their_own_turn_skips_the_rest_of_the_turn():
     assert gained == [], "阵亡者不再获得任何牌"
 
 
+TURN_END_DEATH_SCENE_SKILL = "hero.fake.turn_end_death"
+"""票 05 回归的合成技能 id（只活在 ``CATALOG`` 的**临时**注入里，随用例结束恢复）。"""
+
+
 def test_a_death_inside_a_turn_end_hook_emits_only_one_turn_end(monkeypatch):
     """票 05：``TURN_END`` 已发过 ⇒ 回合角色死在同一时机的钩子里时不得重发。
 
-    形状与复现探针相同（``.scratch/dead-actor-in-flight/probe_duplicate_turn_end2.py``）：
-    ``_turn_end`` 先发本回合的 ``TURN_END``（阶段体帧 ``frame_id = 0``），随后
-    ``declare_death`` 代表某个 ``TURN_END`` 钩子把回合角色打死 —— 死亡入口压 DEATH 帧。
-    旧实现在 ``death_before_start`` 里只按 ``turn_seat == seat`` 判断，于是**再发**一条
-    ``TURN_END`` 并**再派发**一遍 ``TURN_END`` 钩子（第二条挂在 DEATH 帧上）。
+    **场景就是票面那句**"一个能在 ``TURN_END`` 钩子里打死回合角色的局面"：临时的合成技能
+    （``Hook(Timing.TURN_END, handler=...)``，做法与 ``tests/support/positions.py`` 的
+    ``state_engine`` / 伤害窗口场景同形）挂在座位 1 上，它的钩子在 ``_turn_end`` 的**真实
+    派发**里把这个回合角色打死。旧实现在 ``death_before_start`` 里只按 ``turn_seat == seat``
+    判断，于是**再发**一条 ``TURN_END``（挂在 DEATH 帧上）并**再派发**一遍钩子。
+
+    这条用例同时钉住实现里那句"位在**发记录之前**置，因为派发里就可能打死回合角色"：
+    把入口置位**挪到** ``_dispatch_phase_body`` 之后时，记录面仍只有一条（DEATH 帧是在
+    ``_turn_end`` 返回**之后**才由步骤表推进的），但派发开始那一刻的位读到 ``False`` ⇒
+    本用例红在次序钉上；把置位**删掉**时，``death_before_start`` 会在 DEATH 帧上重发 ⇒
+    记录实得 ``[(1, 0), (1, 1)]`` 并多一次 ``TURN_END`` 派发。
 
     座位 1 是非主公（忠臣），故阵亡不判终局，回合收尾照常走到 ``TURN_AFTER_END``。
-    判据同时盯**记录**与**派发**：两条记录各恰一条；DEATH 帧上不得有 ``TURN_END``
-    派发 —— 只数记录会漏掉"记录没落但钩子重跑"的半个 bug。
+    判据同时盯**记录**与**派发**：两条记录各恰一条；``TURN_END`` 派发恰一次且**开始派发时**
+    位已为真；DEATH 帧上不得有 ``TURN_END`` 派发——只数记录会漏掉"记录没落但钩子重跑"的
+    半个 bug。
     """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+
     engine = _engine(FOUR, deck=tuple(range(1, 40)))
     engine._start()
     engine.state.turn_seat = 1
-    dispatched: list[tuple[Timing, int, FrameKind]] = []
+    dispatched: list[tuple[Timing, int, FrameKind, bool]] = []
     real_dispatch = engine_game.dispatch_timing
 
     def spy(host, frame, timing):
-        dispatched.append((timing, frame.frame_id, frame.kind))
+        # 第 4 位 = **派发开始那一刻**的"本回合 TURN_END 已发"位：次序断言，不是事后推断。
+        dispatched.append((timing, frame.frame_id, frame.kind, engine.turn_end_emitted()))
         return real_dispatch(host, frame, timing)
 
     monkeypatch.setattr(engine_game, "dispatch_timing", spy)
 
-    engine._turn_end()  # TURN_END #1（本回合，frame_id = 0）
-    declare_death(engine, 1)  # = TURN_END 钩子里打死回合角色
+    def handler(host, frame):
+        del host, frame
+        declare_death(engine, 1)  # 一个能在 TURN_END 钩子里打死回合角色的局面
+        return None
+
+    definition = SkillDef(
+        skill_id=TURN_END_DEATH_SCENE_SKILL,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.TURN_END, handler=handler),),
+    )
+    saved = catalog_module.CATALOG
+    catalog_module.CATALOG = MappingProxyType({**saved, TURN_END_DEATH_SCENE_SKILL: definition})
+    try:
+        engine.grant_skill(1, TURN_END_DEATH_SCENE_SKILL)
+        engine._turn_end()  # 真实派发：钩子在这一步里把回合角色 1 打死
+    finally:
+        catalog_module.CATALOG = saved
     _advance_deaths(engine, 1)
     _advance_until(engine, lambda: engine.state.turn_seat == 2)
 
@@ -511,6 +545,11 @@ def test_a_death_inside_a_turn_end_hook_emits_only_one_turn_end(monkeypatch):
         for entry in dispatched
         if entry[0] is Timing.TURN_END and entry[1] == death.frame_id
     ] == [], "DEATH 帧上不得再派发一遍 TURN_END（旧实现在这里重跑钩子）"
+    turn_end_dispatches = [entry for entry in dispatched if entry[0] is Timing.TURN_END]
+    assert [entry[3] for entry in turn_end_dispatches] == [True], (
+        "TURN_END 派发恰一次，且**派发开始时**「本回合已发」位已为真："
+        "位若挪到 _dispatch_phase_body 之后置，钩子里的死亡就会在死亡入口读到假"
+    )
 
 
 def test_a_lord_death_ends_the_game_with_the_rebel_side_and_its_winners():

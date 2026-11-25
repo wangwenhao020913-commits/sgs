@@ -234,7 +234,6 @@ def test_jie_jizhi_does_not_fire_on_a_transformed_trick_card():
     assert list(engine.state.player(0).hand) == [], "来源牌已按使用路径离手，且没有集智摸牌"
 
 
-
 def test_jie_jizhi_cancelled_ask_does_not_discard_the_drawn_card():
     """界【集智】的"弃置换 +1"询问被取消 ⇒ 不发动（票 06；``use_after.py:303`` 那个站点）。
 

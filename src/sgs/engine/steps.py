@@ -1511,10 +1511,11 @@ LIFE_DECREASE_CLOSED_KEY = "life_decrease_closed"
 """帧私有：目标在帧**进入时**已阵亡 ⇒ 整帧收口（dead-actor-in-flight 票 07）。
 
 帧已压出之后目标才阵亡（琴音剩余座位帧一次压出后的中途死座）：这一份失去体力**什么
-都不做**——不派发 ``LIFE_DECREASE_BEFORE`` / ``ON`` / ``AFTER``、不写体力。写入点只有
-:func:`life_decrease_before`（帧的第一步）；``life_decrease_on`` / ``life_decrease_after``
-读它跳过，``dying`` 仍照常落帧（``life_decrease_trigger_near_death`` 读它，对已阵亡者的
-早退在那一侧）。
+都不做**——不派发 ``LIFE_DECREASE_BEFORE`` / ``ON`` / ``AFTER``、不写体力、不重置横置。
+写入点只有 :func:`life_decrease_before`（帧的第一步）；读它的三处是
+:func:`life_decrease_on` / :func:`life_decrease_reset_chain` / :func:`life_decrease_after`
+（各自跳过本步），``dying`` 仍照常落帧（``life_decrease_trigger_near_death`` 读它，对
+已阵亡者的早退在那一侧）。
 
 为什么不在 :func:`~sgs.skills.phase_body._qinyin_effect` 压帧时判：那一处判的是"轮到
 座位时**已经**死了"（不压帧）；本键管的是"压帧之后才死"——两者的现场不同，且这里对

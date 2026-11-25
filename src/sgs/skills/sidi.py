@@ -287,6 +287,10 @@ def _sidi_redeem(host: Any, frame: Frame) -> Any:
     if host.cancelled(answer):
         # 持有者已在窗口外阵亡：取消不是二选一里的任何一项——不取消牌、不摸牌、不造伤
         # （dead-actor-in-flight 票 06 / spec §1.2）。清除已经先于兑现落过（上面）。
+        # **纵深防御**：今天将池里没有"持有者在本技能跑到一半时阵亡"的载体（唯一死亡时
+        # 技能是【武魂】，它问的是自己的持有者）⇒ 这一支只有合成用例能走到，
+        # `tests/test_hero_jie_yijiang.py::test_sidi_a_dead_owner_does_not_fall_into_the_draw_two_branch`
+        # 是它唯一的可能覆盖；不要为它虚构产品载体。
         return None
     # ``ask_option`` 交回的是**动作**（``SelectOption``），不是选项 id 本身。
     choice = str(getattr(answer, "choice", answer))
