@@ -3,12 +3,18 @@
 断言全部落在**记录流与棋盘状态**上：时机 / delta / query / action、体力、区域、手牌数。
 不碰帧私有 ``data`` / ``pc``，也不碰注册表内部结构。
 
-**唯一例外**：``test_harvest_skips_a_target_that_died_before_its_pick`` 按票面要求
-（flow-resume-step-cancel 票 09 §4）把局面**直接摆成使用结算的中间态**——``build_state``
-摆棋盘、``Engine.push_frame`` 摆一个"目标表已冻结、逐座游标还没走完"的 ``RESOLVE`` 帧。
-它写一次帧私有 ``data``（``targets`` / ``cursor`` / ``revealed``），此后仍全走产品路径
-（C 段步骤表、真实搬牌与询问记录），断言也只读记录流与棋盘；写这一次是为了让"死者那一座
-不被问、也不拿牌"这一面可判（随机局里那一幕只能靠撞）。
+**例外**（按票面要求直接摆中间态 / 直调回调，其余仍只读记录流与棋盘）：
+
+- ``test_harvest_skips_a_target_that_died_before_its_pick``（flow-resume-step-cancel 票 09 §4）
+  与 ``test_duel_a_dead_user_whose_turn_it_is_is_not_asked``（dead-actor-in-flight 票 02）用
+  ``Engine.push_frame`` 摆一个"目标表已冻结、逐座游标还没走完"的 ``RESOLVE`` 帧（后者另写
+  一次帧私有 ``op.duel_turn``），此后仍全走产品路径（C 段步骤表、真实搬牌与询问记录）；
+- ``test_borrowed_sword_a_dead_holder_is_cancelled_not_handed_over``（dead-actor-in-flight
+  票 02）直调 ``ops.resolve_borrowed_sword``：auto-b 判据只在"持刀者已死、武器还在装备区"
+  这一中间态上可观测——引擎的目标存活闸会先把整段跳过；
+- W5-02b 的 auto-b 宿主桩（``_BorrowedHost``）同理只覆盖这个回调本身。
+
+写中间态 / 直调回调都只为让"死者那一座 / 已死的持刀者"这一面可判（随机局里那一幕只能靠撞）。
 
 覆盖三组行为：
 
@@ -25,6 +31,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +39,7 @@ from sgs.data import RuleConfig, load_content_pack
 from sgs.effects import check_targets
 from sgs.engine import Engine, IllegalActionError
 from sgs.state import (
+    AskPolicy,
     EndPhase,
     FrameKind,
     Pass,
@@ -72,11 +80,13 @@ def pack():
 class _Plan:
     play: str
     respond: str = "pass"
-    """RESPOND 窗口的应答：``play`` = 打出第一张候选、``use`` = 使用第一张候选、
+    """RESPOND / DODGE 窗口的应答：``play`` = 打出第一张候选、``use`` = 使用第一张候选、
     ``pass`` = 放弃。"""
 
     pick: int = 0
     use_target: int | None = None
+    play_target: int | None = None
+    """出牌阶段里只选目标 = 它的那条 ``UseCard``（【火攻】指定别人的那一张）。"""
     designations: tuple[int, ...] = ()
     """借刀杀人的**附带指定** Bn（W5-02b）：入口只剩 ``designation_actions`` 池。"""
 
@@ -92,7 +102,14 @@ class _Planned:
         if query.kind == QueryKind.PLAY_PHASE:
             if not plan.played:
                 for action in query.legal_actions:
-                    if isinstance(action, UseCard) and action.card.type == plan.play:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == plan.play
+                        and (
+                            plan.play_target is None
+                            or action.targets == (plan.play_target,)
+                        )
+                    ):
                         plan.played = True
                         return action
                 # 借刀杀人的裸候选已收回（W5-02b）：合法动作是"牌 + A + Bn"三元组，
@@ -120,6 +137,10 @@ class _Planned:
             return _find(query, Pass)
         if query.kind == QueryKind.SELECT_CARDS:
             return query.legal_actions[plan.pick]
+        if query.kind == QueryKind.DODGE and plan.respond == "use":
+            card = _first(query, UseCard)
+            if card is not None:
+                return card
         if query.kind in (QueryKind.DODGE, QueryKind.PEACH):
             return _find(query, Pass)
         return query.legal_actions[0]
@@ -144,6 +165,51 @@ def _deck_excluding(pack, *card_ids: int) -> tuple[int, ...]:
     return tuple(index for index in range(len(pack.deck.cards)) if index not in excluded)
 
 
+@dataclass(frozen=True)
+class _DeathAt:
+    """**在哪一问让谁阵亡**（dead-actor-in-flight 票 02 的构造入口）。
+
+    ``on_seat`` = 触发死亡的询问应答者（脚本挂在这个座位上）；``victim`` = 阵亡者；
+    ``kind`` / ``cause`` 把触发收窄到某一类询问（缺省 = 第一问）。"谁被问"与"谁死"分列
+    是为了复现真实时机：【闪】窗口 / 【火攻】亮牌都问目标，可死的是使用者。
+    """
+
+    on_seat: int
+    victim: int
+    kind: QueryKind | None = None
+    cause: WindowCause | None = None
+
+
+class _DieAtQuery:
+    """让 ``victim`` 在**第一处命中**的询问处阵亡（走产品死亡入口，不模拟清区）。
+
+    死亡的真实时机之一是响应窗口里的代价（票 92 的现场就是【蛊惑】质疑的失体力代价在
+    响应窗口里打死了使用者）。这里走**产品死亡入口** :meth:`Engine.enter_death`：把
+    DEATH 帧压在当前 RESOLVE 帧之上，死亡结算先跑（清空三区），随后 C 段面对"参与者已
+    阵亡"的状态——与真实死亡同一面，不靠测试自己模拟清区。
+    """
+
+    def __init__(self, inner, engine: Engine, victim: int, *, kind, cause) -> None:
+        self._inner = inner
+        self._engine = engine
+        self._victim = victim
+        self._kind = kind
+        self._cause = cause
+        self.died = False
+
+    def _matches(self, query) -> bool:
+        return (
+            (self._kind is None or query.kind == self._kind)
+            and (self._cause is None or getattr(query, "cause", None) is self._cause)
+        )
+
+    def respond(self, query):
+        if not self.died and self._matches(query):
+            self._engine.enter_death(self._engine.stack.top, self._victim)
+            self.died = True
+        return self._inner.respond(query)
+
+
 def _run_trick(
     pack,
     *,
@@ -155,14 +221,23 @@ def _run_trick(
     respond: str = "pass",
     pick: int = 0,
     use_target: int | None = None,
+    play_target: int | None = None,
     designations: tuple[int, ...] = (),
+    die_during_nullify: bool = False,
+    die_at: _DeathAt | None = None,
+    ask_policy: AskPolicy | None = None,
 ) -> tuple[Engine, _Plan]:
-    """构造局面 → 跑到"这张牌的使用结算结束后"即止。"""
+    """构造局面 → 跑到"这张牌的使用结算结束后"即止。
+
+    ``die_during_nullify`` = 使用者在无懈窗口阵亡（``turn_seat``）；``die_at`` 是更一般的
+    写法（任意座位 / 任意询问类型）。``ask_policy`` 缺省 = 引擎缺省 OFF（照问）。
+    """
     plan = _Plan(
         play=play,
         respond=respond,
         pick=pick,
         use_target=use_target,
+        play_target=play_target,
         designations=designations,
     )
     used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
@@ -173,8 +248,25 @@ def _run_trick(
         turn_seat=turn_seat,
         rule_config=RuleConfig(first_seat=turn_seat),
     )
-    engine = Engine.from_state(state, seed=seed)
+    engine = Engine.from_state(
+        state, seed=seed, ask_policy=AskPolicy() if ask_policy is None else ask_policy
+    )
     players = [_Planned(plan) for _ in seats]
+    if die_during_nullify:
+        die_at = _DeathAt(
+            on_seat=turn_seat,
+            victim=turn_seat,
+            kind=QueryKind.RESPOND,
+            cause=WindowCause.NULLIFY,
+        )
+    if die_at is not None:
+        players[die_at.on_seat] = _DieAtQuery(
+            players[die_at.on_seat],
+            engine,
+            die_at.victim,
+            kind=die_at.kind,
+            cause=die_at.cause,
+        )
 
     run_until(engine, players, lambda e: plan.played and _use_settled(e, play))
     return engine, plan
@@ -541,6 +633,129 @@ def test_snatch_takes_a_visible_equipment_card_into_hand(pack):
     assert [(slot.ref.zone, slot.card.card_id) for slot in slots] == [(Zone.EQUIP, weapon)]
     assert weapon in engine.state.player(0).hand
     assert engine.state.player(3).equip == []
+
+
+def _run_constructed(engine: Engine, seats: int) -> None:
+    """把一个人造中间态跑到结算栈清空（最多 2 000 步，防"永远收不了尾"吊死测试）。"""
+    players = [RecordingPlayer() for _ in range(seats)]
+    for _ in range(2_000):
+        if not engine.stack.frames:
+            return
+        if engine.pending is None:
+            engine._step()
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    raise AssertionError("构造局面的结算在 2 000 步内没有跑完")
+
+
+def test_a_snatch_user_who_dies_in_flight_asks_nobody_and_grants_nothing(pack):
+    """顺手牵羊的使用者在无懈窗口阵亡（票 92 现场）：询问取消、不派生"获得"、牌留原处。
+
+    选牌询问对**已阵亡的使用者**返回 ``Cancelled``（既不是 ``Pass`` 也不是空选），
+    因此"获得"这一段不执行；目标装备区的牌留原处；使用牌照常进弃牌堆。
+    """
+    snatch = cards_of_type(pack, "snatch")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="snatch",
+        seats=[SeatSpec(hand=(snatch,)), SeatSpec(), SeatSpec(), SeatSpec(equip=(weapon,))],
+        deck=_deck_excluding(pack, snatch, weapon),
+        turn_seat=0,
+        die_during_nullify=True,
+    )
+
+    assert _queries(engine, QueryKind.SELECT_CARDS) == [], "窗口外不向死者要选择"
+    assert weapon in engine.state.player(3).equip, "目标牌留原处（不派生『获得』）"
+    assert engine.state.player(3).hand == []
+    assert snatch in engine.state.discard, "使用牌照常进弃牌堆"
+    dead = engine.state.player(0)
+    assert (dead.hand, dead.equip, dead.judge) == ([], [], []), "死者三区空"
+
+
+def test_a_dismantlement_user_who_dies_in_flight_leaves_the_card_in_place(pack):
+    """过河拆桥的使用者在无懈窗口阵亡：选牌询问取消，"弃置"不执行、目标牌留原处。"""
+    dismantle = cards_of_type(pack, "dismantlement")[0]
+    victim = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="dismantlement",
+        seats=[SeatSpec(hand=(dismantle,)), SeatSpec(hand=(victim,)), SeatSpec()],
+        deck=_deck_excluding(pack, dismantle, victim),
+        turn_seat=0,
+        die_during_nullify=True,
+    )
+
+    assert _queries(engine, QueryKind.SELECT_CARDS) == [], "窗口外不向死者要选择"
+    assert victim in engine.state.player(1).hand, "目标牌留原处（不派生『弃置』）"
+    assert victim not in engine.state.discard
+    assert dismantle in engine.state.discard, "使用牌照常进弃牌堆"
+    dead = engine.state.player(0)
+    assert (dead.hand, dead.equip, dead.judge) == ([], [], []), "死者三区空"
+
+
+def test_a_dead_target_of_a_multi_target_trick_is_skipped_while_the_others_respond(pack):
+    """目标存活：目标表冻结后目标阵亡 ⇒ 该目标那一份不做，其余目标照跑。
+
+    RESOLVE 帧的 ``targets = (0, 2)``（座位 0 已阵亡）：座位 0 不接受"南蛮"的响应询问、
+    也不落伤害 / 濒死；座位 2 照常被问、放弃后受到来源 1 的 1 点伤害。
+    """
+    barbarian = cards_of_type(pack, "barbarian_invasion")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, barbarian),
+        processing=(barbarian,),
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(barbarian),
+            "source": 1,
+            "targets": (0, 2),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    _run_constructed(engine, 3)
+
+    responses = _windows(engine, WindowCause.BARBARIAN_INVASION)
+    assert [query.actor for query in responses] == [2], "死目标不被问、活目标照常响应"
+    assert engine.state.player(0).hp == 0, "死目标不落伤害、不进入濒死"
+    assert engine.state.player(2).hp == 3, "活目标受到来源 1 的 1 点伤害"
+    assert not [delta for delta in _deltas(engine, "hp_change") if delta.seat == 0]
+
+
+def test_damage_from_a_dead_source_is_pushed_without_a_source(pack):
+    """伤害来源已阵亡 ⇒ 压 DAMAGE 帧时 ``source=None``（业炎口径推广；已压出的帧不追溯）。"""
+    arrows = cards_of_type(pack, "arrow_barrage")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, arrows),
+        processing=(arrows,),
+        turn_seat=2,
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(arrows),
+            "source": 0,
+            "targets": (1,),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    _run_constructed(engine, 3)
+
+    assert engine.state.player(1).hp == 3, "目标照常受到 1 点伤害"
+    assert engine.damage_events[-1].source is None, "压帧时来源已阵亡 ⇒ 无来源伤害"
+    deals = _timings(engine, Timing.DAMAGE_DEAL)
+    assert deals and deals[-1].actor is None, "DAMAGE 时机的 actor 也不认死者"
 
 
 def test_barbarian_invasion_only_hits_who_cannot_play_a_slash(pack):
@@ -1145,13 +1360,16 @@ def test_the_borrowed_sword_is_unavailable_when_the_manifest_is_empty(pack):
 
 
 class _BorrowedHost:
-    """``resolve_borrowed_sword`` 的最小宿主：只回答"有没有 a / 武器还在不在"。"""
+    """``resolve_borrowed_sword`` 的最小宿主：只回答"有没有 a / 武器还在不在 / 持刀者活没活"。"""
 
     def __init__(self, *, offers: tuple = (), weapon=None) -> None:
         self.offers = tuple(offers)
         self.weapon = weapon
         self.moves: list[dict] = []
         self.asked = 0
+        # 持刀者存活（auto-b 用例的前提）；"持刀者已死"那一面用真引擎构造（见票 02 的
+        # ``test_borrowed_sword_a_dead_holder_is_cancelled_not_handed_over``）。
+        self.state = SimpleNamespace(player=lambda seat: SimpleNamespace(alive=True))
 
     def current_target(self, frame):
         return 1
@@ -1397,3 +1615,469 @@ def test_a_selection_query_round_trips_through_the_journal(pack, tmp_path):
     )
     assert selection.slots[0].ref.zone is Zone.HAND
     assert selection.slots[0].card is None
+
+
+# ---------------------------------------------------------------------------
+# 阵亡后已在飞的牌侧结算（dead-actor-in-flight 票 02，spec §1.4 第 2–11 行）
+#
+# 每个"⇒"一个断言函数；借刀"持刀者死"与"持刀者 Pass"结果不同，分别命名。
+# 死亡构造一律走产品入口 `Engine.enter_death`（见 `_DieAtQuery`），只在"死在哪一问 /
+# 死的是谁"上做文章；断言仍只读记录流与棋盘。
+# ---------------------------------------------------------------------------
+
+
+def test_harvest_a_dead_user_leaves_the_others_picking_and_discards_its_share(pack):
+    """五谷：使用者死 ⇒ 其余目标照常取牌；死目标跳过，它那一份留处理区、收尾弃掉。"""
+    harvest = cards_of_type(pack, "harvest")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="harvest",
+        seats=[SeatSpec(hand=(harvest,)), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, harvest),
+        turn_seat=0,
+        die_during_nullify=True,
+    )
+
+    selections = _queries(engine, QueryKind.SELECT_CARDS)
+    assert [query.actor for query in selections] == [1, 2], (
+        "其余目标照常取牌；已阵亡的使用者不再被问（目标存活闸逐目标判）"
+    )
+    revealed = tuple(
+        card.card_id
+        for delta in _deltas(engine, "card_move")
+        if delta.to_zone.zone is Zone.PROCESSING and delta.from_zone.zone is Zone.DECK
+        for card in delta.cards
+    )
+    assert len(revealed) == 3, "B5 亮牌照常（X = 目标数）"
+    taken = tuple(
+        card.card_id
+        for delta in _deltas(engine, "card_move")
+        if delta.from_zone.zone is Zone.PROCESSING and delta.to_zone.zone is Zone.HAND
+        for card in delta.cards
+    )
+    assert len(taken) == 2, "两个活目标各取一张（取牌动作按真实搬牌读，不看整手牌）"
+    assert set(taken) <= set(revealed)
+    skipped = set(revealed) - set(taken)
+    assert len(skipped) == 1, "死者那一份不转给下家、也不占份额"
+    assert skipped <= set(engine.state.discard), "它那一份收尾进弃牌堆"
+    assert engine.state.player(0).hand == [], "死者的手牌区为空"
+    assert engine.state.processing == [], "收尾后处理区清空"
+    assert harvest in engine.state.discard, "使用牌照常进弃牌堆"
+
+
+def test_borrowed_sword_a_dead_user_still_lets_the_holder_use_the_slash(pack):
+    """借刀：使用者死 + 持刀者出杀 ⇒ 杀照常结算（来源 = 持刀者）。"""
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="borrowed_sword",
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(slash,), equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(pack, borrowed, weapon, slash),
+        turn_seat=0,
+        respond="use",
+        use_target=2,
+        designations=(2,),
+        die_during_nullify=True,
+    )
+
+    windows = _windows(engine, WindowCause.BORROWED_SWORD)
+    assert [query.actor for query in windows] == [1], "使用者已死，持刀者照常被问 a / b"
+    assert engine.state.player(2).hp == 3, "被迫的【杀】照常结算"
+    assert engine.damage_events[-1].target == 2
+    assert engine.damage_events[-1].source == 1, "来源 = 持刀者（不是已死的使用者）"
+    assert weapon in engine.state.player(1).equip, "出【杀】者不交出武器"
+    assert borrowed in engine.state.discard, "使用牌照常进弃牌堆"
+
+
+def test_borrowed_sword_a_dead_user_does_not_receive_the_weapon_when_the_holder_passes(pack):
+    """借刀：持刀者 `Pass` ⇒ 交武器给死者**不落地**（授予口），武器留在原处。"""
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="borrowed_sword",
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(slash,), equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(pack, borrowed, weapon, slash),
+        turn_seat=0,
+        respond="pass",
+        designations=(2,),
+        die_during_nullify=True,
+    )
+
+    assert [query.actor for query in _windows(engine, WindowCause.BORROWED_SWORD)] == [1], (
+        "持刀者照常被问 a / b（`Pass` = 已接受的一次裁决）"
+    )
+    assert weapon in engine.state.player(1).equip, (
+        "『否则交武器』向死者授予 ⇒ 不落地；武器留在持刀者装备区"
+    )
+    resolve_frame = _resolve_frame_id(engine)
+    assert not [
+        delta
+        for delta in _deltas(engine, "card_move")
+        if delta.frame_id == resolve_frame
+        and delta.to_zone.zone is Zone.HAND
+        and delta.to_zone.seat == 0
+    ], "这次结算里没有任何牌被搬进死者的手牌（摸牌阶段的摸牌不算）"
+    assert engine.state.player(0).hand == []
+    assert slash in engine.state.player(1).hand, "主动放弃 ⇒ 那张【杀】没被用掉"
+    assert borrowed in engine.state.discard
+
+
+def test_borrowed_sword_a_holder_who_dies_in_flight_loses_the_weapon_to_the_discard(pack):
+    """借刀：持刀者死 ⇒ 询问取消（不是 `Pass`）⇒「否则」不派生；武器随死亡清区进弃牌堆。
+
+    与 `test_borrowed_sword_a_dead_user_does_not_receive_the_weapon_when_the_holder_passes`
+    的**结果不同**：那里持刀者答 `Pass` ⇒ 派生"交武器"（被授予口挡住后留在原处）；这里
+    持刀者已死 ⇒ 取消，使用者拿不到任何东西。
+    """
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="borrowed_sword",
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(slash,), equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(pack, borrowed, weapon, slash),
+        turn_seat=0,
+        respond="use",
+        use_target=2,
+        designations=(2,),
+        die_at=_DeathAt(
+            on_seat=0, victim=1, kind=QueryKind.RESPOND, cause=WindowCause.NULLIFY
+        ),
+    )
+
+    assert _windows(engine, WindowCause.BORROWED_SWORD) == [], (
+        "持刀者已死 ⇒ 不向他发问（取消，不是 `Pass`：`Pass` 会派生出『交武器』）"
+    )
+    assert engine.state.player(1).equip == [], "装备区随死亡清空"
+    assert weapon in engine.state.discard, "武器随死亡清区进弃牌堆"
+    assert weapon not in engine.state.player(0).hand, "使用者拿不到"
+    assert engine.state.player(2).hp == 4, "没有派生【杀】"
+    assert borrowed in engine.state.discard
+
+
+def test_borrowed_sword_a_dead_holder_is_cancelled_not_handed_over(pack):
+    """借刀：持刀者已死 ⇒ 询问取消，auto-b 不得把武器交给使用者（票 01 的交待）。
+
+    直调回调：引擎的目标存活闸会先把"目标（持刀者）已死"的整段跳过，故"持刀者已死、武器
+    还在装备区"这一中间态只在 op 的缝上可判。`auto_skip` 的"没有候选 ⇒ 直接 b"读的正是
+    这份预览：不先判死亡，`_hand_over_weapon` 走的"从死者取走"不被授予口挡，武器会交给
+    存活的使用者。判据只读 `state.player(holder).alive`，不改引擎闸。
+    """
+    from sgs.effects.ops import resolve_borrowed_sword
+
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(alive=False, hp=0, equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(pack, borrowed, weapon),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    frame = engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(borrowed),
+            "source": 0,
+            "targets": (1,),
+            "cursor": 0,
+            "designations": (2,),
+        },
+        timing=Timing.RESOLVE_START,
+    )
+
+    result = resolve_borrowed_sword(engine, frame)
+
+    assert engine.cancelled(result), "持刀者已阵亡 ⇒ 询问取消（不是 `Pass` / 空选）"
+    assert weapon in state.player(1).equip, (
+        "『否则交武器』不派生：auto-b 不得把武器从死者装备区交给使用者"
+    )
+    assert weapon not in state.player(0).hand
+    assert _queries(engine, QueryKind.RESPOND) == [], (
+        "窗口外不向死者发问，也不落询问记录（取消由引擎闸返回，不进 QueryRecord）"
+    )
+
+
+def test_duel_a_dead_user_still_lets_the_target_respond(pack):
+    """决斗：使用者死时轮到目标响应 ⇒ 目标照常收到窗口（不向死者发问）。"""
+    duel = cards_of_type(pack, "duel")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="duel",
+        seats=[SeatSpec(hand=(duel,)), SeatSpec(hand=(slash,)), SeatSpec()],
+        deck=_deck_excluding(pack, duel, slash),
+        turn_seat=0,
+        respond="pass",
+        die_at=_DeathAt(
+            on_seat=1, victim=0, kind=QueryKind.RESPOND, cause=WindowCause.DUEL
+        ),
+    )
+
+    windows = _windows(engine, WindowCause.DUEL)
+    assert [query.actor for query in windows] == [1], "轮到的响应者是目标，照常被问"
+    assert any(isinstance(action, PlayCard) for action in windows[0].legal_actions), (
+        "目标手里那张【杀】仍在候选面里"
+    )
+
+
+def test_duel_a_dead_user_still_lets_the_target_take_sourceless_damage(pack):
+    """决斗：目标不出杀 ⇒ 目标受 1 点（来源已阵亡 ⇒ 无来源）。"""
+    duel = cards_of_type(pack, "duel")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="duel",
+        seats=[SeatSpec(hand=(duel,)), SeatSpec(hand=(slash,)), SeatSpec()],
+        deck=_deck_excluding(pack, duel, slash),
+        turn_seat=0,
+        respond="pass",
+        die_at=_DeathAt(
+            on_seat=1, victim=0, kind=QueryKind.RESPOND, cause=WindowCause.DUEL
+        ),
+    )
+
+    assert engine.state.player(1).hp == 3, "目标不出【杀】⇒ 受 1 点"
+    assert engine.damage_events[-1].target == 1
+    assert engine.damage_events[-1].source is None, "来源已阵亡 ⇒ 无来源伤害"
+    assert engine.damage_events[-1].amount == 1
+    deals = _timings(engine, Timing.DAMAGE_DEAL)
+    assert deals and deals[-1].actor is None, "DAMAGE 时机的 actor 也不认死者"
+    assert not [delta for delta in _deltas(engine, "hp_change") if delta.seat == 0], (
+        "死者不落体力"
+    )
+
+
+def test_duel_a_dead_user_is_cancelled_when_the_turn_returns_to_them(pack):
+    """决斗：目标出杀 ⇒ 轮到使用者（已死），询问取消 ⇒ 无人受伤（取消 ≠ `Pass`）。"""
+    duel = cards_of_type(pack, "duel")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="duel",
+        seats=[SeatSpec(hand=(duel,)), SeatSpec(hand=(slash,)), SeatSpec()],
+        deck=_deck_excluding(pack, duel, slash),
+        turn_seat=0,
+        respond="play",
+        die_at=_DeathAt(
+            on_seat=1, victim=0, kind=QueryKind.RESPOND, cause=WindowCause.DUEL
+        ),
+        ask_policy=AskPolicy(auto_skip=True),
+    )
+
+    assert [query.actor for query in _windows(engine, WindowCause.DUEL)] == [1], (
+        "轮回到已死使用者 ⇒ 不再发问（`Pass` 会判他受伤；取消不会）"
+    )
+    assert [player.hp for player in engine.state.players] == [4, 4, 4], (
+        "取消不是 `Pass` ⇒ 无人受伤（目标的【杀】是响应打出，不造成伤害）"
+    )
+    assert not _timings(engine, Timing.DAMAGE_DEAL), "没有压出伤害帧"
+    assert engine.damage_events == ()
+
+
+def test_duel_a_dead_user_whose_turn_it_is_is_not_asked(pack):
+    """决斗：使用者死时轮到自己 ⇒ 询问取消 ⇒ 无人受伤。
+
+    中间态：`push_frame` 摆一个"目标表已冻结"的 RESOLVE 帧，帧私有 `op.duel_turn` 直接
+    指向已死的使用者；`AskPolicy.auto_skip` 打开（网页缺省口径）——预筛分支不得把"没有
+    候选"读成 `Pass` 而把伤害压向死者。
+    """
+    duel = cards_of_type(pack, "duel")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, duel),
+        processing=(duel,),
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=1, ask_policy=AskPolicy(auto_skip=True))
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(duel),
+            "source": 0,
+            "targets": (1,),
+            "cursor": 0,
+            "op": {"duel_turn": 0},
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    _run_constructed(engine, 3)
+
+    assert _queries(engine, QueryKind.RESPOND) == [], (
+        "轮到的响应者已死 ⇒ 不发问（`auto_skip` 的预筛不得绕过死亡判据）"
+    )
+    assert [player.hp for player in engine.state.players] == [0, 4, 4], "取消 ⇒ 无人受伤"
+    assert not _timings(engine, Timing.DAMAGE_DEAL), "没有压出伤害帧"
+    assert engine.damage_events == ()
+
+
+def test_fire_attack_a_dead_user_after_the_reveal_cancels_the_discard_and_deals_no_damage():
+    """火攻：使用者死在目标亮牌后 ⇒ 弃同花色牌的询问取消 ⇒ 无伤害。
+
+    亮牌只是公开信息（目标照常亮），取消的是使用者的弃牌询问——`_queries` 里没有 actor 0
+    的 SELECT_CARDS（`Pass` 会留下一条询问 + 一条已接受动作，取消一条都没有）。
+    """
+    military = load_content_pack(deck_profile="standard_ex_160")
+    fire = cards_of_type(military, "fire_attack")[0]
+    peach = cards_of_type(military, "peach")[0]
+    engine, _ = _run_trick(
+        military,
+        play="fire_attack",
+        seats=[SeatSpec(hand=(fire,)), SeatSpec(hand=(peach,)), SeatSpec()],
+        deck=_deck_excluding(military, fire, peach),
+        turn_seat=0,
+        play_target=1,
+        die_at=_DeathAt(on_seat=1, victim=0, kind=QueryKind.SELECT_CARDS),
+    )
+
+    reveals = [delta for delta in _deltas(engine, "card_reveal")]
+    assert len(reveals) == 1 and reveals[0].seat == 1, "目标照常亮牌（公开信息）"
+    selections = _queries(engine, QueryKind.SELECT_CARDS)
+    assert [query.actor for query in selections] == [1], (
+        "死者的弃同花色询问取消（不是 `Pass`：那一问根本没有 QueryRecord）"
+    )
+    assert [player.hp for player in engine.state.players] == [4, 4, 4], "无伤害"
+    assert not _timings(engine, Timing.DAMAGE_DEAL), "火攻的伤害帧不压"
+    assert engine.damage_events == ()
+    assert fire in engine.state.discard, "使用牌照常进弃牌堆"
+
+
+def test_barbarian_invasion_a_dead_user_still_lets_the_others_respond_and_takes_sourceless_damage(pack):
+    """南蛮：使用者死 ⇒ 其余目标照常响应；失败者受伤害（无来源）。"""
+    barbarian = cards_of_type(pack, "barbarian_invasion")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="barbarian_invasion",
+        seats=[SeatSpec(hand=(barbarian,)), SeatSpec(hand=(slash,)), SeatSpec()],
+        deck=_deck_excluding(pack, barbarian, slash),
+        turn_seat=0,
+        respond="play",
+        die_during_nullify=True,
+    )
+
+    assert [query.actor for query in _windows(engine, WindowCause.BARBARIAN_INVASION)] == [
+        1,
+        2,
+    ], "其余目标照常逐座响应"
+    assert engine.state.player(1).hp == 4, "打出【杀】者免伤"
+    assert engine.state.player(2).hp == 3, "失败者受到 1 点伤害"
+    assert engine.damage_events[-1].source is None, "来源已阵亡 ⇒ 无来源"
+    deals = _timings(engine, Timing.DAMAGE_DEAL)
+    assert deals and deals[-1].actor is None
+    assert slash in engine.state.discard, "打出的【杀】照常进弃牌堆"
+
+
+def test_arrow_barrage_a_dead_user_still_lets_the_others_respond_and_takes_sourceless_damage(pack):
+    """万箭：使用者死 ⇒ 其余目标照常响应；失败者受伤害（无来源）。"""
+    arrows = cards_of_type(pack, "arrow_barrage")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="arrow_barrage",
+        seats=[SeatSpec(hand=(arrows,)), SeatSpec(hand=(dodge,)), SeatSpec()],
+        deck=_deck_excluding(pack, arrows, dodge),
+        turn_seat=0,
+        respond="play",
+        die_during_nullify=True,
+    )
+
+    assert [query.actor for query in _windows(engine, WindowCause.ARROW_BARRAGE)] == [1, 2], (
+        "其余目标照常逐座响应"
+    )
+    assert engine.state.player(1).hp == 4, "打出【闪】者免伤"
+    assert engine.state.player(2).hp == 3, "失败者受到 1 点伤害"
+    assert engine.damage_events[-1].source is None, "来源已阵亡 ⇒ 无来源"
+    deals = _timings(engine, Timing.DAMAGE_DEAL)
+    assert deals and deals[-1].actor is None
+
+
+def test_a_slash_user_who_dies_in_the_dodge_window_still_deals_sourceless_damage(pack):
+    """杀：使用者死于【闪】窗口 ⇒ 目标照常被问【闪】；不出闪 ⇒ 伤害落（无来源）。"""
+    slash = cards_of_type(pack, "slash")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="slash",
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hand=(dodge,)), SeatSpec()],
+        deck=_deck_excluding(pack, slash, dodge),
+        turn_seat=0,
+        respond="pass",
+        die_at=_DeathAt(on_seat=1, victim=0, kind=QueryKind.DODGE),
+    )
+
+    assert [query.actor for query in _queries(engine, QueryKind.DODGE)] == [1], (
+        "目标照常被问【闪】"
+    )
+    assert engine.state.player(1).hp == 3, "不出闪 ⇒ 伤害落"
+    assert engine.damage_events[-1].target == 1
+    assert engine.damage_events[-1].source is None, "使用者已阵亡 ⇒ 无来源伤害"
+    deals = _timings(engine, Timing.DAMAGE_DEAL)
+    assert deals and deals[-1].actor is None
+    assert slash in engine.state.discard
+
+
+def test_a_slash_user_who_dies_in_the_dodge_window_stops_when_the_target_dodges(pack):
+    """杀：目标出闪 ⇒ 该目标结算终止（无伤害），使用者阵亡不额外派生任何段。"""
+    slash = cards_of_type(pack, "slash")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="slash",
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hand=(dodge,)), SeatSpec()],
+        deck=_deck_excluding(pack, slash, dodge),
+        turn_seat=0,
+        respond="use",
+        die_at=_DeathAt(on_seat=1, victim=0, kind=QueryKind.DODGE),
+    )
+
+    assert [query.actor for query in _queries(engine, QueryKind.DODGE)] == [1]
+    assert engine.state.player(1).hp == 4, "出闪 ⇒ 抵消，无人受伤"
+    assert not _timings(engine, Timing.DAMAGE_DEAL), "没有压出伤害帧"
+    assert engine.damage_events == ()
+    assert dodge in engine.state.discard, "打出的【闪】照常进弃牌堆"
+    assert slash in engine.state.discard
+
+
+def test_peach_garden_a_dead_user_heals_the_wounded_living_but_not_the_dead(pack):
+    """桃园：使用者死 ⇒ 已受伤的存活角色各回复 1；已受伤的死者不回复。"""
+    garden = cards_of_type(pack, "peach_garden")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="peach_garden",
+        seats=[SeatSpec(hp=2, hand=(garden,)), SeatSpec(hp=2), SeatSpec(hp=4)],
+        deck=_deck_excluding(pack, garden),
+        turn_seat=0,
+        die_during_nullify=True,
+    )
+
+    assert [player.hp for player in engine.state.players] == [2, 3, 4], (
+        "死者（已受伤）不回复；已受伤的存活者各回复 1；未受伤者照旧"
+    )
+    assert engine.state.player(0).alive is False
+    assert [record.targets[0] for record in _timings(engine, Timing.RECOVER_VALUE)] == [1], (
+        "回复段只对存活目标压帧"
+    )
+    assert garden in engine.state.discard, "使用牌照常进弃牌堆"

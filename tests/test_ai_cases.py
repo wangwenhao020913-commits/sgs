@@ -22,7 +22,7 @@ import pytest
 
 from sgs.agents import HeuristicPlayer
 from sgs.agents import heuristic as heuristic_scoring
-from sgs.data import Identity, RuleConfig, Suit, load_content_pack
+from sgs.data import Identity, Kingdom, RuleConfig, Suit, load_content_pack
 from sgs.engine import Engine, ai_stream
 from sgs.effects import behavior_for, is_slash
 from sgs.skills import hero_card_zone_key
@@ -4031,3 +4031,246 @@ def test_guyong_shenxing_ai_fills_the_manifest_and_filters_two_cards_into_one() 
     )
     assert dodge in engine.state.discard and nullify in engine.state.discard
     assert len(engine.state.player(0).hand) == 1, "弃两张、摸一张"
+
+
+# ---------------------------------------------------------------------------
+# M6 票 18 / dead-actor-in-flight 票 03：界华佗【除疠】的逐目标询问
+# ---------------------------------------------------------------------------
+
+CHULI = "hero.jie_huatuo.chuli"
+
+
+def _chuli_ai_board(*, owner_seat: int, lord_seat: int, hand, others, deck):
+    """4 人身份局：``owner_seat`` = 界华佗（QUN）；其余的势力 = 0/2 魏、1/3 蜀。
+
+    ``others`` 是"座位 → 手牌"的显式表（【除疠】的目标池要求目标"有牌可弃"）。
+    """
+    specs = []
+    for seat in range(4):
+        identity = Identity.LORD if seat == lord_seat else Identity.REBEL
+        if seat == owner_seat:
+            specs.append(
+                SeatSpec(
+                    hero="jie_huatuo",
+                    kingdom=Kingdom.QUN,
+                    hand=hand,
+                    identity=identity,
+                )
+            )
+        else:
+            specs.append(
+                SeatSpec(
+                    kingdom=Kingdom.WEI if seat % 2 == 0 else Kingdom.SHU,
+                    hand=others.get(seat, ()),
+                    identity=identity,
+                )
+            )
+    return build_state(
+        pack=PACK,
+        seats=specs,
+        deck=deck,
+        turn_seat=owner_seat,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+def _chuli_ai_events(engine) -> list[tuple[str, int]]:
+    """【除疠】帧里「问哪一座」与「弃哪一座」按发生顺序排成一条序列。"""
+    skill_frame = next(
+        record.frame_id
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.SKILL
+    )
+    events: list[tuple[str, int]] = []
+    for record in engine.records:
+        if (
+            record.kind == "query"
+            and record.query.kind == "SELECT_CARDS"
+            and record.query.skill_id == CHULI
+        ):
+            asked = {slot.ref.seat for slot in record.query.slots}
+            assert len(asked) == 1, f"一次只问一座，实得 {asked}"
+            events.append(("ask", asked.pop()))
+        elif (
+            record.kind == "delta"
+            and record.delta_type == "card_move"
+            and record.reason is MoveReason.DISCARD
+            and record.frame_id == skill_frame
+        ):
+            events.append(("discard", record.owner))
+    return events
+
+
+def _run_chuli_ai(engine, ai_seat: int):
+    """真 AI 应答 ``ai_seat``、其余座位最小合法应答；跑到【除疠】的 SKILL 帧出栈。"""
+    seen: list[tuple[object, object]] = []
+
+    def over() -> bool:
+        return any(
+            record.kind == "frame"
+            and record.op == "pop"
+            and record.frame_kind is FrameKind.SKILL
+            for record in engine.records
+        )
+
+    for _ in range(4_000):
+        if over():
+            return engine, seen
+        query = engine.pending
+        if query is None:
+            if engine.finished:
+                return engine, seen
+            engine._step()
+            continue
+        responder = (
+            HeuristicPlayer(ai_stream(0, query.actor))
+            if query.actor == ai_seat
+            else PassPlayer()
+        )
+        action = responder.respond(query)
+        seen.append((query, action))
+        engine.submit(action)
+    raise AssertionError("步数上限内没有到达停止条件")
+
+
+def _chuli_deck(*hand_cards: int) -> tuple[int, ...]:
+    """牌堆：把【闪】排在前面（每个座位摸牌阶段摸到的都是【闪】，出牌阶段用不出去）。"""
+    dodges = set(cards_of_type(PACK, "dodge")) - set(hand_cards)
+    rest = [
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in set(hand_cards) and card_id not in dodges
+    ]
+    return (*sorted(dodges), *rest)
+
+
+def test_chuli_ai_answers_one_card_per_seat_right_before_each_discard() -> None:
+    """【除疠】的逐目标顺序：AI 每一次「弃哪张」问答之后**立刻**跟着对应座位的弃置。
+
+    判据 = 记录流严格交错：ask(自己) · discard(自己) · ask(目标) · discard(目标) …
+    旧实现是 ask × N 再 discard × N，本用例会看到连续两个 ask。座位步由 AI 的复合动作
+    一次选齐（``ActivateSkill.choices``），三次选牌都由同一个真 ``HeuristicPlayer`` 应答。
+    """
+    # 【无懈可击】是手里**最便宜**的一张（3.5 < 【闪】4.0）：`_score_chuli` 因此 > 0，
+    # 发动决策不再落在与 `EndPhase` 的 0 分平局上（平分由抽签决定，用例会变脆）。
+    own = (cards_of_type(PACK, "nullify")[0], *cards_of_type(PACK, "dodge")[:2])
+    others = {
+        1: (cards_of_type(PACK, "dismantlement")[0],),
+        3: (cards_of_type(PACK, "dismantlement")[1],),
+    }
+    state = _chuli_ai_board(
+        owner_seat=0,
+        lord_seat=0,
+        hand=own,
+        others=others,
+        deck=_chuli_deck(*own, *others[1], *others[3]),
+    )
+    engine = Engine.from_state(state, seed=3)
+
+    engine, seen = _run_chuli_ai(engine, ai_seat=0)
+
+    activation = next(
+        action
+        for _query, action in seen
+        if isinstance(action, ActivateSkill) and action.skill_id == CHULI
+    )
+    assert activation.choices, "AI 的座位步要选到至少一名目标（否则没有逐目标可谈）"
+    asks = [
+        (query, action)
+        for query, action in seen
+        if query.kind == "SELECT_CARDS" and query.skill_id == CHULI
+    ]
+    assert len(asks) >= 2, f"自己 + 至少一名目标 ⇒ 至少两次选牌，实得 {len(asks)}"
+    assert all(isinstance(action, SelectCards) and action.picks for _q, action in asks), (
+        f"每次都要真的交出一张，实得 {[action for _q, action in asks]!r}"
+    )
+    events = _chuli_ai_events(engine)
+    assert len(events) == 2 * len(asks), f"每次询问都要有一次对应弃置，实得 {events}"
+    assert [kind for kind, _seat in events] == ["ask", "discard"] * len(asks), (
+        f"选牌与弃置必须按座位交错（不是先全问完再统一搬），实得 {events}"
+    )
+    asked_seats = [seat for kind, seat in events if kind == "ask"]
+    discarded_seats = [seat for kind, seat in events if kind == "discard"]
+    assert asked_seats == discarded_seats, "问的是哪一座就弃哪一座，顺序一致"
+    assert asked_seats[0] == 0 and len(set(asked_seats)) == len(asked_seats)
+
+
+def _chuli_kill_on_discard(*, card_owner: int, victim: int):
+    """test-only ``MOVE_AFTER`` 钩子：``card_owner`` 的牌被弃置后打死 ``victim``。"""
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef, move_event
+    from sgs.skills import catalog as catalog_module
+    from sgs.timing import Timing
+
+    skill_id = "hero.fake.ai_chuli_kill"
+
+    def handler(host, frame):
+        event = move_event(frame)
+        if event is None or event.reason is not MoveReason.DISCARD:
+            return None
+        if event.from_zone.seat != card_owner:
+            return None
+        if not host.state.player(victim).alive:
+            return None
+        host.enter_death(frame, victim)
+        return "stay"
+
+    definition = SkillDef(
+        skill_id=skill_id,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.MOVE_AFTER, handler=handler),),
+    )
+    saved = catalog_module.CATALOG
+    catalog_module.CATALOG = MappingProxyType({**saved, skill_id: definition})
+
+    def restore() -> None:
+        catalog_module.CATALOG = saved
+
+    return skill_id, restore
+
+
+def test_chuli_ai_is_not_asked_again_after_the_owner_dies_mid_effect() -> None:
+    """【除疠】中途阵亡：弃掉自己那张后使用者阵亡 ⇒ 后面的座位**不再**被问、不再弃置。
+
+    4 人身份局、界华佗坐 1 号位（反贼；主公坐 0 号位 ⇒ 他死了不终局）。同一个真 AI
+    应答第一张选牌；test-only 钩子在产品死亡入口把他打死。判据 = 只有**一次**选牌询问、
+    只有**一次**【除疠】弃置，目标的两张牌仍在各自手里。
+    """
+    own = (cards_of_type(PACK, "nullify")[0], *cards_of_type(PACK, "dodge")[:2])
+    target_hand = cards_of_type(PACK, "dismantlement")
+    others = {0: (target_hand[0],), 3: (target_hand[1],)}
+    state = _chuli_ai_board(
+        owner_seat=1,
+        lord_seat=0,
+        hand=own,
+        others=others,
+        deck=_chuli_deck(*own, *others[0], *others[3]),
+    )
+    engine = Engine.from_state(state, seed=3)
+    skill_id, restore = _chuli_kill_on_discard(card_owner=1, victim=1)
+    try:
+        engine.grant_skill(1, skill_id)
+        engine, seen = _run_chuli_ai(engine, ai_seat=1)
+    finally:
+        restore()
+
+    assert engine.state.player(1).alive is False, "前提：弃掉自己那张后使用者阵亡"
+    asks = [
+        (query, action)
+        for query, action in seen
+        if query.kind == "SELECT_CARDS" and query.skill_id == CHULI
+    ]
+    assert len(asks) == 1, f"阵亡后不能再选牌，实得 {len(asks)} 次选牌询问"
+    assert isinstance(asks[0][1], SelectCards) and asks[0][1].picks, "第一次问要交一张"
+    events = _chuli_ai_events(engine)
+    assert events == [("ask", 1), ("discard", 1)], (
+        f"只留下自己那张的弃置；目标没被问、也没被弃，实得 {events}"
+    )
+    assert target_hand[0] in engine.state.player(0).hand, "座位的牌没有被【除疠】弃掉"
+    assert target_hand[1] in engine.state.player(3).hand

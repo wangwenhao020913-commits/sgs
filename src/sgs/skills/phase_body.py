@@ -1742,9 +1742,16 @@ def _qinyin_condition(host: Any, frame: Frame) -> bool:
 def _qinyin_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
     """提交点：按选项逐座位压 `RECOVER` / `LIFE_DECREASE` 子帧（座位序 = 行动顺序）。
 
-    重入：每压一帧就 ``return "stay"``，已结算的座位记进帧私有 ``qinyin_done``
-    （回复的钩子 / 濒死 / 死亡都可能让本效果挂起）。名单在**首次进入时定格**
-    （``qinyin_order`` 没写就按当时的存活座位算）——结算中有人阵亡不改变名单。
+    重入：剩余座位的子帧**一次性全部压出**（倒序压栈，结算顺序仍是行动顺序），已结算的
+    座位记进帧私有 ``qinyin_done``。名单在**首次进入时定格**（``qinyin_order`` 没写就按
+    当时的存活座位算）——结算中有人阵亡不改变名单。
+
+    **为什么不是"压一帧、``return "stay"``、出栈后重入再压下一帧"**（dead-actor-in-flight
+    票 03）：本技能是**阶段体**（帧住 ``_turn_data``、不压栈）。使用者在自己这一格失去体力
+    阵亡时，回合环在同一 ``_step`` 里判 ``_turn_is_over`` ⇒ 结束其回合并清掉阶段体帧；
+    还没压出的座位就随阶段体帧一起丢了。已压出的子帧在结算栈上，``_step`` 先清栈 ⇒
+    它们照常逐座结算（spec §1.4 第 13 行）。这也解释了为什么"死座位跳过"的判据放在
+    **压帧前**：名单里已阵亡的座位不压帧（01 的闸也会拒绝向死者写体力）。
     """
     owner = frame.data.get("skill_owner")
     if owner is None:
@@ -1755,10 +1762,15 @@ def _qinyin_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
         order = seats_from(host.state, int(owner), len(host.state.players))
         frame.data[_QINYIN_ORDER] = tuple(order)
     done = tuple(frame.data.get(_QINYIN_DONE, ()))
-    for seat in order:
-        if seat in done:
+    pending = tuple(seat for seat in order if seat not in done)
+    if not pending:
+        return None
+    for seat in reversed(pending):
+        # 已阵亡的座位：不压帧（不向死者写体力 / 回复），照记进度免得重入再判一遍。
+        if not host.state.player(seat).alive:
+            frame.data[_QINYIN_DONE] = (*frame.data.get(_QINYIN_DONE, ()), seat)
             continue
-        frame.data[_QINYIN_DONE] = (*done, seat)
+        frame.data[_QINYIN_DONE] = (*frame.data.get(_QINYIN_DONE, ()), seat)
         if choice == QINYIN_RECOVER:
             host.push_frame(
                 FrameKind.RECOVER,
@@ -1778,8 +1790,7 @@ def _qinyin_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
                 {"target": seat, "source": None, "amount": 1},
                 timing=Timing.LIFE_DECREASE_BEFORE,
             )
-        return "stay"
-    return None
+    return "stay"
 
 
 QINYIN_FLOW = SkillFlow(

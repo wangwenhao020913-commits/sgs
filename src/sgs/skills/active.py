@@ -1730,11 +1730,14 @@ CHULI = hero_skill_id("jie_huatuo", "chuli")
 _ASK_CHULI_CARD = "hero.jie_huatuo.chuli.card"
 """手写询问位置：第 ``i`` 名角色（0 = 自己）的那张成本牌。"""
 
-_CHULI_MOVED = "chuli_moved"
-"""帧私有：已经搬进弃牌堆的成本数（重入时从下一个角色接着搬）。"""
+_CHULI_PICKS = "chuli_picks"
+"""帧私有：座位 → 已经选定的那张成本牌（逐座选牌 / 弃置交错推进的进度）。"""
+
+_CHULI_DISCARDED = "chuli_discarded"
+"""帧私有：已经弃置的座位（元组）。重入时从还没弃的那一座接着搬。"""
 
 _CHULI_DRAWN = "chuli_drawn"
-"""帧私有：黑桃摸牌已经结算（重入不重复摸）。"""
+"""帧私有：黑桃摸牌已经处理过的座位（含"不是黑桃 / 已阵亡跳过"，重入不重复摸）。"""
 
 _CHULI_MAX_TARGETS = len(Kingdom)
 """**任意名**的上界 = 势力闭集的成员数（自己之外的每个势力至多一名）。"""
@@ -1779,60 +1782,84 @@ def _chuli_face(host: Any, seat: int, owner: int):
 
 
 def _chuli_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：逐名角色问一张牌 → 依次弃置 → 黑桃者各摸一张。
+    """提交点：目标一次选齐之后，**逐目标**「问一张 → 立刻弃置 → 黑桃者摸一张」。
 
-    选牌全部问完才开始搬牌：取消 / 校验失败发生在**步骤阶段**（此时一张牌都没动），
-    故"取消零副作用"不靠提交点的额外守卫。搬牌逐个进行（一次 ``move_card`` 只能有一个
-    来源区），进度落在帧私有游标里；某个角色的"失去牌后"钩子提问挂起时，重入从那一张
-    接着搬（``move_in_frame`` 的同帧幂等守卫保证不重复搬）。
+    目标顺序 = ``(owner, *answers["seat"])``（自己先、其余按座位答案序）。这一步是
+    **行为改动**（dead-actor-in-flight 票 03 / spec §1.4 末尾的"除疠实现偏差"）：旧实现
+    先把所有座位的牌问完、再统一搬，于是第 k 个座位弃置时触发的"失去牌后"钩子把使用者
+    打死之后，第 k+1 个座位的牌**仍然会被弃置**——与用户 2026-11-25 的更正不符。
+
+    逐座进度落在帧私有里（:data:`_CHULI_PICKS` / :data:`_CHULI_DISCARDED` /
+    :data:`_CHULI_DRAWN`）：选牌询问 / 搬牌（内联 ``MOVE_AFTER``）/ 摸牌（"获得牌后"
+    钩子）都可能在中间挂起，重入时既不重问、不重搬、不重摸，也不跳过下一座。
+
+    中途阵亡的三条读法（spec §1.4 第 15 行）：
+
+    - 使用者（询问者）阵亡 ⇒ 下一次 ``ask_selection`` 返回 ``Cancelled``（01 的引擎闸，
+      不是空选、不是 ``Pass``）⇒ 本效果就此收口，第 k+1 个座位起不能再选牌弃置；
+    - **已弃置的牌留下**（不回滚）；已弃置牌的黑桃摸牌照常，**死者自己那张跳过**（死者
+      不再摸）；
+    - 已死目标**跳过**（不选、不弃、不摸），但不中止整条效果——后面的座位照常。
     """
     owner = frame.data["source"]
     seats = (owner, *answers["seat"])
-    picked: list[tuple[int, int]] = []
+    picked: dict[int, int] = frame.data.setdefault(_CHULI_PICKS, {})
+    discarded = tuple(frame.data.get(_CHULI_DISCARDED, ()))
+    drawn = tuple(frame.data.get(_CHULI_DRAWN, ()))
     for index, seat in enumerate(seats):
-        cards = host.ask_selection(
-            frame,
-            owner=_ASK_CHULI_CARD,
-            key=f"chuli:card:{index}",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(
-                zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=False
-            ),
-            build_face=lambda seat=seat: _chuli_face(host, seat, owner),
-        )
-        if host.suspended(cards):
-            return "stay"
-        if not cards:
-            # 面上没有牌（重入时区域可能已变）：不搬、也不猜。
-            return None
-        picked.append((seat, int(cards[0])))
-    moved = int(frame.data.get(_CHULI_MOVED, 0))
-    while moved < len(picked):
-        seat, card_id = picked[moved]
-        control = host.move_in_frame(
-            frame,
-            host.state.refs((card_id,)),
-            to_zone=ZoneRef(Zone.DISCARD),
-            reason=MoveReason.DISCARD,
-            owner=seat,
-            actor=owner,
-        )
-        if control == "stay":
-            return "stay"
-        frame.data[_CHULI_MOVED] = moved + 1
-        moved += 1
-    if not frame.data.get(_CHULI_DRAWN):
-        # 逐座摸牌里可能触发【清俭】并挂起（票 24：摸牌算获得）——挂起要把
-        # ``"stay"`` 上抛，并用帧内游标记住已摸到第几项，续跑不重复摸、不漏摸。
-        done = int(frame.data.get("chuli_drawn", 0))
-        for seat, card_id in picked[done:]:
-            if host.state.card(card_id).suit == Suit.SPADE.value:
-                if host.draw_for_hand(frame, seat, 1) == "stay":
-                    return "stay"
-            done += 1
-            frame.data["chuli_drawn"] = done
-        frame.data[_CHULI_DRAWN] = True
+        if seat in drawn:
+            continue
+        if not host.state.player(seat).alive:
+            # 已阵亡的目标：不选、不弃、不摸；也不中止整条效果（Q5 / Q1）。
+            continue
+        card_id = picked.get(seat)
+        if card_id is None:
+            cards = host.ask_selection(
+                frame,
+                owner=_ASK_CHULI_CARD,
+                key=f"chuli:card:{index}",
+                actor=owner,
+                timing=Timing.PHASE_PLAY_IDLE,
+                spec=SelectionSpec(
+                    zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=False
+                ),
+                build_face=lambda seat=seat: _chuli_face(host, seat, owner),
+            )
+            if host.suspended(cards):
+                return "stay"
+            if host.cancelled(cards):
+                # 询问者（使用者）已在前面某一座弃置后阵亡：取消 ≠ 空选 ⇒ 收口。
+                return None
+            if not cards:
+                # 面上没有牌（重入时区域可能已变）：这一座不搬、也不中止后面的座位。
+                drawn = (*drawn, seat)
+                frame.data[_CHULI_DRAWN] = drawn
+                continue
+            card_id = int(cards[0])
+            picked[seat] = card_id
+        if seat not in discarded:
+            control = host.move_in_frame(
+                frame,
+                host.state.refs((card_id,)),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=seat,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+            discarded = (*discarded, seat)
+            frame.data[_CHULI_DISCARDED] = discarded
+        # 黑桃摸牌。"已摸"位记在**摸牌之前**：``draw_for_hand`` 先搬牌再内联派发
+        # "获得牌后"钩子，挂起续跑时不能再从牌堆摸第二张。
+        drawn = (*drawn, seat)
+        frame.data[_CHULI_DRAWN] = drawn
+        if (
+            host.state.player(seat).alive
+            and host.state.card(card_id).suit == Suit.SPADE.value
+        ):
+            if host.draw_for_hand(frame, seat, 1) == "stay":
+                return "stay"
     return None
 
 
@@ -1856,9 +1883,10 @@ CHULI_FLOW = SkillFlow(
     ),
     effect=_chuli_effect,
 )
-"""【除疠】的流水线：选任意名势力互异的其他角色（≥1）→ 提交点里逐名问成本牌。
+"""【除疠】的流水线：选任意名势力互异的其他角色（≥1）→ 提交点里逐名问成本牌并立刻弃置。
 
 ``hi`` = 势力闭集的大小：目标数受"势力互异"收住，故这是结构上界而不是拍脑袋的数。
+逐目标的顺序 / 中途阵亡读法见 :func:`_chuli_effect`（dead-actor-in-flight 票 03）。
 """
 
 
@@ -4906,6 +4934,9 @@ def _yeyan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         )
         if host.suspended(answer):
             return "stay"
+        if host.cancelled(answer):
+            # 使用者已阵亡（窗口外）⇒ 取消不是"全 0 分配"：不派生代价 / 伤害（01 的哨兵）。
+            return None
         allocation = tuple((int(seat), int(count)) for seat, count in answer.counts)
         frame.data[_YEYAN_ALLOCATION] = allocation
     heavy = any(count >= 2 for _, count in allocation)
@@ -4923,6 +4954,9 @@ def _yeyan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         )
         if host.suspended(picked):
             return "stay"
+        if host.cancelled(picked):
+            # 询问在代价阶段被取消（使用者已阵亡）⇒ 收口，不搬牌、不失去体力。
+            return None
         if len(picked) != YEYAN_COST_CARDS:
             # 防御分支：入口已按"四花色齐"收窄（单座上限 2/3 只在付得起时出现）⇒ 走不到。
             return None
@@ -6581,6 +6615,10 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
                 )
                 if host.suspended(answer):
                     return "stay"
+                if host.cancelled(answer):
+                    # 该座位已阵亡、窗口外 ⇒ 取消不是"最近者选择"：跳过该座位，不派生失体力。
+                    frame.data[flag] = True
+                    continue
                 target = _option_seat(answer)
             elif legal:
                 target = legal[0]
@@ -6609,6 +6647,10 @@ def _luanwu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
         )
         if host.suspended(action):
             return "stay"
+        if host.cancelled(action):
+            # 该座位已阵亡、窗口外 ⇒ 取消不是 ``Pass``：跳过它，**不**压失体力帧。
+            frame.data[flag] = True
+            continue
         if isinstance(action, ActivateSkill):
             # 提供者产物同窗（【蛊惑】扣置一张手牌当【杀】）：与借刀同一段展开，产物由
             # **本窗口**交付（目标 = 这次选定的最近者）。

@@ -1845,15 +1845,20 @@ def _qinyin_state(
     hand: tuple[int, ...] = (2, 3, 4, 5),
     hps: tuple[int, ...] = (4, 4, 4, 4),
     turn_seat: int | None = None,
+    lord_seat: int | None = None,
 ):
     """4 人身份局：主公坐 ``owner_seat``（先手），神周瑜就是主公。
+
+    ``lord_seat`` 换主公（缺省 = 神周瑜自己）：owner-death 用例必须让**别人**当主公，
+    否则主公一死立即终局、测不到"其余座位照常"（身份局规则）。
 
     开局手牌 ``hand`` ⇒ 摸牌阶段再摸 2 张 ⇒ 弃牌阶段弃到体力上限为止，故
     ``len(hand) + 2 - hp`` 就是本阶段弃置的手牌数。
     """
+    lord = owner_seat if lord_seat is None else lord_seat
     seats = []
     for seat in range(4):
-        identity = Identity.LORD if seat == owner_seat else Identity.REBEL
+        identity = Identity.LORD if seat == lord else Identity.REBEL
         if seat == owner_seat:
             seats.append(
                 SeatSpec(hero=SHENZHOUYU, hp=hps[seat], hand=tuple(hand), identity=identity)
@@ -1916,6 +1921,56 @@ def _qinyin_run(engine, *, choice: str | None, limit: int = 4000) -> dict:
         if engine.finished:
             break
         if engine.state.turn_seat != first_turn:
+            break
+        engine._step()
+    return found
+
+
+def _qinyin_run_until_owner_turn(
+    engine, *, choice: str, owner_seat: int = 0, limit: int = 8000
+) -> dict:
+    """跑到**神周瑜自己的**回合把【琴音】结算完（身份局先手是主公，不一定是座位 0）。
+
+    与 :func:`_qinyin_run` 同一套应答，只把"一个回合就停"换成"答完选项后等回合易主"：
+    owner-death 用例里主公坐在别的座位，神周瑜的回合要到**主公之后**才轮得到。
+    """
+    found: dict = {"activation": None, "option": None}
+    answered = False
+    for _ in range(limit):
+        query = engine.pending
+        if query is not None:
+            if (
+                query.kind == QueryKind.SKILL_ACTIVATION
+                and getattr(query, "skill_id", None) == QINYIN
+            ):
+                found["activation"] = found["activation"] or query
+                engine.submit(
+                    next(
+                        action
+                        for action in query.legal_actions
+                        if getattr(action, "skill_id", None) == QINYIN
+                    )
+                )
+                continue
+            if query.kind == QueryKind.SELECT_OPTION and str(
+                getattr(query, "skill_id", "")
+            ).startswith("qinyin"):
+                found["option"] = found["option"] or query
+                answered = True
+                engine.submit(
+                    next(
+                        action
+                        for action in query.legal_actions
+                        if getattr(action, "choice", None) == choice
+                    )
+                )
+                continue
+            engine.submit(_default_action(query))
+            continue
+        if engine.finished:
+            break
+        # 答完选项之后等这一回合真正结束（技能帧出栈、回合易主）为止。
+        if answered and engine.state.turn_seat != owner_seat:
             break
         engine._step()
     return found
@@ -2001,6 +2056,53 @@ def test_qinyin_lose_hp_can_kill_and_continues_with_the_remaining_seats() -> Non
 
     assert engine.state.player(1).alive is False, "1 体力的人被【琴音】打死"
     assert [engine.state.player(seat).hp for seat in (0, 2, 3)] == [3, 3, 3]
+
+
+def test_qinyin_owner_death_still_takes_one_from_the_remaining_seats() -> None:
+    """G13：使用者因自己那 1 点失去体力阵亡 ⇒ **其后的座位照常**各失去 1 点。
+
+    主公**不是**神周瑜 / 干脆用无身份局（``identity_mode=False``）：身份局主公一死立即
+    终局，owner 当主公就测不到"其余座位照常"（票 03 的注意事项）。
+    """
+    engine = Engine.from_state(
+        _qinyin_state(hand=(2, 3, 4, 5), hps=(1, 4, 4, 4), lord_seat=1), seed=3
+    )
+
+    _qinyin_run_until_owner_turn(engine, choice=QINYIN_LOSE)
+
+    assert engine.state.player(0).alive is False, "1 体力再失 1 点 ⇒ 神周瑜阵亡"
+    assert [engine.state.player(seat).hp for seat in (1, 2, 3)] == [3, 3, 3], (
+        "使用者阵亡后的座位照常各失去 1 点（并列段各自结算）"
+    )
+    order = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_BEFORE
+    ]
+    assert order == [0, 1, 2, 3], f"座位序不因使用者中途阵亡而缩短，实得 {order}"
+
+
+def test_qinyin_skips_a_seat_that_is_already_dead_when_its_turn_comes() -> None:
+    """G13：轮到**已阵亡的座位**时跳过——不压失体力帧、不派发 ``LIFE_DECREASE_BEFORE``。"""
+    state = _qinyin_state(hand=(2, 3, 4, 5))
+    state.player(1).alive = False
+    state.player(1).hp = 0
+    engine = Engine.from_state(state, seed=3)
+
+    _qinyin_run(engine, choice=QINYIN_LOSE)
+
+    assert [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_BEFORE
+    ] == [0, 2, 3], "已死座位没有 LIFE_DECREASE_BEFORE（不压帧、不当成 0 点体力处理）"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.actor == 1
+    ], "死座位没有被问"
+    assert [engine.state.player(seat).hp for seat in (0, 2, 3)] == [3, 3, 3]
+    assert engine.state.player(1).hp == 0, "死者的体力不被写"
 
 
 def test_qinyin_does_not_trigger_in_another_players_discard_phase() -> None:
@@ -2235,6 +2337,46 @@ def test_yeyan_damage_still_resolves_after_the_owner_dies() -> None:
         if record.kind == "timing" and record.timing is Timing.DAMAGE_TAKE
     ]
     assert damages, "伤害时机照常派发"
+
+
+def test_yeyan_after_the_owner_dies_every_allocated_seat_still_takes_its_damage() -> None:
+    """G12：代价把使用者打死之后，**剩余座位**（座位 1、2）仍按行动顺序各挨分配的那份。"""
+    engine = Engine.from_state(_yeyan_state(hps=(1, 4, 4, 4), lord_seat=1), seed=5)
+
+    _yeyan_run(engine, counts={1: 2, 2: 1})
+
+    assert engine.state.player(0).alive is False, "1 体力失去 3 点 ⇒ 阵亡"
+    changes = [
+        (record.seat, record.amount)
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "hp_change"
+    ]
+    assert changes == [(0, -3), (1, -2), (2, -1)], (
+        f"代价先把使用者打死，两个剩余座位仍按行动顺序各挨自己那份，实得 {changes}"
+    )
+
+
+def test_yeyan_skips_a_target_that_died_before_its_allocated_damage() -> None:
+    """G12：轮到某个分配目标时它已阵亡 ⇒ **跳过**（不再挨那一份）。
+
+    座位 1、2 都横置：座位 1 先挨 1 点火焰伤害，铁索把这 1 点传导给 1 体力的座位 2
+    把它打死；轮到座位 2 自己那份时它已阵亡 ⇒ 跳过。判据 = 座位 2 只挨了传导那一次。
+    """
+    engine = Engine.from_state(
+        _yeyan_state(hps=(4, 4, 1, 4), chained=(1, 2)), seed=5
+    )
+
+    _yeyan_run(engine, counts={1: 1, 2: 1})
+
+    assert engine.state.player(2).alive is False, "前置：座位 2 被铁索传导打死"
+    seat_two = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.DAMAGE_TAKE
+        and record.actor == 2
+    ]
+    assert len(seat_two) == 1, f"只挨传导那 1 点，自己那份被跳过，实得 {seat_two}"
 
 
 def test_yeyan_is_a_limited_skill_and_disappears_after_use() -> None:

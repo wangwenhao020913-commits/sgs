@@ -51,7 +51,13 @@ class StepHost(Protocol):
 
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> None: ...
 
-    def ask(self, build: Callable[[int], Any]) -> Any: ...
+    def ask(
+        self,
+        build: Callable[[int], Any],
+        *,
+        identity: tuple[object, ...],
+        actor: int,
+    ) -> Any: ...
 
 
 @dataclass

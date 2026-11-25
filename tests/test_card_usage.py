@@ -21,7 +21,9 @@ from sgs.engine import Engine
 from sgs.state import (
     ActivateSkill,
     MoveReason,
+    QueryKind,
     Reforge,
+    WindowCause,
     Zone,
     ZoneRef,
     project,
@@ -257,3 +259,62 @@ def test_the_counter_stays_out_of_the_participant_projection():
     assert all(
         "used_or_played_ever" not in row for row in payload["players"]
     ), "也不进 `PlayerPublic`（信息通道与 47 条金录像的字节都不变）"
+
+
+# ---------------------------------------------------------------------------
+# 阵亡后仍在飞的使用照常计数（dead-actor-in-flight 票 02：无中）
+# ---------------------------------------------------------------------------
+
+
+class _DieInNullify:
+    """让 ``victim`` 在**无懈窗口**阵亡（产品死亡入口）；其余询问退到 ``PassPlayer``。"""
+
+    def __init__(self, engine: Engine, victim: int) -> None:
+        self._engine = engine
+        self._victim = victim
+        self._fallback = PassPlayer()
+        self.died = False
+
+    def respond(self, query):
+        if (
+            not self.died
+            and query.kind == QueryKind.RESPOND
+            and getattr(query, "cause", None) is WindowCause.NULLIFY
+        ):
+            self._engine.enter_death(self._engine.stack.top, self._victim)
+            self.died = True
+        return self._fallback.respond(query)
+
+
+def test_a_dead_ex_nihilo_user_draws_nothing_and_the_card_still_discards():
+    """无中：目标（自己）已死 ⇒ 无合法目标、不摸牌；牌照常进弃牌堆。
+
+    同时钉住"使用已经发生"：``used_or_played_ever`` 的唯一写点是 ``start_use``，随后的
+    阵亡不撤销这次使用——死亡不能反向改写它（票 02 的牌侧与使用计数交界）。
+    """
+    ex_nihilo = cards_of_type(PACK, "ex_nihilo")[0]
+    engine, state = _engine(
+        [SeatSpec(hand=(ex_nihilo,), hp=4), SeatSpec(hp=4), SeatSpec(hp=4)],
+        hand=(ex_nihilo,),
+    )
+    deck_before = len(state.deck)
+    engine.start_use(state.card(ex_nihilo), source=0, targets=(0,))
+
+    run_queries(
+        engine,
+        [_DieInNullify(engine, 0), PassPlayer(), PassPlayer()],
+        lambda e: not e.stack.frames,
+    )
+
+    assert _used_ever(engine) == 1, "使用发生在死亡之前，死亡不撤销它"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DRAW
+    ], "目标（自己）已阵亡 ⇒ 无合法目标、不摸牌"
+    assert len(state.deck) == deck_before, "牌堆一张都没少"
+    assert ex_nihilo in state.discard, "使用牌照常进弃牌堆"
+    assert state.player(0).alive is False
+    assert state.player(0).hand == [], "死者的手牌区为空"

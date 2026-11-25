@@ -37,6 +37,7 @@ from sgs.skills import conversion_offers
 from sgs.skills.active import CHULI_FLOW
 from sgs.state import (
     ActivateSkill,
+    FrameKind,
     MoveReason,
     Pass,
     PlayCard,
@@ -354,6 +355,227 @@ def test_chuli_still_asks_one_discard_per_target_after_the_seat_step():
     assert _moves_of(engine, wei) == [("hand", "discard", "DISCARD")]
     assert _moves_of(engine, shu) == [("hand", "discard", "DISCARD")]
     assert _moves_of(engine, wei_other) == [], "没被选中的角色一张都不弃"
+
+
+def _skill_frame_over(engine) -> bool:
+    """【除疠】的 SKILL 帧已出栈（效果整段走完；之后的回合不再改这些读数）。"""
+    return any(
+        record.kind == "frame"
+        and record.op == "pop"
+        and record.frame_kind is FrameKind.SKILL
+        for record in engine.records
+    )
+
+
+def _chuli_frame_id(engine) -> int:
+    """【除疠】的 SKILL 帧号：本次技能结算里所有 delta 的 ``frame_id``。"""
+    return next(
+        record.frame_id
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.SKILL
+    )
+
+
+def _chuli_events(engine) -> list[tuple[str, int]]:
+    """记录流里的「问谁一张」与「谁的那张进了弃牌堆」按发生顺序排成一条序列。
+
+    询问的座位从选择面的槽位读（``slot.ref.seat``）：三次询问的 ``actor`` 都是**询问者**
+    （界华佗本人），只有槽位能说明这一次问的是哪一座。弃置只看**本技能帧**里的 delta
+    （``frame_id`` = SKILL 帧号）——中途阵亡时死亡清算也会弃牌（DEATH 帧），那不是【除疠】
+    的弃置。
+    """
+    skill_frame = _chuli_frame_id(engine)
+    events: list[tuple[str, int]] = []
+    for record in engine.records:
+        if (
+            record.kind == "query"
+            and record.query.kind == QueryKind.SELECT_CARDS
+            and record.query.skill_id == CHULI
+        ):
+            asked = {slot.ref.seat for slot in record.query.slots}
+            assert len(asked) == 1, f"一次只问一座，实得 {asked}"
+            events.append(("ask", asked.pop()))
+        elif (
+            record.kind == "delta"
+            and record.delta_type == "card_move"
+            and record.reason is MoveReason.DISCARD
+            and record.frame_id == skill_frame
+        ):
+            events.append(("discard", record.owner))
+    return events
+
+
+def _kill_on_discard(*, card_owner: int, victim: int):
+    """**test-only** 的 MOVE_AFTER 技能：``card_owner`` 的牌被弃置后，用产品死亡入口
+    ``host.enter_death`` 打死 ``victim``。
+
+    样板 = ``tests/support/positions.py:state_engine`` 的 try/finally ``CATALOG`` 替换
+    （不 monkeypatch：替换即让 ``resolve_instances`` 的内容键缓存整批作废，恢复时再作废
+    一次）。产品代码不为测试加分支：死亡走的是引擎自己的死亡入口（清区 / 死亡结算全在）。
+    返回 ``(skill_id, restore)``；调用方在 ``try/finally`` 里恢复 ``CATALOG``。
+    """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef, move_event
+    from sgs.skills import catalog as catalog_module
+    from sgs.timing import Timing
+
+    skill_id = "hero.fake.chuli_kill_on_discard"
+
+    def handler(host, frame):
+        event = move_event(frame)
+        if event is None or event.reason is not MoveReason.DISCARD:
+            return None
+        if event.from_zone.seat != card_owner:
+            return None
+        if not host.state.player(victim).alive:
+            return None
+        # 弃置已经发生 ⇒ 压 DEATH 帧并让出控制权（与"钩子压帧后 return stay"同一姿态）。
+        host.enter_death(frame, victim)
+        return "stay"
+
+    definition = SkillDef(
+        skill_id=skill_id,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.MOVE_AFTER, handler=handler),),
+    )
+    saved = catalog_module.CATALOG
+    catalog_module.CATALOG = MappingProxyType({**saved, skill_id: definition})
+
+    def restore() -> None:
+        catalog_module.CATALOG = saved
+
+    return skill_id, restore
+
+
+def test_chuli_asks_for_a_card_right_before_discarding_it():
+    """G15：目标一次选齐后，**逐目标**「问一张 → 立刻弃置」——不是三次询问都排在搬牌之前。
+
+    判据 = 记录流的交错：ask(自己) · discard(自己) · ask(魏) · discard(魏) · ask(蜀) ·
+    discard(蜀)。旧实现是 ask ×3 再 discard ×3（spec §1.4 末尾的「实现偏差」）。
+    """
+    own = _with_suit("slash", "spade")
+    wei = _with_suit("slash", "spade", skip=1)
+    wei_other = _with_suit("peach", "heart")
+    shu = _with_suit("slash", "club")
+    state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
+    _, players = _chuli_players(picks=("seat:1", "seat:3"), cards=(0, 0, 0))
+
+    engine = _run(state, players, _skill_frame_over)
+
+    assert _chuli_events(engine) == [
+        ("ask", 0),
+        ("discard", 0),
+        ("ask", 1),
+        ("discard", 1),
+        ("ask", 3),
+        ("discard", 3),
+    ], "选牌与弃置必须按座位交错（不是先全问完再统一搬）"
+
+
+def test_chuli_owner_death_after_its_own_discard_stops_the_rest_and_keeps_the_card():
+    """G15：使用者弃掉**自己**那张后就阵亡 ⇒ 剩下的座位不能再选牌弃置；已弃的牌留下。
+
+    自己那张是黑桃：按"已弃置牌的黑桃摸牌照常（**死者自己那张跳过**）"，他不再摸。
+    """
+    from sgs.state import Zone
+
+    own = _with_suit("slash", "spade")
+    wei = _with_suit("slash", "spade", skip=1)
+    wei_other = _with_suit("peach", "heart")
+    shu = _with_suit("slash", "club")
+    state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
+    _, players = _chuli_players(picks=("seat:1", "seat:3"), cards=(0, 0, 0))
+    engine = Engine.from_state(state, seed=3)
+    skill_id, restore = _kill_on_discard(card_owner=0, victim=0)
+    try:
+        engine.grant_skill(0, skill_id)
+        run_queries(engine, players, _skill_frame_over)
+    finally:
+        restore()
+
+    assert engine.state.player(0).alive is False, "前提：弃置自己那张之后使用者阵亡"
+    asked = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_CARDS
+        and record.query.skill_id == CHULI
+    ]
+    assert len(asked) == 1, f"阵亡后不能再选牌（只问过自己那一次），实得 {len(asked)} 次"
+    assert own in engine.state.discard, "已弃置的牌留下（不回滚）"
+    assert _moves_of(engine, wei) == [], "第 k+1 个座位起不能再弃置"
+    assert _moves_of(engine, shu) == []
+    draws_to_owner = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone.zone is Zone.DECK
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == 0
+        and record.frame_id == _chuli_frame_id(engine)
+    ]
+    assert draws_to_owner == [], "死者自己那张黑桃不再摸（黑桃摸牌跳过）"
+
+
+def test_chuli_owner_death_after_a_target_discard_keeps_that_discard_and_its_spade_draw():
+    """G15：弃置**目标**那张后使用者阵亡 ⇒ 那张已弃的牌与被弃者的黑桃摸牌照常结算。
+
+    被弃的目标是黑桃 ⇒ 它摸 1 张（不是死者，故摸牌照常）；再往后的座位不能再选牌。
+    """
+    own = _with_suit("slash", "spade")
+    wei = _with_suit("slash", "spade", skip=1)
+    wei_other = _with_suit("peach", "heart")
+    shu = _with_suit("slash", "club")
+    state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
+    _, players = _chuli_players(picks=("seat:1", "seat:3"), cards=(0, 0, 0))
+    engine = Engine.from_state(state, seed=3)
+    # 自己那张先结算（也弃一张，不致死）；**座位 1** 那张被弃置时把使用者打死。
+    skill_id, restore = _kill_on_discard(card_owner=1, victim=0)
+    try:
+        engine.grant_skill(0, skill_id)
+        run_queries(engine, players, _skill_frame_over)
+    finally:
+        restore()
+
+    assert engine.state.player(0).alive is False, "前提：弃置座位 1 的牌后使用者阵亡"
+    assert _moves_of(engine, own) == [("hand", "discard", "DISCARD")], "自己的那张已弃"
+    assert _moves_of(engine, wei) == [("hand", "discard", "DISCARD")], "座位 1 的那张已弃（留下）"
+    assert _moves_of(engine, shu) == [], "再往后的座位不能再选牌弃置"
+    assert len(engine.state.player(1).hand) == 1, "被弃者是黑桃 ⇒ 照常摸 1 张（1 − 1 + 1）"
+
+
+def test_chuli_skips_a_target_that_died_before_its_turn_and_finishes_the_rest():
+    """G15：结算中途某个目标阵亡 ⇒ 轮到它时**跳过**（不选 / 不弃 / 不摸），其余座位照常。"""
+    own = _with_suit("slash", "spade")
+    wei = _with_suit("slash", "spade", skip=1)
+    wei_other = _with_suit("peach", "heart")
+    shu = _with_suit("slash", "spade", skip=2)
+    state = _chuli_state(own_card=own, wei_a=wei, wei_b=wei_other, shu=shu)
+    _, players = _chuli_players(picks=("seat:1", "seat:3"), cards=(0, 0, 0))
+    engine = Engine.from_state(state, seed=3)
+    # 弃置**自己**那张时把座位 1 打死：轮到座位 1 时应跳过，座位 3 照常。
+    skill_id, restore = _kill_on_discard(card_owner=0, victim=1)
+    try:
+        engine.grant_skill(0, skill_id)
+        run_queries(engine, players, _skill_frame_over)
+    finally:
+        restore()
+
+    assert engine.state.player(1).alive is False, "前提：座位 1 在轮到自己前阵亡"
+    assert _chuli_events(engine) == [
+        ("ask", 0),
+        ("discard", 0),
+        ("ask", 3),
+        ("discard", 3),
+    ], "死座位没有被问、也没有被弃；后面的座位照常（不因死座位中止整条效果）"
+    assert _moves_of(engine, shu) == [("hand", "discard", "DISCARD")], "座位 3 照常弃一张"
+    assert len(engine.state.player(3).hand) == 1, "座位 3 那张是黑桃 ⇒ 照常摸 1 张"
 
 
 def test_chuli_refuses_a_same_kingdom_set_the_pool_never_offered():

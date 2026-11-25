@@ -718,27 +718,34 @@ def _zuilun_apply(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         )
         if host.suspended(answer):
             return "stay"
+        if host.cancelled(answer):
+            # 应答者（使用者）已阵亡、窗口外 ⇒ 取消不是 Pass：不选受害者，整段收口
+            # （dead-actor-in-flight 票 01 的 Cancelled 哨兵；票 03 补这一处）。
+            frame.data[_ZUILUN_DONE] = True
+            return None
         victim = option_seat(answer)
         frame.data[_ZUILUN_VICTIM] = victim
     stage = int(frame.data.get(_ZUILUN_STAGE, 0))
-    if stage == 0:
-        frame.data[_ZUILUN_STAGE] = 1
-        host.push_frame(
-            FrameKind.LIFE_DECREASE,
-            {"target": owner, "source": None, "amount": 1},
-            timing=Timing.LIFE_DECREASE_BEFORE,
-        )
-        return "stay"
-    if stage == 1:
-        frame.data[_ZUILUN_STAGE] = 2
-        host.push_frame(
-            FrameKind.LIFE_DECREASE,
-            {"target": victim, "source": None, "amount": 1},
-            timing=Timing.LIFE_DECREASE_BEFORE,
-        )
-        return "stay"
-    frame.data[_ZUILUN_DONE] = True
-    return None
+    if stage >= 2:
+        frame.data[_ZUILUN_DONE] = True
+        return None
+    frame.data[_ZUILUN_STAGE] = 2
+    # X = 0 的两段失体力是**并列段**（spec §1.4 第 14 行），故在**同一次入场**里把两条
+    # 帧都压出（倒序压栈 ⇒ "你失 1 点"先结算、"其失 1 点"随后）。不能压一段就
+    # ``return "stay"`` 等出栈后重入：本技能挂在 ``PHASE_FINISH`` 的阶段体帧上（不压栈），
+    # 使用者在第一段阵亡时回合环会结束其回合并清掉阶段体帧——第二段就永远轮不到了。
+    # 已压出的子帧在结算栈上，``_step`` 先清栈 ⇒ 死者那一侧的并列段照常结算。
+    host.push_frame(
+        FrameKind.LIFE_DECREASE,
+        {"target": victim, "source": None, "amount": 1},
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+    host.push_frame(
+        FrameKind.LIFE_DECREASE,
+        {"target": owner, "source": None, "amount": 1},
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+    return "stay"
 
 
 ZUILUN_FLOW = SkillFlow(

@@ -373,7 +373,7 @@ extra_modifiers=(Modifier(ModifierPoint.CANDIDATES, MY_PROVIDER_WINDOWS.offers),
 | 列 | 回答什么 |
 |---|---|
 | `skill_id` | 全限定 id（与 `CATALOG` 同键） |
-| 回调 | `(host, frame) -> Control`；走流水线的技能在回调里调 `run_flow` |
+| 回调 | `(host, frame) -> Control`；走流水线的技能在回调里调 `run_flow`。**`ask_*` 在窗口外已阵亡的应答者身上返回 `Cancelled`**（`host.cancelled(value)`；dead-actor-in-flight 票 01）：读到它就停本段（返回 `None` / 让出），不得当 `Pass` / 空选 / `SUSPEND` 读；死亡时技能窗口只放开询问死者本人 |
 | 装载点 | A 族 = `src/sgs/skills/active.py:ACTIVE_SKILLS`（`_ACTIVATIONS` 的初值由它派生）；**非 A 族** = 声明级 `SkillDef.flow` + 在 `catalog.py` 末尾调 `src/sgs/skills/active.py:register_activation` |
 | 只读视图 | `src/sgs/skills/active.py:ACTIVATIONS`（`MappingProxyType`）——引擎只读它 |
 | 纪律 | **只在加载期登记一次**（`catalog.py` 末尾，相关模块都已 import 完）；重复登记是编程错误（同一 id 没有"后者胜"）；**运行期登记禁止**（"能派发谁"不许取决于时序）。与 `register_provider` 同一条纪律 |

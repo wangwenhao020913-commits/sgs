@@ -360,6 +360,9 @@ def resolve_dismantlement(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
+    if host.cancelled(picked):
+        # 使用者已阵亡：选牌询问取消（不是 Pass / 空选）⇒ 不派生"弃置"。
+        return picked
     return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.DISCARD))
 
 
@@ -376,6 +379,9 @@ def resolve_snatch(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
+    if host.cancelled(picked):
+        # 使用者已阵亡：选牌询问取消 ⇒ 不派生"获得"；牌留原处。
+        return picked
     return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.HAND, frame.data["source"]))
 
 
@@ -430,6 +436,9 @@ def resolve_fire_attack(host: Any, frame: Frame) -> Any:
         )
         if host.suspended(picked):
             return "stay"
+        if host.cancelled(picked):
+            # 目标已阵亡 / 不能操作：亮牌询问取消 ⇒ 无伤害。
+            return picked
         if not picked:
             return None
         frame.data["revealed"] = picked[0]
@@ -447,6 +456,9 @@ def resolve_fire_attack(host: Any, frame: Frame) -> Any:
         )
         if host.suspended(picked):
             return "stay"
+        if host.cancelled(picked):
+            # 使用者已阵亡：弃同花色牌的询问取消 ⇒ 无伤害。
+            return picked
         # 空元组 = 放弃 / 没有同花色（"只能放弃"）：记下"这一步已经问过"。
         frame.data["discarded"] = picked[0] if picked else None
     chosen = frame.data["discarded"]
@@ -576,6 +588,13 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         providers_used=providers_used,
         skip_if_empty=True,
     )
+    if not host.state.player(turn).alive:
+        # 轮到的响应者已阵亡：询问取消（不是 ``Pass``）⇒ 决斗结束、无人受伤。
+        # **必须先于统一预筛口**（dead-actor-in-flight 票 02；01 的交待）：
+        # ``AskPolicy.auto_skip`` 打开时"没有候选 ⇒ 不问"会落进下面的"不问 ⇒ 受伤"兜底，
+        # 把伤害压向死者。走同一扇 ``ask_respond`` 拿哨兵（引擎闸对窗口外的死者返回
+        # ``Cancelled`` 且不落询问记录），不另造一个"假的 Pass"。
+        return host.ask_respond(frame, turn, Timing.RESOLVE_AFTER_EFFECT, ctx)
     if not host.should_ask_respond(turn, ctx):
         # 票 05：这个座位**没有任何**办法打出【杀】（真牌 ∪ 转化 / 提供者）⇒ 不问，
         # 语义与它答 ``Pass`` 逐字相同（受到对方 1 点伤害）。类别位由本窗口写在载荷里，
@@ -590,6 +609,9 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 轮到已阵亡者响应：询问取消（不是 Pass）⇒ 决斗结束、无人受伤。
+        return action
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=turn, timing=Timing.PLAY_DECLARE)
         return _duel_accepted(frame, op, seat=turn, other=other, required=required)
@@ -710,6 +732,13 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         use_targets=use_targets,
         providers_used=providers_used,
     )
+    if not host.state.player(holder).alive:
+        # 持刀者已阵亡：询问取消（不是 ``Pass``）⇒ "否则交武器"不派生；武器随死亡清区进
+        # 弃牌堆。**必须先于 auto-b 判**（dead-actor-in-flight 票 02；01 的交待）：没有候选
+        # 时 :func:`_hand_over_weapon` 走的是"从死者取走"，授予口只挡"向死者授予"，会把
+        # 武器交给存活的使用者。走同一扇 ``ask_respond`` 拿哨兵——引擎闸对窗口外的死者
+        # 返回 ``Cancelled`` 且不落询问记录，不在这里另造一个"假的 Pass"。
+        return host.ask_respond(frame, holder, Timing.RESOLVE_AFTER_EFFECT, ctx)
     offers = [
         action
         for action in host.respond_candidates(holder, ctx)
@@ -726,6 +755,9 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 持刀者已阵亡：询问取消（不是 Pass）⇒ "否则交武器"不派生。
+        return action
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
@@ -832,6 +864,9 @@ def _resist_or_damage(
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 目标已阵亡 / 不能操作：询问取消 ⇒ 不派生"否则受到伤害"。
+        return action
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
@@ -938,6 +973,9 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
+    if host.cancelled(picked):
+        # 目标已阵亡：它那一份不取（留处理区，由 finish_harvest 一并弃掉）。
+        return picked
     if not picked:
         return None
     chosen = picked[0]

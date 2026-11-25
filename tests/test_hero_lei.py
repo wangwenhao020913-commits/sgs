@@ -29,7 +29,7 @@ _TOOLS = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同一条引导）
     sys.path.insert(0, str(_TOOLS))
 
-from sgs.data import Suit, load_content_pack
+from sgs.data import Identity, RuleConfig, Suit, load_content_pack
 from sgs.effects import (
     check_count,
     check_targets,
@@ -1300,11 +1300,11 @@ def test_fuyin_needs_this_dispatch_to_be_me_against_a_slash_or_duel():
     )
 
 
-def _zhugezhan_engine(*, seat1_hand, seat0_hand=(1,), owner_hp_max=8):
+def _zhugezhan_engine(*, seat1_hand, seat0_hand=(1,), owner_hp_max=8, owner_hp=3):
     state = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hero="zhugezhan", hp=3, hp_max=owner_hp_max, hand=seat0_hand),
+            SeatSpec(hero="zhugezhan", hp=owner_hp, hp_max=owner_hp_max, hand=seat0_hand),
             SeatSpec(hand=seat1_hand),
         ],
         deck=tuple(range(60, 108)),
@@ -1380,6 +1380,77 @@ def test_zuilun_declining_leaves_the_deck_and_hand_untouched():
     )
     assert player.queries, "问过一次「是否发动」"
     assert player.arrange is None, "不发动就没有排列询问"
+
+
+class _ZuilunHandLimitResponder(_ZuilunResponder):
+    """在自己的出牌阶段把 ``hand_limit_bonus`` 抬到 6（造 X = 0 的选项 3 不满足）。
+
+    ``hand_limit_bonus`` 是**回合作用域**的加式（回合末复位），故不能在建局时写：
+    主公 / 其他座位先走完一轮就把它清掉了。写在诸葛瞻自己的出牌阶段 ⇒ 他的弃牌阶段
+    按 1 + 6 = 7 的上限只弃到 7（**弃过牌** ⇒ 选项 2 不满足），终局手牌 7 张也多于
+    别人的 2 张（选项 3 不满足）⇒ X = 0。
+    """
+
+    def __init__(self, engine, *, split: int) -> None:
+        super().__init__(split=split)
+        self.engine = engine
+
+    def respond(self, query):
+        if str(getattr(query.kind, "value", query.kind)) == "PLAY_PHASE":
+            self.engine.state.player(0).hand_limit_bonus = 6
+        return super().respond(query)
+
+
+def test_zuilun_x_zero_the_dying_owner_still_costs_the_chosen_character_one_hp():
+    """G14：X = 0 的第一段（你失 1 点）把你打死 ⇒ **并列段**里已选定的另一名角色仍失 1 点。
+
+    X = 0 的三条选项都不满足：本回合没造成过伤害、弃置过牌、手牌数不是全场最少
+    ⇒ 排列步 split = 3（一张都不获得），进入"你与一名其他角色各失去 1 点体力"。
+    两个失体力段是**并列段**：第一段把使用者打死不取消第二段（spec §1.4 第 14 行）。
+
+    **4 人身份局、主人不是诸葛瞻**：2 人无身份局里坐者一死立即终局，第二段根本轮不到；
+    主公坐 1 号位时诸葛瞻的回合排在后面，也顺带证明"整局跑到他的结束阶段"这条真路径。
+    """
+    # 使用者手里也**没有【桃】**（濒死时自己救自己会把第一段吞掉）：从牌堆里取 9 张非桃。
+    hand = tuple(
+        card_id
+        for card_id in range(60, 108)
+        if PACK.deck.cards[card_id].type not in ("peach", "peach_garden")
+    )[:9]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=1, hp_max=8, hand=hand, identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        # 牌堆里**没有【桃】**：别的座位先走一轮、各摸 2 张之后也救不了诸葛瞻——
+        # 第一段必须真的把他打死，才能在**同一次结算**里看到第二段。
+        deck=tuple(
+            card_id
+            for card_id in range(60, 108)
+            if card_id not in hand and PACK.deck.cards[card_id].type != "peach"
+        ),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    player = _ZuilunHandLimitResponder(engine, split=3)
+    others = [_ZuilunResponder(activate=False) for _ in range(3)]
+    run_queries(
+        engine,
+        [player, *others],
+        lambda e: e.state.player(0).alive is False
+        and e.state.player(1).hp == 3
+        and e.pending is None,
+    )
+
+    assert engine.state.player(0).alive is False, "第一段：使用者失 1 点 ⇒ 阵亡"
+    assert engine.state.player(1).hp == 3, "已选定的另一名角色仍失 1 点（并列段各自结算）"
+    assert player.arrange is not None, "排列面照出（X = 0 时可直接提交）"
 
 
 def test_fuyin_makes_the_first_slash_ineffective():

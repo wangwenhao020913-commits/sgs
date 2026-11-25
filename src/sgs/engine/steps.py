@@ -1558,6 +1558,11 @@ def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
     target = frame.data["target"]
     if not frame.data["dying"]:
         return
+    if not host.state.player(target).alive:
+        # 已阵亡者不再进入濒死（dead-actor-in-flight 票 01 的兜底）：伤害帧若在目标
+        # 阵亡之后才被压出（在飞技能），引擎的授予口会挡掉体力写入，这里同样不再开
+        # 濒死单元——否则"死者被问【桃】、被回复"会从这条旁路发生。
+        return
     if host.state.player(target).hp > 0:
         # 「扣减体力后」的技能把这个座位的体力拉回了 1 点以上（今天没有这样的载体，
         # 这一句是次序修正后的防御）：濒死是"**此刻**体力 ≤ 0"的状态，不认旧判据。
@@ -2212,7 +2217,11 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
     delta = host.apply_hp_change(frame, target, min(player.hp + amount, player.hp_max))
     # 帧私有：**实际**回复量（被体力上限夹过；满体力时是 0）。「回复体力后」类技能
     # （sp1 票 02【良助】）判"真的回复过"读它——请求量 ``amount`` 在满体力时不为 0。
-    frame.data[RECOVERED_AMOUNT_KEY] = max(0, int(delta.after) - int(delta.before))
+    # ``delta is None`` = 目标已阵亡、引擎的授予口没有写（dead-actor-in-flight 票 01）：
+    # 实际回复量因此是 0，后续 ``RECOVER_AFTER`` 照常派发（时机在、体力没动）。
+    frame.data[RECOVERED_AMOUNT_KEY] = (
+        0 if delta is None else max(0, int(delta.after) - int(delta.before))
+    )
     return None
 
 

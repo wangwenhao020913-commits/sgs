@@ -5197,6 +5197,31 @@ def test_luanwu_skips_seats_that_died_earlier_in_the_same_resolution():
     assert _luanwu_seats_of(scripts) == [1, 3, 4]
 
 
+def test_luanwu_keeps_asking_the_remaining_seats_after_the_user_dies():
+    """G16：贾诩被座位 1 的【杀】打死 ⇒ **其余座位照常**二选一（失体力）。
+
+    4 人无身份局、贾诩 1 体力：座位 1 的【杀】命中即阵亡；座位 2 / 3 仍各被问一次，
+    都放弃选项 1 ⇒ 各失去 1 点体力。"使用者阵亡"不再是循环的收尾条件。
+    """
+    engine = Engine.from_state(
+        _luanwu_state(hps=(1, 4, 4, 4), others_hands={1: (SLASHES_108[0],)}), seed=7
+    )
+    scripts = [JiaxuPlayer(activate=True)] + [
+        JiaxuPlayer(target=0, slash_at=0),  # 座位 1：对最近的贾诩出【杀】
+        JiaxuPlayer(),                      # 座位 2：照常（失体力）
+        JiaxuPlayer(),                      # 座位 3：照常（失体力）
+    ]
+    _run_luanwu(engine, scripts)
+
+    assert engine.state.player(0).alive is False, "前提：贾诩在座位 1 的【杀】下阵亡"
+    assert _luanwu_seats_of(scripts) == [1, 2, 3], (
+        f"使用者阵亡后其余座位照常被问，实得 {_luanwu_seats_of(scripts)}"
+    )
+    assert [engine.state.player(seat).hp for seat in (1, 2, 3)] == [4, 3, 3], (
+        "座位 1 只出了【杀】；座位 2 / 3 各失 1 点"
+    )
+
+
 def test_luanwu_recomputes_nearest_when_the_seat_is_reached():
     """G9③：「距离最近」在**轮到该座位时**现算（不是发动时定格）。"""
     engine = Engine.from_state(
