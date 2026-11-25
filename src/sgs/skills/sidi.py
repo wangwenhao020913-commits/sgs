@@ -284,6 +284,10 @@ def _sidi_redeem(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(answer):
         return "stay"
+    if host.cancelled(answer):
+        # 持有者已在窗口外阵亡：取消不是二选一里的任何一项——不取消牌、不摸牌、不造伤
+        # （dead-actor-in-flight 票 06 / spec §1.2）。清除已经先于兑现落过（上面）。
+        return None
     # ``ask_option`` 交回的是**动作**（``SelectOption``），不是选项 id 本身。
     choice = str(getattr(answer, "choice", answer))
     if choice == SIDI_CANCEL:

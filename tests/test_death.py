@@ -12,12 +12,22 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import Identity, load_content_pack
+from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Cancelled, Engine
-from sgs.state import EndPhase, FrameKind, MoveReason, Pass, UseCard, Zone, ZoneRef
+from sgs.engine.steps import WINDOW_CANCELLED_KEY
+from sgs.state import (
+    EndPhase,
+    FrameKind,
+    MoveReason,
+    Pass,
+    QueryKind,
+    UseCard,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type
+from support import PassPlayer, SeatSpec, build_state, cards_of_type, run_queries
 
 PACK = load_content_pack(deck_profile="basic_53")
 """M1 回归网显式选中 53 张档（票 16 §9）；身份奖惩的 108 档用例在 ``test_victory.py``。"""
@@ -410,3 +420,140 @@ def test_grants_do_not_land_on_a_dead_player():
     assert not [record for record in engine.records[before:] if record.kind == "delta"], (
         "没有落地的授予不产生 delta"
     )
+
+
+# ---------------------------------------------------------------------------
+# 阵亡后已在飞（dead-actor-in-flight 票 06）：响应窗口里的取消 ≠ "没出闪 / 没声明"
+# ---------------------------------------------------------------------------
+
+STANDARD = load_content_pack(deck_profile="standard_108")
+"""无懈窗口要多一张锦囊；本文件其余用例仍钉 ``basic_53``（票 16 §9 的回归网）。"""
+
+
+def _frame_identity_in_stack(engine: Engine, frame) -> bool:
+    return any(current is frame for current in engine.stack.frames)
+
+
+def test_a_dead_dodge_target_does_not_record_a_missed_dodge() -> None:
+    """【闪】窗口的询问被取消 ⇒ 这一份效果段不发生，**不是**"没出闪"（票 06）。
+
+    目标在 ``RESOLVE`` 帧已在飞时已阵亡：``ask_query(DODGE)`` 返回 ``Cancelled``。旧实现
+    把它落到 ``frame.data["canceled"] = False``（= "没出闪"的裁决）；正确读法是票 01 的
+    "目标阵亡 ⇒ 该目标那一份整段不做"——故 C3/C4 的时机照记、``apply_effects`` 的存活闸
+    跳过效果表、C5 照常收尾，帧随即出栈、对局继续。
+    """
+    slash = SLASH[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hand=(slash,), identity=Identity.LORD),
+            SeatSpec(hp=0, alive=False, identity=Identity.REBEL),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+        ],
+        deck=DECK,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    frame = engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(slash),
+            "source": 0,
+            "targets": (1,),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    players = [_NoRescuePlayer(seat, slash_budget=0) for seat in range(4)]
+
+    # 跑到窗口收尾的那一步（C2 第一次重入之前）：这一瞬间的帧私有终态就是"取消"的落点。
+    for _ in range(20):
+        if WINDOW_CANCELLED_KEY in frame.data or "canceled" in frame.data:
+            break
+        engine._step()
+    assert WINDOW_CANCELLED_KEY in frame.data, "取消要落成显式的窗口终态（不是 'canceled'）"
+    assert "canceled" not in frame.data, (
+        "取消不许记成 ``canceled = False``：那是'没出闪'的裁决，会派生后续效果"
+    )
+    assert frame.data[WINDOW_CANCELLED_KEY] is True
+
+    # 之后照常走完 C3–C5 并出栈：对局继续，不回到窗口重问。
+    run_queries(engine, players, lambda e: not _frame_identity_in_stack(e, frame))
+    assert not _frame_identity_in_stack(engine, frame), "帧必须出栈（不能挂死在 C2）"
+    assert engine.pending is None
+    assert [
+        record.query for record in engine.records if record.kind == "query"
+        and record.query.kind == QueryKind.DODGE
+    ] == [], "窗口外不向死者发问，也不落 QueryRecord"
+    assert engine.state.player(1).hp == 0, "没有伤害落到已阵亡的目标身上"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ], "取消不是把【杀】照常结算：不压伤害帧"
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.RESOLVE_END
+    ], "C5 照常收尾（'这段不可实现'不等于'这张牌整次使用作废'）"
+
+
+def test_a_dead_seat_in_the_nullify_ring_is_skipped_and_the_window_continues() -> None:
+    """收集式无懈窗口：已阵亡的座位不发询问（``Cancelled``）⇒ 跳过它、窗口照旧问下一个。
+
+    收集式窗口的询问者区间是"当前回合角色起逆时针"的**全部座位**；已阵亡的座位也在名单里
+    （票 01 的引擎闸拒绝发问、返回 ``Cancelled``）。本用例钉住"跳过这一个、继续问下一个"
+    的语义：死座既不进记录、也不成为声明，其余座位照常被问，窗口照常收尾。
+    """
+    ex_nihilo = cards_of_type(STANDARD, "ex_nihilo")[0]
+    deck = tuple(
+        card_id
+        for card_id in range(len(STANDARD.deck.cards))
+        if card_id != ex_nihilo
+    )
+    state = build_state(
+        pack=STANDARD,
+        seats=[
+            SeatSpec(hp=4, identity=Identity.LORD),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+            SeatSpec(hp=0, alive=False, identity=Identity.REBEL),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+        ],
+        deck=deck,
+        processing=(ex_nihilo,),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    frame = engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(ex_nihilo),
+            "source": 0,
+            "targets": (),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    players = [PassPlayer() for _ in range(4)]
+
+    run_queries(engine, players, lambda e: not _frame_identity_in_stack(e, frame))
+    assert not _frame_identity_in_stack(engine, frame), "帧必须出栈（死座不能让窗口卡住）"
+
+    respond_actors = [
+        record.query.actor
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.RESPOND
+    ]
+    assert respond_actors == [0, 1, 3], (
+        "询问者区间里的死座（2）被跳过，其余座位按次序照问——"
+        f"实得 {respond_actors}"
+    )
+    assert len(state.player(0).hand) == 2, "窗口照常收尾：无中生有的摸两张照常执行"
+    assert [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.RESOLVE_END
+    ], "C5 照常收尾"

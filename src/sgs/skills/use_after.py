@@ -310,6 +310,11 @@ def _jie_jizhi(host: Any, frame: Frame) -> Control:
         )
         if host.suspended(answer):
             return "stay"
+        if host.cancelled(answer):
+            # 应答被取消（持有者已在窗口外阵亡）：取消不是 ``Pass``，更不是"发动"——
+            # 不弃牌、不加手牌上限，整段收口（dead-actor-in-flight 票 06 / spec §1.2）。
+            frame.data[_JIE_BONUS_KEY] = True
+            return None
         frame.data[_JIE_CHOICE_KEY] = answer
     if isinstance(answer, Pass):
         frame.data[_JIE_BONUS_KEY] = True
