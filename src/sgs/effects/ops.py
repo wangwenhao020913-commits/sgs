@@ -588,6 +588,13 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         providers_used=providers_used,
         skip_if_empty=True,
     )
+    if not host.state.player(turn).alive:
+        # 轮到的响应者已阵亡：询问取消（不是 ``Pass``）⇒ 决斗结束、无人受伤。
+        # **必须先于统一预筛口**（dead-actor-in-flight 票 02；01 的交待）：
+        # ``AskPolicy.auto_skip`` 打开时"没有候选 ⇒ 不问"会落进下面的"不问 ⇒ 受伤"兜底，
+        # 把伤害压向死者。走同一扇 ``ask_respond`` 拿哨兵（引擎闸对窗口外的死者返回
+        # ``Cancelled`` 且不落询问记录），不另造一个"假的 Pass"。
+        return host.ask_respond(frame, turn, Timing.RESOLVE_AFTER_EFFECT, ctx)
     if not host.should_ask_respond(turn, ctx):
         # 票 05：这个座位**没有任何**办法打出【杀】（真牌 ∪ 转化 / 提供者）⇒ 不问，
         # 语义与它答 ``Pass`` 逐字相同（受到对方 1 点伤害）。类别位由本窗口写在载荷里，
@@ -725,6 +732,13 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         use_targets=use_targets,
         providers_used=providers_used,
     )
+    if not host.state.player(holder).alive:
+        # 持刀者已阵亡：询问取消（不是 ``Pass``）⇒ "否则交武器"不派生；武器随死亡清区进
+        # 弃牌堆。**必须先于 auto-b 判**（dead-actor-in-flight 票 02；01 的交待）：没有候选
+        # 时 :func:`_hand_over_weapon` 走的是"从死者取走"，授予口只挡"向死者授予"，会把
+        # 武器交给存活的使用者。走同一扇 ``ask_respond`` 拿哨兵——引擎闸对窗口外的死者
+        # 返回 ``Cancelled`` 且不落询问记录，不在这里另造一个"假的 Pass"。
+        return host.ask_respond(frame, holder, Timing.RESOLVE_AFTER_EFFECT, ctx)
     offers = [
         action
         for action in host.respond_candidates(holder, ctx)
