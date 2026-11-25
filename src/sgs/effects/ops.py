@@ -360,6 +360,9 @@ def resolve_dismantlement(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
+    if host.cancelled(picked):
+        # 使用者已阵亡：选牌询问取消（不是 Pass / 空选）⇒ 不派生"弃置"。
+        return picked
     return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.DISCARD))
 
 
@@ -376,6 +379,9 @@ def resolve_snatch(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
+    if host.cancelled(picked):
+        # 使用者已阵亡：选牌询问取消 ⇒ 不派生"获得"；牌留原处。
+        return picked
     return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.HAND, frame.data["source"]))
 
 
@@ -430,6 +436,9 @@ def resolve_fire_attack(host: Any, frame: Frame) -> Any:
         )
         if host.suspended(picked):
             return "stay"
+        if host.cancelled(picked):
+            # 目标已阵亡 / 不能操作：亮牌询问取消 ⇒ 无伤害。
+            return picked
         if not picked:
             return None
         frame.data["revealed"] = picked[0]
@@ -447,6 +456,9 @@ def resolve_fire_attack(host: Any, frame: Frame) -> Any:
         )
         if host.suspended(picked):
             return "stay"
+        if host.cancelled(picked):
+            # 使用者已阵亡：弃同花色牌的询问取消 ⇒ 无伤害。
+            return picked
         # 空元组 = 放弃 / 没有同花色（"只能放弃"）：记下"这一步已经问过"。
         frame.data["discarded"] = picked[0] if picked else None
     chosen = frame.data["discarded"]
@@ -590,6 +602,9 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 轮到已阵亡者响应：询问取消（不是 Pass）⇒ 决斗结束、无人受伤。
+        return action
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=turn, timing=Timing.PLAY_DECLARE)
         return _duel_accepted(frame, op, seat=turn, other=other, required=required)
@@ -726,6 +741,9 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 持刀者已阵亡：询问取消（不是 Pass）⇒ "否则交武器"不派生。
+        return action
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
@@ -832,6 +850,9 @@ def _resist_or_damage(
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 目标已阵亡 / 不能操作：询问取消 ⇒ 不派生"否则受到伤害"。
+        return action
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
@@ -938,6 +959,9 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
+    if host.cancelled(picked):
+        # 目标已阵亡：它那一份不取（留处理区，由 finish_harvest 一并弃掉）。
+        return picked
     if not picked:
         return None
     chosen = picked[0]

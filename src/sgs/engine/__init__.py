@@ -7,6 +7,7 @@ from .errors import IllegalActionError, JournalVersionError
 from .game import (
     DRAW_COUNT,
     INITIAL_HP,
+    Cancelled,
     Engine,
     Outcome,
     SkillActivation,
@@ -63,6 +64,7 @@ __all__ = (
     "ArmorChangeRecord",
     "CardMoveRecord",
     "CardRevealRecord",
+    "Cancelled",
     "PindianRecord",
     "ChainedChangeRecord",
     "FlippedChangeRecord",

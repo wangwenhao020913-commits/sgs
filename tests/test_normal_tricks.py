@@ -144,6 +144,32 @@ def _deck_excluding(pack, *card_ids: int) -> tuple[int, ...]:
     return tuple(index for index in range(len(pack.deck.cards)) if index not in excluded)
 
 
+class _DieDuringNullify:
+    """让 ``victim`` 在**无懈窗口**的第一次询问处阵亡（"已在飞的使用者阵亡"的构造）。
+
+    无懈窗口是使用者阵亡的真实时机之一（票 92 的现场就是【蛊惑】质疑的失体力代价在
+    响应窗口里打死了使用者）。这里走**产品死亡入口** :meth:`Engine.enter_death`：把
+    DEATH 帧压在当前 RESOLVE 帧之上，死亡结算先跑（清空三区），随后 C 段面对"来源已
+    阵亡"的状态——与真实死亡同一面，不靠测试自己模拟清区。
+    """
+
+    def __init__(self, inner, engine: Engine, victim: int) -> None:
+        self._inner = inner
+        self._engine = engine
+        self._victim = victim
+        self.died = False
+
+    def respond(self, query):
+        if (
+            not self.died
+            and query.kind == QueryKind.RESPOND
+            and query.cause is WindowCause.NULLIFY
+        ):
+            self._engine.enter_death(self._engine.stack.top, self._victim)
+            self.died = True
+        return self._inner.respond(query)
+
+
 def _run_trick(
     pack,
     *,
@@ -156,6 +182,7 @@ def _run_trick(
     pick: int = 0,
     use_target: int | None = None,
     designations: tuple[int, ...] = (),
+    die_during_nullify: bool = False,
 ) -> tuple[Engine, _Plan]:
     """构造局面 → 跑到"这张牌的使用结算结束后"即止。"""
     plan = _Plan(
@@ -175,6 +202,8 @@ def _run_trick(
     )
     engine = Engine.from_state(state, seed=seed)
     players = [_Planned(plan) for _ in seats]
+    if die_during_nullify:
+        players[turn_seat] = _DieDuringNullify(players[turn_seat], engine, turn_seat)
 
     run_until(engine, players, lambda e: plan.played and _use_settled(e, play))
     return engine, plan
@@ -541,6 +570,129 @@ def test_snatch_takes_a_visible_equipment_card_into_hand(pack):
     assert [(slot.ref.zone, slot.card.card_id) for slot in slots] == [(Zone.EQUIP, weapon)]
     assert weapon in engine.state.player(0).hand
     assert engine.state.player(3).equip == []
+
+
+def _run_constructed(engine: Engine, seats: int) -> None:
+    """把一个人造中间态跑到结算栈清空（最多 2 000 步，防"永远收不了尾"吊死测试）。"""
+    players = [RecordingPlayer() for _ in range(seats)]
+    for _ in range(2_000):
+        if not engine.stack.frames:
+            return
+        if engine.pending is None:
+            engine._step()
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    raise AssertionError("构造局面的结算在 2 000 步内没有跑完")
+
+
+def test_a_snatch_user_who_dies_in_flight_asks_nobody_and_grants_nothing(pack):
+    """顺手牵羊的使用者在无懈窗口阵亡（票 92 现场）：询问取消、不派生"获得"、牌留原处。
+
+    选牌询问对**已阵亡的使用者**返回 ``Cancelled``（既不是 ``Pass`` 也不是空选），
+    因此"获得"这一段不执行；目标装备区的牌留原处；使用牌照常进弃牌堆。
+    """
+    snatch = cards_of_type(pack, "snatch")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="snatch",
+        seats=[SeatSpec(hand=(snatch,)), SeatSpec(), SeatSpec(), SeatSpec(equip=(weapon,))],
+        deck=_deck_excluding(pack, snatch, weapon),
+        turn_seat=0,
+        die_during_nullify=True,
+    )
+
+    assert _queries(engine, QueryKind.SELECT_CARDS) == [], "窗口外不向死者要选择"
+    assert weapon in engine.state.player(3).equip, "目标牌留原处（不派生『获得』）"
+    assert engine.state.player(3).hand == []
+    assert snatch in engine.state.discard, "使用牌照常进弃牌堆"
+    dead = engine.state.player(0)
+    assert (dead.hand, dead.equip, dead.judge) == ([], [], []), "死者三区空"
+
+
+def test_a_dismantlement_user_who_dies_in_flight_leaves_the_card_in_place(pack):
+    """过河拆桥的使用者在无懈窗口阵亡：选牌询问取消，"弃置"不执行、目标牌留原处。"""
+    dismantle = cards_of_type(pack, "dismantlement")[0]
+    victim = cards_of_type(pack, "slash")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="dismantlement",
+        seats=[SeatSpec(hand=(dismantle,)), SeatSpec(hand=(victim,)), SeatSpec()],
+        deck=_deck_excluding(pack, dismantle, victim),
+        turn_seat=0,
+        die_during_nullify=True,
+    )
+
+    assert _queries(engine, QueryKind.SELECT_CARDS) == [], "窗口外不向死者要选择"
+    assert victim in engine.state.player(1).hand, "目标牌留原处（不派生『弃置』）"
+    assert victim not in engine.state.discard
+    assert dismantle in engine.state.discard, "使用牌照常进弃牌堆"
+    dead = engine.state.player(0)
+    assert (dead.hand, dead.equip, dead.judge) == ([], [], []), "死者三区空"
+
+
+def test_a_dead_target_of_a_multi_target_trick_is_skipped_while_the_others_respond(pack):
+    """目标存活：目标表冻结后目标阵亡 ⇒ 该目标那一份不做，其余目标照跑。
+
+    RESOLVE 帧的 ``targets = (0, 2)``（座位 0 已阵亡）：座位 0 不接受"南蛮"的响应询问、
+    也不落伤害 / 濒死；座位 2 照常被问、放弃后受到来源 1 的 1 点伤害。
+    """
+    barbarian = cards_of_type(pack, "barbarian_invasion")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, barbarian),
+        processing=(barbarian,),
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(barbarian),
+            "source": 1,
+            "targets": (0, 2),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    _run_constructed(engine, 3)
+
+    responses = _windows(engine, WindowCause.BARBARIAN_INVASION)
+    assert [query.actor for query in responses] == [2], "死目标不被问、活目标照常响应"
+    assert engine.state.player(0).hp == 0, "死目标不落伤害、不进入濒死"
+    assert engine.state.player(2).hp == 3, "活目标受到来源 1 的 1 点伤害"
+    assert not [delta for delta in _deltas(engine, "hp_change") if delta.seat == 0]
+
+
+def test_damage_from_a_dead_source_is_pushed_without_a_source(pack):
+    """伤害来源已阵亡 ⇒ 压 DAMAGE 帧时 ``source=None``（业炎口径推广；已压出的帧不追溯）。"""
+    arrows = cards_of_type(pack, "arrow_barrage")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, arrows),
+        processing=(arrows,),
+        turn_seat=2,
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(arrows),
+            "source": 0,
+            "targets": (1,),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    _run_constructed(engine, 3)
+
+    assert engine.state.player(1).hp == 3, "目标照常受到 1 点伤害"
+    assert engine.damage_events[-1].source is None, "压帧时来源已阵亡 ⇒ 无来源伤害"
+    deals = _timings(engine, Timing.DAMAGE_DEAL)
+    assert deals and deals[-1].actor is None, "DAMAGE 时机的 actor 也不认死者"
 
 
 def test_barbarian_invasion_only_hits_who_cannot_play_a_slash(pack):

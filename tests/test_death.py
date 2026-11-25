@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from sgs.data import Identity, load_content_pack
-from sgs.engine import Engine
+from sgs.engine import Cancelled, Engine
 from sgs.state import EndPhase, FrameKind, MoveReason, Pass, UseCard, Zone, ZoneRef
 from sgs.timing import Timing
 
@@ -324,3 +324,89 @@ def test_push_frame_is_refused_once_the_verdict_is_decided():
     assert not engine.finished, "检测点不终止：死亡结算还在跑"
     with pytest.raises(RuntimeError):
         engine.push_frame(FrameKind.DAMAGE, {}, timing=Timing.DAMAGE_DEAL)
+
+
+# ---------------------------------------------------------------------------
+# 阵亡后已在飞（dead-actor-in-flight 票 01）：询问口 / 授予口
+# ---------------------------------------------------------------------------
+
+
+def test_a_dead_actor_is_only_asked_inside_the_death_time_window():
+    """询问口：窗口外**不落询问**、返回 ``Cancelled``；窗口内仍问死者本人（武魂平票）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec()],
+        deck=DECK,
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=1)
+    frame = engine.push_frame(
+        FrameKind.SKILL,
+        {"source": 1, "targets": (), "skill_id": "test.death_time"},
+        timing=Timing.DEATH_ON,
+    )
+
+    refused = engine.ask_option(
+        frame, 0, Timing.DEATH_ON, skill_id="test.death_time", options=("a",), optional=True
+    )
+    assert refused is Cancelled, "死者的询问返回 Cancelled 哨兵（不是 Pass / 空选 / SUSPEND）"
+    assert engine.cancelled(refused) and not engine.suspended(refused)
+    assert not isinstance(refused, Pass), "Cancelled 不是放弃"
+    assert not [record for record in engine.records if record.kind == "query"], (
+        "被取消的询问不落 QueryRecord"
+    )
+
+    state.player(0).death_time_skills_active = True
+    allowed = engine.ask_option(
+        frame, 0, Timing.DEATH_ON, skill_id="test.death_time", options=("a",), optional=True
+    )
+    assert engine.suspended(allowed), "死亡时技能窗口仍可询问死者本人"
+    assert [record.query.actor for record in engine.records if record.kind == "query"] == [0]
+
+
+def test_grants_do_not_land_on_a_dead_player():
+    """授予口：牌进死者区域 / 加体力 / 标记 / 状态都不落地、不发 delta（取走照旧）。"""
+    card = cards_of_type(PACK, "slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(hand=(card,))],
+        deck=tuple(card_id for card_id in DECK if card_id != card),
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=1)
+    frame = engine.push_frame(
+        FrameKind.SKILL,
+        {"source": 1, "targets": (), "skill_id": "test.grants"},
+        timing=Timing.DEATH_ON,
+    )
+    before = len(engine.records)
+
+    assert engine.move_in_frame(
+        frame,
+        state.refs((card,)),
+        to_zone=ZoneRef(Zone.HAND, 0),
+        reason=MoveReason.PUT,
+        owner=0,
+    ) is None
+    assert card in engine.state.player(1).hand, "牌进死者区域的授予不落地（牌留原处）"
+    assert engine.apply_hp_change(frame, 0, 1) is None
+    assert engine.add_marker(
+        frame, 0, name="梦魇", source_seat=1, source_skill_id="test.grants"
+    ) is False
+    assert engine.set_chained(frame, 0, True) is False
+    assert engine.set_flipped(frame, 0, True) is False
+    assert engine.set_wine_active(frame, 0, True) is False
+    assert engine.grant_skill(0, "test.granted", frame=frame) is False
+
+    dead = engine.state.player(0)
+    assert (dead.hp, dead.markers, dead.chained, dead.flipped, dead.wine_active) == (
+        0,
+        (),
+        False,
+        False,
+        False,
+    ), "体力 / 标记 / 状态一个都没写进死者"
+    assert dead.granted_skills == []
+    assert not [record for record in engine.records[before:] if record.kind == "delta"], (
+        "没有落地的授予不产生 delta"
+    )

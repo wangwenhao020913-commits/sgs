@@ -73,7 +73,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state
+from support import RecordingPlayer, SeatSpec, build_state, cards_of_type
 
 DEFAULT_GAMES: Final = 100
 DEFAULT_SECONDS: Final = 120.0
@@ -319,8 +319,94 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
                 f" 超过手牌张数 {len(player.hand)}（计数口径不一致）",
             )
 
+    _check_dead_actor_invariants(engine, record)
     _check_candidate_cap(record, seed, n)
     _check_decline_sorts_last(record, seed, n)
+
+
+_SEAT_ZONES: Final = frozenset({Zone.HAND, Zone.EQUIP, Zone.JUDGE, Zone.HERO})
+"""逐座位的区域（往这些区搬牌 = 向该座位授予牌）。"""
+
+_GRANT_DELTAS: Final = frozenset(
+    {
+        "hp_change",
+        "armor_change",
+        "hp_max_change",
+        "chained_change",
+        "flipped_change",
+        "marker_change",
+        "wine_change",
+        "skill_gain",
+    }
+)
+"""座位级的**授予**类 delta（体力 / 护甲 / 上限 / 标记 / 状态 / 技能）。"""
+
+
+def _check_dead_actor_invariants(
+    engine: _FuzzEngine, record: JournalRecord | None
+) -> None:
+    """阵亡后已在飞（dead-actor-in-flight 票 01）：**窗口外不询问死者 / 不向死者授予**。
+
+    两条硬约束（spec §1.2），只看记录流已经落下的事实、不预判任何分支：
+
+    - **询问口**：``QueryRecord.actor`` 已阵亡 ⇒ 判红；唯一的例外是**死亡时技能窗口**
+      （``death_time_skills_active``，武魂平票）——窗口只放开"询问死者本人"，不放开授予；
+    - **授予口**：牌搬进死者的座位级区域（手牌 / 装备区 / 判定区 / 武将牌上的牌区），或给
+      死者加体力 / 护甲 / 上限 / 标记 / 横置 / 翻面 / 【酒】/ 获得技能 ⇒ 判红。
+      **从死者取走 / 清区照旧**：``card_move`` 只看 ``to_zone``；``marker_change`` 的
+      ``count = 0`` 是清点（阵亡清区的一部分），不算授予。
+
+    这条检查跑在**活状态**上（``_FuzzEngine._emit``），故"窗口"读的是询问发生那一刻的
+    状态位，不是终局快照。
+    """
+    if record is None:
+        return
+    seed, n = engine.game_seed, engine.game_players
+    state = engine.state
+    if record.kind == "query":
+        actor = record.query.actor
+        player = state.player(actor)
+        if not player.alive and not player.death_time_skills_active:
+            _fail(
+                seed,
+                n,
+                record,
+                f"座位 {actor} 已阵亡，窗口外仍收到 {record.query.kind} 询问",
+            )
+        return
+    if record.kind != "delta":
+        return
+    if record.delta_type == "card_move":
+        to_zone = record.to_zone
+        if to_zone.zone in _SEAT_ZONES and to_zone.seat is not None:
+            if not state.player(to_zone.seat).alive:
+                _fail(
+                    seed,
+                    n,
+                    record,
+                    f"牌被搬进已阵亡座位 {to_zone.seat} 的 {to_zone.zone.value} 区",
+                )
+        return
+    seat = getattr(record, "seat", None)
+    if seat is None or state.player(int(seat)).alive:
+        return
+    if record.delta_type not in _GRANT_DELTAS:
+        return
+    if record.delta_type == "marker_change" and int(record.count) <= 0:
+        return
+    if record.delta_type == "chained_change" and not record.chained:
+        return
+    if record.delta_type == "flipped_change" and not record.flipped:
+        return
+    if record.delta_type == "wine_change" and not record.active:
+        return
+    _fail(
+        seed,
+        n,
+        record,
+        f"{record.delta_type} 授予落在已阵亡座位 {seat} 身上",
+    )
+
 
 
 def _check_decline_sorts_last(record: JournalRecord | None, seed: int, n: int) -> None:
@@ -964,6 +1050,70 @@ def test_the_seeded_harvest_target_that_dies_before_its_pick_is_skipped():
     assert engine.state.players[1].alive is False, "这个种子必须真的走到座位 1 阵亡"
     assert not engine.state.players[1].hand, "阵亡者三区为空"
     assert not engine.state.players[1].equip and not engine.state.players[1].judge
+
+
+def _run_constructed(engine: _FuzzEngine, seats: int) -> None:
+    """把一个人造中间态跑到结算栈清空（最多 2 000 步，防"永远收不了尾"吊死测试）。"""
+    players = [RecordingPlayer() for _ in range(seats)]
+    for _ in range(2_000):
+        if not engine.stack.frames:
+            return
+        if engine.pending is None:
+            engine._step()
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    raise AssertionError("构造局面的结算在 2 000 步内没有跑完")
+
+
+def test_dead_players_are_never_asked_and_never_receive_cards():
+    """合成局（dead-actor-in-flight 票 01）：窗口外不询问死者、不向死者授予。
+
+    局面直接摆成"使用结算进行到一半"（票 92 的现场）：座位 0 已阵亡、三区皆空，一张
+    【顺手牵羊】已离开手牌、躺在处理区，``RESOLVE`` 帧的当前目标是座位 1。旧实现会向
+    已阵亡的座位 0 发 ``SELECT_CARDS``，再把座位 1 的武器搬进**死者手牌**——询问口与
+    授予口两条硬约束同时被破。新实现把这次询问判成 ``Cancelled``、该效果段不执行：
+    牌留原处、死者三区仍空、一条询问都不落到死者。
+
+    ``_FuzzEngine`` 每落一条记录就跑一次 :func:`_check_dead_actor_invariants`，故本用例
+    断言的不只是这三条终局事实，也是**记录流里任何一条中间记录**都不破约束。
+    """
+    snatch = cards_of_type(PACK, "snatch")[0]
+    weapon = cards_of_type(PACK, "double_sword")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec(equip=(weapon,)), SeatSpec()],
+        deck=tuple(
+            card_id for card_id in range(CARD_COUNT) if card_id not in (snatch, weapon)
+        ),
+        processing=(snatch,),
+        turn_seat=1,
+    )
+    engine = _FuzzEngine.from_state(state, seed=1)
+    engine.game_seed = 0
+    engine.game_players = 3
+    _check_live_invariants(engine, None)
+    engine.push_frame(
+        FrameKind.RESOLVE,
+        {
+            "card": state.card(snatch),
+            "source": 0,
+            "targets": (1,),
+            "cursor": 0,
+        },
+        timing=Timing.RESOLVE_START,
+    )
+    _run_constructed(engine, 3)
+
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.actor == 0
+    ], "窗口外不向死者发询问"
+    assert weapon in engine.state.player(1).equip, "目标牌留原处（不派生『获得』）"
+    assert engine.state.player(1).hand == []
+    dead = engine.state.player(0)
+    assert (dead.hand, dead.equip, dead.judge) == ([], [], []), "死者三区空"
 
 
 def test_the_seeded_seven_player_zuilun_arrange_resumes_after_a_hung_move():
