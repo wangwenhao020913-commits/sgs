@@ -1,8 +1,9 @@
 # AI 适配契约（AI adaptation）
 
 **何时读**：这一票**新增**了询问类型 / 技能形状 / 动作面 / 信息通道，或者要上**新模式**的时候。
-本文件是单一真源：两套 checklist 的正文与三张登记表的读法都只在这里；`AGENTS.md` 与
-`docs/agents/skill-authoring/batch-ticket.md` 各留一行指针，正文不抄第二份。
+本文件是单一真源：两套 checklist 的正文、三张登记表的读法（外加特征 / 权重键空间，§3.4）
+都只在这里；`AGENTS.md` 与 `docs/agents/skill-authoring/batch-ticket.md` 各留一行指针，
+正文不抄第二份。
 
 判据的来源是 `.scratch/ai-light/spec.md` 的 §4（一次性产物，落地后没人读）；代码侧的机械
 断言住 `tests/test_ai_adaptation.py`。本文件是**长期**的那一份。
@@ -11,7 +12,7 @@
 
 | 面 | 谁承载 | 判据 |
 |---|---|---|
-| 能机械判的（键集 / 覆盖 / 引用可解析） | `tests/test_ai_adaptation.py` | 漏登、幽灵登记、坏引用都必红 |
+| 能机械判的（键集 / 覆盖 / 引用可解析） | `tests/test_ai_adaptation.py`（§3.1–3.3）；`tests/test_ai_features.py`（§3.4 的键空间 / 锚 / 分块 / 尾部追加） | 漏登、幽灵登记、坏引用都必红 |
 | 判不了的（语义是否反转、信息通道变没变） | **票面勾选** + 评审 | 人读，票面写"已做 / 不适用 + 一句理由" |
 
 契约只约束**新进门**，不重评既有 `CATALOG`（§5 的边界）。能进仓门禁的只有代码侧断言：
@@ -61,6 +62,10 @@
    全局长、补窗口只有 32 条事实时的空白）；两者喂精确联合身份后验
    （`_identity_relation` 的未知座位分支）。聚合里的伤害 / 回复仍**不进**表——`hp_change`
    没有符号，敌意 / 有利分不开；`public_counts` 的其余事实类留给票 08 的 A 族特征。
+   **票 08a 落地的口径**：A / C 族只读 `public_history`（逐事件带**起因** ⇒ 能归到效果编号；
+   带 `targets` / `actor` ⇒ 能按关系类归口）。`public_counts` 的聚合**没有起因**（归不到
+   效果编号）、单位也与逐事件不同（全局长计数 vs 最近 32 条），故它**不进** A / C 两族——
+   与票 07 的两张似然表不混表是同一条理由。要进得先把它换算到同一单位，那是 08b 的选择。
    **历史不是全量事件表**：`recent` 恒 ≤ 32 条、计数键空间 = 座位对 × 事实类
    （都与局长无关），投影每询问现算也不会随局变长。**载荷在投影期裁剪**（票 04 的缓冲仍是
    原始事实面）：隐藏牌面 / 牌堆顺序 / 未亮明身份 / 隐藏步骤的答案值 / 扣置牌真值都不进
@@ -94,7 +99,7 @@
 
 机械面：`set(MODE_SITES) == set(Mode)`，四格齐全，实现站点能 `importlib` 解析到可调用者。
 
-## 3 · 三张登记表
+## 3 · 登记表与键空间（三张登记表 + 特征 / 权重）
 
 ### 3.1 选路表 `_SCORERS`（`src/sgs/agents/heuristic.py`）
 
@@ -219,16 +224,49 @@ S1 起【据守】要判"这一次翻面是翻回正面（不跳回合、三张�
 - **模式账见 `06` §M7**（`Mode.PVE` 成为第三种模式 / `mode` 显式化 / header v3 / 人数不是模式
   判据四条裁定的里程碑记录）；四格的实现站点与理由和 `tests/test_ai_adaptation.py` 同源。
 
+### 3.4 特征表与权重表（`sgs.agents.features` / `sgs.agents.weights`，`ai-view` 票 08a）
+
+线性模型的**特征键空间**与**先验中心**（spec §2.7）。它还不是读点：票 08a **不接进决策
+路径**（`heuristic.py` 不 import 这两个模块），接线与数值是 08b。
+
+| 族 | 键 | 值 |
+|---|---|---|
+| **B**（局面轴） | `b|<项名>`（项名 = `Score.add` 的项名，一字不改） | 既有打分器在 `Score.tracing()` 下交出的**那一项分数** |
+| **C**（交互） | `c|<事实类>|<关系类>` | 公开事实 × 关系类的**计数**（机械展开） |
+| **A**（事件轴） | `a|<技能>|<触发点>|<序>|<事实类>|<关系类>` | 效果编号 × 载荷类别 × 关系类的**计数** |
+
+- **关系类恒 5 值**（`weights.RELATION_CLASSES`）：自己 / 已明盟友 / 未知 / 已明敌人 / 主公。
+  判据走 `_identity_relation`（**打分用的同一个函数**），故"关系类"与"敌我权重"不会说两套话；
+  已亮明但敌对值为中立（内奸行的连续 H）归 `unknown`——**不加第六档**。
+- **B 族不许另算**：值只从既有打分器的 trace 来（`features.b_family`），距离 / 斩杀 / 记牌
+  一项都不重写。机械面 = `tests/test_source_discipline.py` 第十节（函数闭集 + 局面量黑名单）。
+- **分块**（Q10）：`SHARED_B`（B 族，跨模式共享）+ 每个 `Mode` 一块 A / C
+  （`NO_IDENTITY_AC` / `IDENTITY_AC` / `PVE_AC`）。`set(MODE_BLOCKS) == set(Mode)` 由
+  `tests/test_ai_features.py` 钉住——**新模式票必须同票给出自己的 A / C 块**。
+- **锚 = 手写值**（先验中心，不是"下限 + 叠加"）：B = 1.0（既有系数已烘进项值）、C = 既有
+  关系系数、A = `SKILL_VALUES` 里那条技能的手写值（**常量档才有**；形状档 / 未登记的技能
+  ⇒ `weights.unregistered_anchor()` = 常量档的**众数**，今天 2.0）。**0 样本的键读 `anchor`，
+  不是 0**——新武将上线时 AI 对最新那条技能仍有意见（读到 0 = "恰好对最新那条技能没有任何
+  意见"，正是 08b 票面点名的症状）。08b 的拟合只写"拟合值"那一层：`WeightTable.fit`
+  **只许尾部追加**。
+- **A / C 是局面项**：只读 `query.view`，同一询问的全部候选上逐键相同 ⇒ 加进总分不改变
+  argmax。候选打分的口径是 `features.candidate_score`（逐 float 等于今天的 `Score`）。
+- **新增内容的自动面**：新 `Score.add` 项名 ⇒ 自动多一个 B 键（锚 1.0）；新 delta / 动作类
+  必须先登记 `sgs.state.ENGINE_LEVEL_FACT_CLASSES`（现有纪律）⇒ 自动进 C 的键空间；新技能的
+  效果编号由 `Cause` 声明派生 ⇒ A 键自动成立。**都不需要回来补表**，这也是锚"从键派生"的
+  理由。
+
 ## 4 · 维护责任表
 
 | 变化 | 谁改 | 怎么逼出来 |
 |---|---|---|
 | 新增 `QueryKind` 成员 | 规则工程票的作者（**同票**） | `set(_SCORERS) == set(QueryKind)` 红 |
 | 新增 / 改动 `PlayerView` / `PlayerPublic` / 询问字段 | 改协议的票加字段；AI 票写"读不读" | 读点表漏登即红 |
-| 新增 `Mode` 成员 | 新模式票的作者（写票时先裁） | `set(MODE_SITES) == set(Mode)` 红 |
+| 新增 `Mode` 成员 | 新模式票的作者（写票时先裁） | 两张表一起红：`set(MODE_SITES) == set(Mode)`，以及 `set(weights.MODE_BLOCKS) == set(Mode)`——新模式必须**同票**给出自己的 A / C 权重块（§3.4），不许静默借用身份局那一块 |
 | 实现站点改名 / 搬家 | 动站点的那张票 | `importlib` 解析失败 = 红 |
 | 新技能 / 新装备 | 一将一票的作者 | `tests/test_heuristic_ai.py` 的三向同步 |
 | 新选项文本 / 新的靶向座位步 | 技能票的作者 | **无**机械面（`_OPTION_VALUES` / `_HOSTILE_SEAT_STEPS` 一类分组表），靠 §1 第 2–3 条与评审 |
+| 新 `Score.add` 项名 / 新 delta 或动作类 / 新技能效果编号 | 加它的那张票（**通常不用改**） | 键空间自动扩（§3.4）：B 键随项名、C 键随 `ENGINE_LEVEL_FACT_CLASSES`、A 键随 `Cause` 的声明派生；锚从键派生，不必回来补表。**人工挑选的交互项**永远不加（C 族是机械展开） |
 | **池按已选收缩**的座位步（`pool(chosen)` 会变窄，如【除疠】的势力互异） | 技能票的作者 | 登记进 `src/sgs/agents/heuristic.py:_DYNAMIC_POOL_SEAT_STEPS`（键 = 步骤键）；`tests/test_ai_adaptation.py::test_every_dynamic_pool_seat_step_is_a_real_contracting_step` 逐键核"是真步骤 + 池真的随已选收窄"。**不登记**的症状不是红，而是"技能发动了、什么都没发生"（AI 交一条服务端铺不出来的集合，引擎按前缀池复核后整步取消） |
 
 ## 5 · 边界（不做什么）
