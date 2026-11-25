@@ -56,6 +56,7 @@ from support import (
     SeatSpec,
     build_state,
     cards_of_type,
+    declare_death,
     deck_excluding,
     find_action,
     ran_timing,
@@ -2103,6 +2104,94 @@ def test_qinyin_skips_a_seat_that_is_already_dead_when_its_turn_comes() -> None:
     ], "死座位没有被问"
     assert [engine.state.player(seat).hp for seat in (0, 2, 3)] == [3, 3, 3]
     assert engine.state.player(1).hp == 0, "死者的体力不被写"
+
+
+def _qinyin_lose_and_push_frames(engine, *, choice: str = QINYIN_LOSE, limit: int = 4000) -> None:
+    """答完【琴音】的选项，再走**一步**让效果体把剩余座位帧一次性压出。
+
+    ``engine.submit`` 只记答案；一步之后效果体重入、把剩余座位的子帧倒序压出
+    （`CODING_STANDARDS.md` §3.1 的登记窄例外），此刻还没有任何一座开始结算。
+    """
+    for _ in range(limit):
+        query = engine.pending
+        if query is not None:
+            if (
+                query.kind == QueryKind.SKILL_ACTIVATION
+                and getattr(query, "skill_id", None) == QINYIN
+            ):
+                engine.submit(
+                    next(
+                        action
+                        for action in query.legal_actions
+                        if getattr(action, "skill_id", None) == QINYIN
+                    )
+                )
+                continue
+            if query.kind == QueryKind.SELECT_OPTION and str(
+                getattr(query, "skill_id", "")
+            ).startswith("qinyin"):
+                engine.submit(
+                    next(
+                        action
+                        for action in query.legal_actions
+                        if getattr(action, "choice", None) == choice
+                    )
+                )
+                break
+            engine.submit(_default_action(query))
+            continue
+        engine._step()
+    else:
+        raise AssertionError("步数上限内没有答到【琴音】的选项")
+    engine._step()
+
+
+def test_qinyin_a_seat_that_dies_after_its_frame_is_pushed_is_a_clean_no_op() -> None:
+    """G13 中途死座（dead-actor-in-flight 票 07）：帧已压出、座位中途才阵亡 ⇒ 整帧收口。
+
+    构造 = 票面给的现场：答完选项、效果体把剩余座位帧**一次性倒序压出**，此刻还没有任何
+    一座开始结算；这时 ``declare_death`` 把座位 2 判死，然后才继续推进。座位 2 的
+    ``LIFE_DECREASE`` 帧照常出栈，但**什么都不做**——不派发 ``LIFE_DECREASE_*``、不写
+    体力（01 的授予口本来也挡着）；其余座位照常各失去 1 点。
+
+    与"压帧前就已阵亡 ⇒ 不压帧"（上一条）是两件事：这一条钉的是**帧已在栈上**之后才死。
+    """
+    engine = Engine.from_state(_qinyin_state(hand=(2, 3, 4, 5)), seed=3)
+    _qinyin_lose_and_push_frames(engine)
+    assert [frame.data["target"] for frame in engine.stack.frames] == [3, 2, 1, 0], (
+        "构造前提：剩余座位帧已倒序一次压出（栈顶 = 第一座）、还没有一座开始结算"
+    )
+    before = len(engine.records)
+
+    declare_death(engine, 2)
+    assert engine.state.player(2).alive is False
+
+    for _ in range(4000):
+        if engine.pending is not None:
+            engine.submit(_default_action(engine.pending))
+            continue
+        if engine.finished or engine.state.turn_seat != 0:
+            break
+        engine._step()
+
+    life = [
+        record.actor
+        for record in engine.records[before:]
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_BEFORE
+    ]
+    assert life == [0, 1, 3], f"中途阵亡的座位 2 不派发任何失去体力时机，实得 {life}"
+    assert not [
+        record
+        for record in engine.records[before:]
+        if record.kind == "query" and record.query.actor == 2
+    ], "死座位没有被问"
+    assert [
+        (record.seat, record.before, record.after)
+        for record in engine.records[before:]
+        if record.kind == "delta" and record.delta_type == "hp_change"
+    ] == [(0, 4, 3), (1, 4, 3), (3, 4, 3)], "只有存活座位各失去 1 点，死座位一条 hp_change 都没有"
+    assert engine.state.player(2).hp == 4, "中途死座的体力不被写"
+    assert not engine.stack.frames, "四个座位帧都照常出栈（死座那一帧也 pop）"
 
 
 def test_qinyin_does_not_trigger_in_another_players_discard_phase() -> None:

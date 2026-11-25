@@ -14,7 +14,8 @@ import pytest
 
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Cancelled, Engine
-from sgs.engine.steps import WINDOW_CANCELLED_KEY
+from sgs.engine.steps import WINDOW_CANCELLED_KEY, death_time_window_open
+from sgs.skills import RUNNING_SKILL_KEY
 from sgs.state import (
     EndPhase,
     FrameKind,
@@ -342,7 +343,14 @@ def test_push_frame_is_refused_once_the_verdict_is_decided():
 
 
 def test_a_dead_actor_is_only_asked_inside_the_death_time_window():
-    """询问口：窗口外**不落询问**、返回 ``Cancelled``；窗口内仍问死者本人（武魂平票）。"""
+    """询问口：窗口外**不落询问**、返回 ``Cancelled``；窗口内仍问死者本人（武魂平票）。
+
+    窗口内那一半走**真实的死亡时技能派发形状**（dead-actor-in-flight 票 07）：承载帧 =
+    死者的 ``DEATH`` 帧、窗口由 :func:`~sgs.engine.steps.death_time_window_open` 打开、
+    帧上的 ``running_skill`` / ``skill_owner`` 与派发环在回调前写下的同形
+    （`src/sgs/skills/catalog.py:_enter_skill_keys`）。窗口**只放行这一种**询问——别的
+    在飞效果问死者仍是 ``Cancelled``，负例见下一条。
+    """
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(alive=False, hp=0), SeatSpec()],
@@ -351,11 +359,12 @@ def test_a_dead_actor_is_only_asked_inside_the_death_time_window():
     )
     engine = Engine.from_state(state, seed=1)
     frame = engine.push_frame(
-        FrameKind.SKILL,
-        {"source": 1, "targets": (), "skill_id": "test.death_time"},
-        timing=Timing.DEATH_ON,
+        FrameKind.DEATH,
+        {"target": 0, "targets": (0,), "source": None, "damage_source": None},
+        timing=Timing.DEATH_BEFORE_START,
     )
 
+    before = engine._seq
     refused = engine.ask_option(
         frame, 0, Timing.DEATH_ON, skill_id="test.death_time", options=("a",), optional=True
     )
@@ -365,13 +374,76 @@ def test_a_dead_actor_is_only_asked_inside_the_death_time_window():
     assert not [record for record in engine.records if record.kind == "query"], (
         "被取消的询问不落 QueryRecord"
     )
+    assert engine._seq == before, "被取消的询问不占询问序号"
 
-    state.player(0).death_time_skills_active = True
+    death_time_window_open(engine, frame)
+    # 派发环在回调前的两个写入（`_enter_skill_keys`）：这一刻跑的是死者本人的技能。
+    frame.data[RUNNING_SKILL_KEY] = "test.death_time"
+    frame.data["skill_owner"] = 0
     allowed = engine.ask_option(
         frame, 0, Timing.DEATH_ON, skill_id="test.death_time", options=("a",), optional=True
     )
     assert engine.suspended(allowed), "死亡时技能窗口仍可询问死者本人"
     assert [record.query.actor for record in engine.records if record.kind == "query"] == [0]
+
+
+def test_the_death_time_window_only_opens_the_dying_actors_own_skill_dispatch():
+    """窗口内**别的在飞效果**问该死者 ⇒ ``Cancelled``、不落询问（票 07 的负例）。
+
+    放行判据要三条同时成立：承载帧是**该死者的 DEATH 帧**、询问时机在窗口内、帧上正在
+    跑的技能**属于死者本人**。三个变体各破坏一条，且都不落 ``QueryRecord`` / 不占序号。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(alive=False, hp=0), SeatSpec()],
+        deck=DECK,
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=1)
+    death = engine.push_frame(
+        FrameKind.DEATH,
+        {"target": 0, "targets": (0,), "source": None, "damage_source": None},
+        timing=Timing.DEATH_BEFORE_START,
+    )
+    death_time_window_open(engine, death)
+    # ①别的座位的技能帧 = 另一个在飞效果（票面的构造）。
+    other = engine.push_frame(
+        FrameKind.SKILL,
+        {"source": 1, "targets": (0,), "skill_id": "test.other"},
+        timing=Timing.DEATH_ON,
+    )
+    other.data[RUNNING_SKILL_KEY] = "test.other"
+    other.data["skill_owner"] = 1
+    before = engine._seq
+    refused = engine.ask_option(
+        other, 0, Timing.DEATH_ON, skill_id="test.other", options=("a",), optional=True
+    )
+    assert refused is Cancelled, "窗口内别的效果问死者同样是 Cancelled"
+    assert not isinstance(refused, Pass), "Cancelled 不是放弃"
+    assert engine._seq == before, "被取消的询问不占询问序号"
+    assert not [record for record in engine.records if record.kind == "query"], (
+        "被取消的询问不落 QueryRecord"
+    )
+    # ②同一张 DEATH 帧上，正在跑的是别人（不是死者的）技能。
+    death.data[RUNNING_SKILL_KEY] = "test.other"
+    death.data["skill_owner"] = 1
+    assert engine.ask_option(
+        death, 0, Timing.DEATH_ON, skill_id="test.other", options=("a",), optional=True
+    ) is Cancelled, "running skill owner 不是死者本人 ⇒ 不放行"
+    # ③死者本人的技能，但询问时机不在窗口内。
+    death.data[RUNNING_SKILL_KEY] = "test.death_time"
+    death.data["skill_owner"] = 0
+    assert engine.ask_option(
+        death,
+        0,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="test.death_time",
+        options=("a",),
+        optional=True,
+    ) is Cancelled, "窗口外的时机不放行"
+    assert not [record for record in engine.records if record.kind == "query"], (
+        "三个变体一条询问都不落"
+    )
 
 
 def test_grants_do_not_land_on_a_dead_player():

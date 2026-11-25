@@ -1507,13 +1507,43 @@ DAMAGE_AFTER_REWRITE_PC = len(DAMAGE_STEPS)
 
 # ---- LIFE_DECREASE 帧：L8 三个时机 + 在"扣减体力时"插入濒死 ------------------
 
+LIFE_DECREASE_CLOSED_KEY = "life_decrease_closed"
+"""帧私有：目标在帧**进入时**已阵亡 ⇒ 整帧收口（dead-actor-in-flight 票 07）。
+
+帧已压出之后目标才阵亡（琴音剩余座位帧一次压出后的中途死座）：这一份失去体力**什么
+都不做**——不派发 ``LIFE_DECREASE_BEFORE`` / ``ON`` / ``AFTER``、不写体力。写入点只有
+:func:`life_decrease_before`（帧的第一步）；``life_decrease_on`` / ``life_decrease_after``
+读它跳过，``dying`` 仍照常落帧（``life_decrease_trigger_near_death`` 读它，对已阵亡者的
+早退在那一侧）。
+
+为什么不在 :func:`~sgs.skills.phase_body._qinyin_effect` 压帧时判：那一处判的是"轮到
+座位时**已经**死了"（不压帧）；本键管的是"压帧之后才死"——两者的现场不同，且这里对
+**所有**在飞的 ``LIFE_DECREASE`` 帧成立，不另立第二份判据。
+"""
+
 
 def life_decrease_before(host: FrameHost, frame: Frame) -> Control:
-    return _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=frame.data["target"])
+    """**失去体力前**：目标已阵亡 ⇒ 帧入口收口（不派发、不写体力，帧照常出栈）。
+
+    票 07 判据的落点：目标在帧压出**之后**才阵亡时，授予口（票 01）挡住了体力写入，但
+    三个时机会照旧派发——「轮到已死座位跳过」（spec §1.4 第 13 行）要求的是整帧不动作。
+    已压出的帧不追溯改来源 / 不改名单，只在这里收口。
+    """
+    target = frame.data["target"]
+    player = host.state.player(target)
+    if not player.alive:
+        frame.data[LIFE_DECREASE_CLOSED_KEY] = True
+        # 濒死判据仍落帧：`life_decrease_trigger_near_death` 无条件读它（对死者早退在那边）。
+        frame.data["dying"] = player.hp <= 0
+        return None
+    return _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=target)
 
 
 def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     """**扣减体力时** = 唯一的体力写入点；先 dispatch 时机，再把体力扣到目标值。
+
+    目标已在帧入口收口（``life_decrease_closed``）⇒ 整步零动作（见
+    :func:`life_decrease_before`）。
 
     目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。结算完**立刻**把
     结果记进帧：濒死与否是这次扣减的结果，"扣减体力时"之后据此决定是否压入濒死帧
@@ -1538,6 +1568,8 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     - **惰性**：护甲为 0 时 ``absorbed = 0`` ⇒ 逐字走原路径（47 条金录像逐字节不变）。
     """
     target = frame.data["target"]
+    if frame.data.get(LIFE_DECREASE_CLOSED_KEY):
+        return None
     control = _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
     if control is not None:
         return control
@@ -1581,7 +1613,11 @@ def life_decrease_reset_chain(host: FrameHost, frame: Frame) -> None:
 
     判据（``chain_reset``）由 DAMAGE 帧在数值定稿时算好并随载荷传来：横置 ∧ 属性伤害
     （火 / 雷）∧ 实际伤害 > 0 ∧ 未被防止。普通伤害与未被横置的受伤害者都是零动作。
+    目标已在帧入口收口（``life_decrease_closed``）⇒ 同样零动作（``set_chained`` 对死者
+    本就拒绝，这里不靠那条守卫表达"整帧无动作"）。
     """
+    if frame.data.get(LIFE_DECREASE_CLOSED_KEY):
+        return
     if not frame.data.get(CHAIN_RESET_KEY):
         return
     host.set_chained(frame, frame.data["target"], False)
@@ -1642,7 +1678,10 @@ def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
 
     无人救的死亡路径上这一步**不会被走到**——濒死帧在"濒死结算结束后"直接压入 DEATH
     子帧并留在栈上，整条伤害链（含本帧）由终局清栈统一丢弃（票 22）；救回时才回到这里。
+    目标已在帧入口收口（``life_decrease_closed``）⇒ 一轮都不派发（票 07 中途死座）。
     """
+    if frame.data.get(LIFE_DECREASE_CLOSED_KEY):
+        return None
     amount = int(frame.data.get("amount", 1))
     if amount <= 0:
         return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
