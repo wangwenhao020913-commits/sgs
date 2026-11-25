@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+import sgs.engine.game as engine_game
 from sgs.data import (
     Identity,
     PveConfig,
@@ -460,6 +461,56 @@ def test_a_non_lord_dying_on_their_own_turn_skips_the_rest_of_the_turn():
         if delta.to_zone is not None and delta.to_zone.seat == 2
     ]
     assert gained == [], "阵亡者不再获得任何牌"
+
+
+def test_a_death_inside_a_turn_end_hook_emits_only_one_turn_end(monkeypatch):
+    """票 05：``TURN_END`` 已发过 ⇒ 回合角色死在同一时机的钩子里时不得重发。
+
+    形状与复现探针相同（``.scratch/dead-actor-in-flight/probe_duplicate_turn_end2.py``）：
+    ``_turn_end`` 先发本回合的 ``TURN_END``（阶段体帧 ``frame_id = 0``），随后
+    ``declare_death`` 代表某个 ``TURN_END`` 钩子把回合角色打死 —— 死亡入口压 DEATH 帧。
+    旧实现在 ``death_before_start`` 里只按 ``turn_seat == seat`` 判断，于是**再发**一条
+    ``TURN_END`` 并**再派发**一遍 ``TURN_END`` 钩子（第二条挂在 DEATH 帧上）。
+
+    座位 1 是非主公（忠臣），故阵亡不判终局，回合收尾照常走到 ``TURN_AFTER_END``。
+    判据同时盯**记录**与**派发**：两条记录各恰一条；DEATH 帧上不得有 ``TURN_END``
+    派发 —— 只数记录会漏掉"记录没落但钩子重跑"的半个 bug。
+    """
+    engine = _engine(FOUR, deck=tuple(range(1, 40)))
+    engine._start()
+    engine.state.turn_seat = 1
+    dispatched: list[tuple[Timing, int, FrameKind]] = []
+    real_dispatch = engine_game.dispatch_timing
+
+    def spy(host, frame, timing):
+        dispatched.append((timing, frame.frame_id, frame.kind))
+        return real_dispatch(host, frame, timing)
+
+    monkeypatch.setattr(engine_game, "dispatch_timing", spy)
+
+    engine._turn_end()  # TURN_END #1（本回合，frame_id = 0）
+    declare_death(engine, 1)  # = TURN_END 钩子里打死回合角色
+    _advance_deaths(engine, 1)
+    _advance_until(engine, lambda: engine.state.turn_seat == 2)
+
+    death = _death_frame(engine)
+    turn_end = [
+        (record.actor, record.frame_id)
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_END
+    ]
+    turn_after_end = [
+        (record.actor, record.frame_id)
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+    ]
+    assert turn_end == [(1, 0)], "同一回合只发一条 TURN_END（票 05）"
+    assert turn_after_end == [(1, 0)], "回合收尾仍补一条 TURN_AFTER_END"
+    assert [
+        entry
+        for entry in dispatched
+        if entry[0] is Timing.TURN_END and entry[1] == death.frame_id
+    ] == [], "DEATH 帧上不得再派发一遍 TURN_END（旧实现在这里重跑钩子）"
 
 
 def test_a_lord_death_ends_the_game_with_the_rebel_side_and_its_winners():

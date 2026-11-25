@@ -1851,6 +1851,10 @@ class Engine:
         """终局是否已判定（只读；死亡时技能据此跳过，票 07 V3）。"""
         return self.pending_outcome is not None
 
+    def turn_end_emitted(self) -> bool:
+        """本回合的 ``TURN_END`` 是否已经发出（只读；死亡入口据此不重发，票 05）。"""
+        return bool(self._turn_data.get("turn_end_emitted"))
+
     def discard_dead_cards(self, frame: Frame) -> None:
         """``DEATH_ON`` Ⅰ.a：把死亡角色区域里所有的牌置入弃牌堆（规则 4.8 第 2 步）。
 
@@ -8498,6 +8502,12 @@ class Engine:
         答发动就把一个额外回合压进待执行栈，故本步可以返回 ``"stay"``（钩子提过问），
         回合环于是原地重入本步、复用同一个帧与同一份应答缓存。
         """
+        # 本回合的 ``TURN_END`` 已发（dead-actor-in-flight 票 05）：位在**发记录之前**置，
+        # 因为派发里就可能打死回合角色（【摧锋】把 ``state.turn_seat`` 当定死目标），死亡入口
+        # 必须读到"已发"才不在 DEATH 帧上重发一条、也不重跑一遍 TURN_END 钩子。跳过路径
+        # （``_turn_is_over`` 直接拨到 ``_turn_after_end``）从没进过本方法，位保持假，死亡入口
+        # 照旧补发那唯一一条。
+        self._turn_data["turn_end_emitted"] = True
         return self._dispatch_phase_body(Timing.TURN_END, "turn_end_body")
 
     def _turn_after_end(self) -> str | None:

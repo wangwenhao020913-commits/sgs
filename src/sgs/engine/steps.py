@@ -178,6 +178,8 @@ class FrameHost(StepHost, Protocol):
 
     def outcome_decided(self) -> bool: ...
 
+    def turn_end_emitted(self) -> bool: ...
+
     def discard_dead_cards(self, frame: Frame) -> None: ...
 
     def reveal_dead_identity(self, frame: Frame) -> None: ...
@@ -1851,6 +1853,13 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
     ``killer`` 只在**有来源的伤害且来源 ≠ 死者**时定格：失去体力 / 无来源伤害（闪电）/
     自杀 ⇒ 未定格 ⇒ 无奖惩。来源由死亡帧的 ``damage_source`` 带下来（帧私有载荷，
     不进 ``timing`` 记录的 ``source``，故记录面不变）。
+
+    **本回合的 ``TURN_END`` 只发一条**（dead-actor-in-flight 票 05）：``TURN_END`` 钩子里
+    打死回合角色时，回合环已经由 ``_turn_end`` 发过本回合的 ``TURN_END``（并置
+    ``turn_end_emitted``）；死亡入口若照旧只看 ``turn_seat == seat``，就会在 DEATH 帧上再发
+    一条、并让所有 ``TURN_END`` 钩子重跑一遍。故只在"该位为假"时补发——跳过路径
+    （``_turn_is_over`` 直接拨到 ``_turn_after_end``、``_turn_end`` 没跑过）位仍为假，
+    行为不变。
     """
     control = _emit_death(host, frame, Timing.DEATH_BEFORE_START)
     if control is not None:
@@ -1860,7 +1869,7 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
         return None
     seat = frame.data["target"]
     if mode is Mode.PVE:
-        if host.state.turn_seat == seat:
+        if host.state.turn_seat == seat and not host.turn_end_emitted():
             return _emit(host, frame, Timing.TURN_END, actor=seat)
         return None
     if host.state.player(seat).identity is Identity.LORD:
@@ -1869,7 +1878,7 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
     source = frame.data.get("damage_source")
     if source is not None and source != seat:
         frame.data["killer"] = source
-    if host.state.turn_seat == seat:
+    if host.state.turn_seat == seat and not host.turn_end_emitted():
         return _emit(host, frame, Timing.TURN_END, actor=seat)
     return None
 
