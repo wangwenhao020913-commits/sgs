@@ -778,7 +778,7 @@ WEIGHTS = SOURCE_ROOT / "agents" / "weights.py"
 
 TRAIN_SERVE_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "__future__": frozenset({"annotations"}),
-    "collections.abc": frozenset({"Mapping", "Sequence"}),
+    "collections.abc": frozenset({"Iterable", "Mapping", "Sequence"}),
     "dataclasses": frozenset({"dataclass"}),
     "functools": frozenset({"lru_cache"}),
     "math": frozenset(),
@@ -805,6 +805,7 @@ FEATURES_FUNCTIONS = frozenset(
     {
         "relation_class",
         "_relation",
+        "_group",
         "b_family",
         "c_family",
         "a_family",
@@ -819,8 +820,8 @@ FEATURES_FUNCTIONS = frozenset(
 )
 """``features.py`` 的**顶层函数闭集**：加一个就回来评审（"没有第二套局面量实现"的机械面）。"""
 
-FEATURES_METHODS = frozenset({"b", "position", "as_mapping", "keys"})
-"""``FeatureFrame`` 的方法闭集（帧上的读口只有这四个）。"""
+FEATURES_METHODS = frozenset({"b", "position", "as_mapping"})
+"""``FeatureFrame`` 的方法闭口（帧上的读口只有这三个；没有消费者的不加）。"""
 
 BOARD_QUANTITY_NAMES = frozenset(
     {

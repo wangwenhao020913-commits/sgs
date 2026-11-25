@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import json
+import math
 import os
 import subprocess
 import sys
@@ -35,20 +35,24 @@ import pytest
 from sgs.agents import features, weights
 from sgs.agents import heuristic as heuristic_scoring
 from sgs.data import Identity, Mode, RuleConfig, load_content_pack
+from sgs.effects import legal_actions_for
 from sgs.engine import Engine
 from sgs.engine.rng import ai_stream
 from sgs.state import (
     CardRef,
     Cause,
+    DistributeContext,
+    DistributeQuery,
     FactKind,
-    Pass,
     Phase,
     PlayerPublic,
     PlayerView,
     PublicEvent,
     QueryKind,
     UseCard,
+    project,
 )
+from sgs.timing import Timing
 
 from sgs.agents import HeuristicPlayer
 
@@ -237,6 +241,63 @@ def test_the_breakdown_is_the_existing_breakdown_item_for_item():
     assert not mismatches, "；".join(mismatches[:5])
 
 
+def test_the_distribute_query_also_has_a_constructed_parity_case():
+    """``DISTRIBUTE`` 在 4 个种子的批里出现 **0 次**：构造一局补上，十类询问全过 parity。
+
+    判据与批次**同一条**（候选分逐 float 相等 + 逐项对得上），不是"另一套更松的断言"：
+    否则"十类询问都有 scorer"这句话就只剩九类有证据。
+    """
+    from support import SeatSpec, build_state
+
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=[
+            SeatSpec(identity=Identity.LORD),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+        ],
+        deck=(),
+        turn_seat=0,
+    )
+    for seat in (1, 3):
+        state.players[seat].identity_visible = True
+    payload = DistributeContext(
+        skill_id="hero.shen_zhouyu.yeyan", seats=(0, 1), max_total=2, per_seat_max=2
+    )
+    query = DistributeQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请为角色分配点数。",
+        legal_actions=legal_actions_for(
+            state, 0, QueryKind.DISTRIBUTE, answers_seq=1, payload=payload
+        ),
+        view=project(state, 0),
+        skill_id=payload.skill_id,
+        seats=payload.seats,
+        max_total=payload.max_total,
+        per_seat_max=payload.per_seat_max,
+    )
+    scorer = heuristic_scoring._SCORERS[QueryKind.DISTRIBUTE]
+    checked = 0
+    for action in query.legal_actions:
+        with heuristic_scoring.Score.tracing():
+            value = scorer(query, action)
+        store = features.frame(query, action)
+        expected: dict[str, float] = {}
+        for item, item_value in value.items:
+            key = weights.b_key(item)
+            expected[key] = expected.get(key, 0.0) + item_value
+        checked += 1
+        assert features.candidate_score(store) == float(value), action
+        assert dict(store.b()) == expected, action
+
+    assert checked >= 3, f"只构造出 {checked} 个分配候选"
+
+
 def test_every_score_item_literal_in_the_source_maps_to_a_b_key():
     """B 族的键空间对**源码里的每个项名字面量**都是全函数（含批次里没走到的分支）。
 
@@ -297,9 +358,10 @@ original = HeuristicPlayer.respond
 def respond(player, query):
     for action in query.legal_actions:
         store = features.frame(query, action)
+        # **不排序**：映射的顺序（首次出现序）本身就是确定性判据的一部分。
         rows.append([str(query.kind), query.seq, str(action.kind),
                      features.candidate_score(store),
-                     sorted(store.as_mapping().items())])
+                     list(store.as_mapping().items())])
     return original(player, query)
 
 
@@ -335,16 +397,22 @@ def test_the_extractor_is_not_wired_into_the_decision_path():
     """
     source = (ROOT / "src" / "sgs" / "agents" / "heuristic.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
+    targets = {"features", "weights"}
     imported: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in {"features", "weights"}:
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level and node.module is None:
-            imported.update(alias.name for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            if node.module in targets:  # from .features import …
+                imported.add(node.module)
+            for alias in node.names:  # from . import features / from sgs.agents import features
+                if alias.name in targets:
+                    imported.add(alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:  # import sgs.agents.features
+                if alias.name.rsplit(".", 1)[-1] in targets:
+                    imported.add(alias.name)
 
-    assert not imported & {"features", "weights"}, (
-        f"heuristic 已经 import 了 {sorted(imported & {'features', 'weights'})}："
-        "那是 08b 的接线，本票不许提前接"
+    assert not imported, (
+        f"heuristic 已经 import 了 {sorted(imported)}：那是 08b 的接线，本票不许提前接"
     )
 
 
@@ -371,32 +439,46 @@ def test_every_flow_step_yields_an_a_key():
 
     主动技的效果编号是 ``(技能, 流水线名, 0)``——``Cause.order`` 对主动技恒 0
     （``Engine._skill_cause``：一条流水线就是一条效果），故"每个步骤"在这里是**逐步骤
-    核对它所属的那条效果编号**在键空间里成立，而不是"步序号进键"（那会造出运行期永不出现
-    的键）。漏一条流水线 / 写错流水线名，`a_key` 与 `anchor` 两处必有一处红。
+    核两件事**：
+
+    1. 这一步在票 05 的可见性表里有一行（``STEP_VISIBILITY[技能][步骤名]``）——步骤是**真的
+       存在过声明里**，不是循环变量空转；
+    2. 它所属的那条效果编号能成键、且锚是个有限数。
+
+    **不许空转**：``steps_seen`` 单独计数并下界断言——流水线全部退化成"零叶子步骤"时，
+    ``flows_seen`` 仍是 217，只有 ``steps_seen`` 会塌到 0。
     """
     from sgs.skills.flow import flow_steps
+    from sgs.skills.visibility import STEP_VISIBILITY
 
     flows = _declared_flows()
-    checked = 0
+    flows_seen = 0
+    steps_seen = 0
     problems: list[str] = []
     for skill_id in sorted(flows):
         for _timing, flow in flows[skill_id]:
+            flows_seen += 1
             steps = flow_steps(flow)
-            # 没有叶子步骤的流水线是**合法的**（效果直接从发动回调跑，如【奸雄】）：
-            # 它没有"步骤"要覆盖，但它的效果编号照样要成立，故仍然核一次。
-            for step in steps or (None,):
-                checked += 1
-                try:
-                    key = weights.a_key(
-                        skill_id, flow.name, 0, "move:DRAW", "unknown"
-                    )
-                except ValueError as error:
-                    problems.append(f"{skill_id}:{flow.name}:{step.key} 成不了键：{error}")
-                    continue
-                if not isinstance(weights.anchor(key), float):
-                    problems.append(f"{skill_id}:{flow.name}:{step.key} 的锚不是数")
+            steps_seen += len(steps)
+            try:
+                key = weights.a_key(skill_id, flow.name, 0, "move:DRAW", "unknown")
+            except ValueError as error:
+                problems.append(f"{skill_id}:{flow.name} 成不了键：{error}")
+                continue
+            if not math.isfinite(weights.anchor(key)):
+                problems.append(f"{skill_id}:{flow.name} 的锚不是有限数")
+            # 没有叶子步骤的流水线是**合法的**（效果直接从发动回调跑，如【奸雄】）：它没有
+            # 步骤要覆盖，但它的效果编号已在上一步核过。
+            for step in steps:
+                row = STEP_VISIBILITY.get(skill_id, {}).get(step.key)
+                if row is None:
+                    problems.append(f"{skill_id}:{flow.name} 的步骤 {step.key!r} 没登记")
 
-    assert checked >= 200, f"只走过 {checked} 个流水线；派生目标可能指错了"
+    assert flows_seen >= 200, f"只走过 {flows_seen} 条流水线；派生目标可能指错了"
+    assert steps_seen >= 200, (
+        f"只走到 {steps_seen} 个叶子步骤（{flows_seen} 条流水线）——"
+        "流水线全退化成'零步骤'时这条会塌，`flows_seen` 不会"
+    )
     assert not problems, "；".join(problems[:5])
 
 
@@ -431,6 +513,19 @@ def test_every_hook_timing_yields_an_a_key():
     assert created >= 200, f"只走过 {created} 条钩子；派生目标可能指错了"
     assert len(timings) >= 20, f"只见到 {len(timings)} 个时机值"
     assert not problems, "；".join(problems[:5])
+
+    # 帧内接缝和钩子共用同一个 `Cause` 生产者（`cause_for_hook` 的 `seam:<kind>` 那一档），
+    # 故它们也必须成键——漏一条就是"这一类公开事实永远没有特征"。
+    seams = 0
+    for skill_id in sorted(CATALOG):
+        for seam in CATALOG[skill_id].seams:
+            peers = [peer for peer in CATALOG[skill_id].seams if peer.kind is seam.kind]
+            trigger = f"seam:{seam.kind.value}"
+            weights.anchor(
+                weights.a_key(skill_id, trigger, peers.index(seam), "delta:hp_change", "self")
+            )
+            seams += 1
+    assert seams >= 1, "一条接缝都没走到；派生目标可能指错了"
 
     # 每个 Timing 值都能成键（含今天没有钩子的时机：新钩子挂上去时键语法已经就位）。
     for timing in Timing:
@@ -642,22 +737,30 @@ def test_a_key_without_samples_reads_its_anchor_not_zero():
         assert weights.weight(key) == expected
         assert weights.weight(key) != 0.0
 
-    # "没有样本"是真的：两张表里都没有这一行（不是"表里恰好写了锚"）。
+    # "没有样本"是真的：两类表里都没有这一行（不是"表里恰好写了锚"）。
     assert weights.SHARED_B.value(weights.b_key("一个还没人登记过的项名")) is None
-    assert weights.IDENTITY_AC.value(next(iter(keys))) is None
-
-
-def test_an_unregistered_or_shaped_skill_falls_back_to_the_zero_anchor():
-    """锚**是全函数**：语义表里没有的技能 / 形状档技能读到 0.0（"无先验意见"），不抛错。"""
-    assert (
-        weights.anchor(
-            weights.a_key("hero.nosuch.nothing", "TURN_START", 0, "move:DRAW", "self")
-        )
-        == weights.A_SKILL_ANCHOR_DEFAULT
+    a_key = weights.a_key(
+        "hero.caocao.jianxiong", "DAMAGE_TAKE", 0, "move:LOSE", "known_enemy"
     )
-    # 形状档（【仁德】的手写值依赖局面，不是一个数）不冒充常量锚。
+    c_key = weights.c_key("move:LOSE", "known_enemy")
+    assert weights.IDENTITY_AC.value(a_key) is None
+    assert weights.IDENTITY_AC.value(c_key) is None
+
+
+def test_an_unregistered_or_shaped_skill_still_reads_a_nonzero_anchor():
+    """锚**是全函数**，而且新技能 / 形状档技能读到的是**手写值的典型价**，不是 0。
+
+    票面："0 样本的键读出来是 anchor，不是 0"。新武将上线时它的技能正好落这一格——读到 0
+    就成了"AI 恰好对最新那条技能没有任何意见"。典型价 = 常量档的**众数**（今天 2.0，163 个
+    常量里出现 45 次）；这条把读数钉成字面量，表变了要人重读一次。
+    """
+    assert weights.unregistered_anchor() == 2.0
+    assert weights.unregistered_anchor() > 0.0
+    unregistered = weights.a_key("hero.nosuch.nothing", "TURN_START", 0, "move:DRAW", "self")
+    assert weights.anchor(unregistered) == weights.unregistered_anchor()
+    # 形状档（【仁德】的手写值依赖局面，不是一个数）不冒充常量锚，但也不落 0。
     shaped = weights.a_key("hero.liubei.rende", "PHASE_PLAY_IDLE", 0, "move:DRAW", "self")
-    assert weights.anchor(shaped) == weights.A_SKILL_ANCHOR_DEFAULT
+    assert weights.anchor(shaped) == weights.unregistered_anchor()
     # 常量档则给出那个常量（【奸雄】4.0）。
     constant = weights.a_key("hero.caocao.jianxiong", "DAMAGE_TAKE", 0, "move:DRAW", "self")
     assert weights.anchor(constant) == 4.0
@@ -724,6 +827,29 @@ def test_the_shared_b_block_is_read_for_every_mode():
     assert {weights.weight(key, mode) for mode in Mode} == {weights.B_ANCHOR}
     # A 族的锚由键自身决定，也不随模式变（块只影响"有没有拟合值"）。
     assert {weights.weight(key_a, mode) for mode in Mode} == {4.0}
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 金录像零字节变化（票面要求显式断言）
+# ---------------------------------------------------------------------------
+
+
+def test_the_golden_replays_are_byte_identical():
+    """47 条标准 108 金录像**逐字节不变**——真源仍是 ``tools/check_goldens.sh``。
+
+    本票不碰引擎，但 ``heuristic.py`` 改过一行（``scorer.anchor``）：票面要求的"显式断言"
+    因此不能只是"应该自动成立"。这里把那条脚本接进本票的用例（实测 ≈1 s），不另抄一份
+    判据——`tests/test_goldens.sh` 在门禁里跑的仍是同一支脚本。
+    """
+    completed = subprocess.run(
+        ["bash", "tools/check_goldens.sh"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "逐字节不变" in completed.stdout, completed.stdout
 
 
 # ---------------------------------------------------------------------------

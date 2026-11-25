@@ -29,7 +29,7 @@
 **锚为什么是"从键派生"而不是一张几百行的表**：锚只取决于键自己在命名空间里的位置——
 B 族 = 既有系数（已烘进项值）、C 族 = 既有关系系数（按关系类）、A 族 = ``SKILL_VALUES``
 里那条技能的手写值。派生的写法让**新武将 / 新技能自动有锚**（不必回来补表），也让
-``08b`` 的拟合器只需写"拟合值"那一层。:
+``08b`` 的拟合器只需写"拟合值"那一层::
 
     weight(key, mode) -> 拟合值（表里有） 或 anchor(key)（0 样本）
 
@@ -56,7 +56,7 @@ from types import MappingProxyType
 from sgs.data import Mode
 
 __all__ = [
-    "A_SKILL_ANCHOR_DEFAULT",
+    "A_SKILL_ANCHOR_FALLBACK",
     "B_ANCHOR",
     "C_ANCHORS",
     "FAMILY_A",
@@ -71,11 +71,11 @@ __all__ = [
     "WeightTable",
     "a_key",
     "anchor",
-    "b_item",
     "b_key",
     "c_key",
     "family",
     "table_for",
+    "unregistered_anchor",
     "weight",
 ]
 
@@ -124,20 +124,19 @@ def b_key(item: str) -> str:
     return f"{FAMILY_B}{_SEP}{item}"
 
 
-def b_item(key: str) -> str:
-    """B 键 → **项名**（:func:`b_key` 的逆）；不是 B 键 ⇒ ``ValueError``。"""
-    if family(key) != FAMILY_B:
-        raise ValueError(f"不是 B 族的键（前缀应为 {FAMILY_B}{_SEP}）：{key!r}")
-    return key.partition(_SEP)[2]
-
-
 def c_key(fact_class: str, relation: str) -> str:
     """C 族键：``c|<事实类>|<关系类>``。"""
     return f"{FAMILY_C}{_SEP}{_checked(fact_class, '事实类')}{_SEP}{_checked_relation(relation)}"
 
 
 def a_key(skill_id: str, trigger: str, order: int, fact_class: str, relation: str) -> str:
-    """A 族键：``a|<技能 id>|<触发点>|<序>|<事实类>|<关系类>``（效果编号 + 载荷类别 + 关系）。"""
+    """A 族键：``a|<技能 id>|<触发点>|<序>|<事实类>|<关系类>``（效果编号 + 载荷类别 + 关系）。
+
+    效果编号的三段**不包成一个参数对象**：键语法是本模块的公共面，而测试要直接拿"从声明
+    派生的 ``(技能, 流水线名, 0)``"拼键（那一刻没有活的 ``Cause``，且 ``Cause`` 住
+    ``sgs.state``——本模块只依赖 ``sgs.data`` 的规则常数）。多一层打包只会让调用方各写一次
+    拆包，收不回任何东西。
+    """
     if isinstance(order, bool) or not isinstance(order, int) or order < 0:
         raise ValueError(f"效果编号的序必须是非负整数（主动技恒 0）：{order!r}")
     return (
@@ -211,17 +210,11 @@ C_ANCHORS: Mapping[str, float] = MappingProxyType(
 )
 """C 族每个**关系类**的锚（既有关系系数）。键集恰等于 :data:`RELATION_CLASSES`。"""
 
-A_SKILL_ANCHOR_DEFAULT = 0.0
-"""A 族技能的锚在 ``SKILL_VALUES`` 里**查不到**时读到 0.0。
+A_SKILL_ANCHOR_FALLBACK = 0.0
+"""A 族的锚在**整张**语义表都没有可读的标量时读到 0.0（空表的逃生值，正常不会发生）。
 
-两种来源：
-
-- 技能不在语义表里（锁定技 / 装备 / 被动效果**从不被问"是否发动"**，故没有手写价）；
-- 语义表里是**形状档**（``_score_rende`` 一类，值依赖局面，**不是一个数**）。
-
-0.0 = "无先验意见"（既不奖励也不惩罚）。它与"0 分"的区别在**语义**上：0 分是"这个键的
-样本说它值 0"，而这里是"还没有锚"；08b 的橡皮筋把前者按住、对后者没有拉力，故新键会按
-纯数据移动。**形状最相似技能的权重**（``tools/similar_skills.py``）是 08b 的升级项。
+日常的"查不到"**不**落在这里：见 :func:`unregistered_anchor`——新技能 / 形状档技能要读到
+"手写值的典型价"，不是 0。
 """
 
 
@@ -230,7 +223,7 @@ def _skill_anchors() -> Mapping[str, float]:
     """``SKILL_VALUES`` 里**常量档**的手写值：``技能 id -> 那个常量``。
 
     只认常量档：形状档的打分函数要 ``(query, action, view)`` 才有值，不是一个数，故不进
-    本表（见 :data:`A_SKILL_ANCHOR_DEFAULT`）。``_constant`` 产出的打分器带 ``anchor``
+    本表（见 :func:`unregistered_anchor`）。``_constant`` 产出的打分器带 ``anchor``
     属性（只读元数据，不参与打分），本函数只读它。
 
     **延迟 import**：理由见模块 docstring（08b 起 ``heuristic → weights`` 单向，顶层 import
@@ -247,12 +240,35 @@ def _skill_anchors() -> Mapping[str, float]:
     )
 
 
+@lru_cache(maxsize=1)
+def unregistered_anchor() -> float:
+    """A 族里**读不到标量**的那条技能读到的手写值：常量档的**众数**（今天 = 2.0）。
+
+    两种键落在这里：语义表里**没有**这条技能（效果子技能 / 装备被动一类"从不被问是否发动"
+    的声明），或它在表里是**形状档**（``_score_rende`` 一类，值依赖局面、**不是一个数**）。
+
+    **为什么不给 0**：票面要的是"0 样本的键读出来是 anchor，不是 0"。新武将上线时它的技能
+    正好落这一格——读到 0 就成了"AI 恰好对最新那条技能没有任何意见"（08b 票面点名的症状）。
+    众数是**手写值的典型价**（今天 163 个常量档里 2.0 出现 45 次），由表自身派生，故新技能
+    一进表就自动有中心；形状档也不会被一个 0 按在"什么都不做"上。
+
+    平局取**较小的值**（确定性：不许让字典序偶然决定先后）；表里一个常量都没有时才落
+    :data:`A_SKILL_ANCHOR_FALLBACK`。
+    """
+    counts: dict[float, int] = {}
+    for value in _skill_anchors().values():
+        counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return A_SKILL_ANCHOR_FALLBACK
+    return min(counts, key=lambda value: (-counts[value], value))
+
+
 def anchor(key: str) -> float:
     """键的**先验中心**（手写值）：0 样本的键读它，不是 0。
 
     三族的来源（spec §2.7）：B 族 = 既有系数（:data:`B_ANCHOR`）；C 族 = 既有关系系数
-    （:data:`C_ANCHORS`，按关系类）；A 族 = ``SKILL_VALUES`` 里那条技能的手写值
-    （查不到 ⇒ :data:`A_SKILL_ANCHOR_DEFAULT`）。
+    （:data:`C_ANCHORS`，按关系类）；A 族 = ``SKILL_VALUES`` 里那条技能的手写值（形状档 /
+    查不到 ⇒ :func:`unregistered_anchor` 的"典型价"，**不是 0**）。
 
     **对任何合法键都是全函数**——"键存在但没有样本"是常态（新武将），不许抛
     ``KeyError``：那会把"还没学到"变成"AI 崩了"。
@@ -278,7 +294,7 @@ def anchor(key: str) -> float:
     if not order.isdigit():
         raise ValueError(f"A 族键的序必须是非负整数：{key!r}")
     _checked_relation(relation)
-    return _skill_anchors().get(skill_id, A_SKILL_ANCHOR_DEFAULT)
+    return _skill_anchors().get(skill_id, unregistered_anchor())
 
 
 # ---------------------------------------------------------------------------
@@ -342,11 +358,10 @@ class WeightTable:
         """**尾部追加**一行（返回新表；既有行逐位不变）。
 
         重复键 ⇒ ``ValueError``：同一条账写两次，后者会静默盖掉前者，而"哪个数算数"就没人
-        答得上来。要改一行，是 08b 重跑拟合、整表重出的活。
+        答得上来。要改一行，是 08b 重跑拟合、整表重出的活。串族 / 非有限值由
+        :meth:`__post_init__` 在构造期一起把关（这里不抄第二遍）。
         """
-        if family(key) not in self.families:
-            raise ValueError(f"表 {self.name!r} 只收 {self.families} 族，收到 {key!r}")
-        if key in {candidate for candidate, _value in self.rows}:
+        if key in self.keys():
             raise ValueError(f"表 {self.name!r} 里已经有 {key!r}：权重表只许尾部追加")
         return WeightTable(
             name=self.name, families=self.families, rows=(*self.rows, (key, value))

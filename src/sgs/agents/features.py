@@ -31,7 +31,7 @@ features`` 是单向依赖，顶层 import 会成环；这条由
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from sgs.data import Identity, Mode
@@ -105,6 +105,18 @@ def _relation(view: PlayerView, seat: int) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 
+def _group(pairs: Iterable[tuple[str, float]]) -> dict[str, float]:
+    """把 ``(键, 值)`` 摊成"每键一个 float"：**同名累加、保持首次出现序**。
+
+    三族的映射与 :class:`FeatureFrame` 的三个读口共用这一个写法（一处累加口径，不抄五遍）。
+    顺序按首次出现（dict 插入序）——确定性纪律要的正是它，故不排序、不用无序容器。
+    """
+    grouped: dict[str, float] = {}
+    for key, value in pairs:
+        grouped[key] = grouped.get(key, 0.0) + value
+    return grouped
+
+
 def b_family(items: Sequence[tuple[str, float]]) -> Mapping[str, float]:
     """B 族：把 ``Score`` 的**分项**摊成"每项一个 float"（同名项累加）。
 
@@ -115,11 +127,7 @@ def b_family(items: Sequence[tuple[str, float]]) -> Mapping[str, float]:
     同名项在**多目标**候选上逐目标重复（【南蛮】/【万箭】/ 方天三杀），故这里是累加而不是
     "后一个盖前一个"；**逐项**的口径（含重复、保持 trace 序）在 :class:`FeatureFrame` 里。
     """
-    grouped: dict[str, float] = {}
-    for item, value in items:
-        key = weights.b_key(item)
-        grouped[key] = grouped.get(key, 0.0) + value
-    return grouped
+    return _group((weights.b_key(item), value) for item, value in items)
 
 
 def c_family(view: PlayerView) -> Mapping[str, float]:
@@ -132,12 +140,12 @@ def c_family(view: PlayerView) -> Mapping[str, float]:
     与聚合计数的**单位不同**，混进一张表会互相污染分母（票 07 的两张似然表就是为这个分开
     的）。聚合那一路要进 C 族时，得先把单位说清楚——那是 08b 的选择，本票不先混。
     """
-    counts: dict[str, float] = {}
-    for event in view.public_history:
-        for seat in _involved_seats(event):
-            key = weights.c_key(event.fact_class, relation_class(view, seat))
-            counts[key] = counts.get(key, 0.0) + 1.0
-    return counts
+    counts = [
+        weights.c_key(event.fact_class, relation_class(view, seat))
+        for event in view.public_history
+        for seat in _involved_seats(event)
+    ]
+    return _group((key, 1.0) for key in counts)
 
 
 def a_family(view: PlayerView) -> Mapping[str, float]:
@@ -153,22 +161,19 @@ def a_family(view: PlayerView) -> Mapping[str, float]:
     效果编号都能经 :func:`weights.a_key` 成一个键、且 :func:`weights.anchor` 有值
     （``tests/test_ai_features.py``）。
     """
-    counts: dict[str, float] = {}
-    for event in view.public_history:
-        cause = event.cause
-        if cause is None:
-            continue
-        seats = _involved_seats(event)
-        for seat in seats:
-            key = weights.a_key(
-                cause.skill_id,
-                cause.trigger,
-                cause.order,
-                event.fact_class,
-                relation_class(view, seat),
-            )
-            counts[key] = counts.get(key, 0.0) + 1.0
-    return counts
+    keys = [
+        weights.a_key(
+            event.cause.skill_id,
+            event.cause.trigger,
+            event.cause.order,
+            event.fact_class,
+            relation_class(view, seat),
+        )
+        for event in view.public_history
+        if event.cause is not None
+        for seat in _involved_seats(event)
+    ]
+    return _group((key, 1.0) for key in keys)
 
 
 def _involved_seats(event: PublicEvent) -> tuple[int, ...]:
@@ -208,27 +213,15 @@ class FeatureFrame:
 
     def b(self) -> Mapping[str, float]:
         """B 族"每项一个 float"（同名累加）——拟合与展示读它，打分不读它。"""
-        return b_family(
-            [(weights.b_item(key), value) for key, value in self.items]
-        )
+        return _group(self.items)
 
     def position(self) -> Mapping[str, float]:
-        """局面项（A + C）的合并映射。"""
-        combined: dict[str, float] = dict(self.a)
-        for key, value in self.c.items():
-            combined[key] = combined.get(key, 0.0) + value
-        return combined
+        """局面项（A + C）的合并映射（A 在前、C 在后，各自按首次出现序）。"""
+        return _group((*self.a.items(), *self.c.items()))
 
     def as_mapping(self) -> Mapping[str, float]:
         """三族合并成一个"键 → 一个 float"的映射（B 归并后在前，局面项在后）。"""
-        combined: dict[str, float] = dict(self.b())
-        for key, value in self.position().items():
-            combined[key] = combined.get(key, 0.0) + value
-        return combined
-
-    def keys(self) -> tuple[str, ...]:
-        """全部键（去重、按首次出现序）；权重表 / 拟合器按它枚举。"""
-        return tuple(self.as_mapping())
+        return _group((*self.b().items(), *self.position().items()))
 
 
 def frame(query: Query, action: Action) -> FeatureFrame:
@@ -249,7 +242,12 @@ def frame(query: Query, action: Action) -> FeatureFrame:
 
 
 def _scored_items(query: Query, action: Action) -> tuple[tuple[str, float], ...]:
-    """跑**既有打分器**（trace 打开）并交出它的分项；不是 :class:`Scored` ⇒ ``ValueError``。"""
+    """跑**既有打分器**（trace 打开）并交出它的分项；不是 :class:`Scored` ⇒ ``ValueError``。
+
+    这条守卫在 08a **没有产品调用方**（本票不接线），08b 接进来之后走的就是 :func:`frame`
+    这一条路。它的用例因此是一条**合成反例**（本仓钉"守卫接上了线"的固定写法），不是产品
+    路径证据；产品路径那一半由上面几条 parity 用例外加 08b 的决策 diff 承担。
+    """
     from . import heuristic
 
     scorer = heuristic._SCORERS[heuristic.QueryKind(query.kind)]
@@ -278,8 +276,12 @@ def candidate_score(candidate: FeatureFrame, mode: Mode = Mode.IDENTITY) -> floa
     """**候选分**：B 族逐项加权求和（``Σ w·f``），按 ``Score`` 的 trace 序累加。
 
     权重全在锚上时（本票：无任何拟合值）逐 float 等于既有打分器的 ``Score`` 总分——票面
-    parity 就是这一条，而"特征漏了一项"必然让它变红。``value * 1.0`` 在 IEEE 754 下逐位
-    等于 ``value``，故这不是"近似相等"。
+    parity 就是这一条。``value * 1.0`` 在 IEEE 754 下逐位等于 ``value``，故这不是"近似相等"。
+
+    **它能发现什么**：提取层漏了一项 / 改了项名 / 重排了浮点加法 / 派发到别的打分器——
+    任何一处都会让和变。**它不能发现什么**：B 族的"定义"就是从既有分项来的（票面要求
+    "不许另算"），故这条是**等价性检查**，不是对打分语义的独立复算。独立性由 A / C 的键
+    空间断言（关系类闭集 / 效果编号完备性 / 源码字面量全映射）承担。
     """
     total = 0.0
     for key, value in candidate.items:
