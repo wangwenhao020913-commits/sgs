@@ -95,6 +95,15 @@ Standards 轴 enforce；没有全仓机械检查。
   `tests/test_hero_jie_wu.py::test_kurou_paid_with_silver_lion_recovers_before_losing_the_hp`、
   `tests/test_hero_jie_wu.py::test_the_standard_jieyin_recovers_for_the_target_before_itself`
   enforce。
+- **窄例外（dead-actor-in-flight 票 03；用户 2026-11-25 的裁定链）**：效果体挂在**阶段体帧**
+  （住 `_turn_data`、不压栈）上时，使用者在本阶段阵亡会触发回合同步收尾
+  （`_turn_is_over`），阶段体帧被清掉；若剩余子帧按"压一张 → `return "stay"` → 续跑"逐张压，
+  第一次死亡之后的座位 / 段就永远轮不到。**仅这类阶段体效果体**允许在**同一次入场**里把
+  剩余子帧**倒序**压出（栈顶 = 第一段 / 第一座）再 `return "stay"`，前提是名单与已结算座位
+  都落帧私有、且倒序使结算次序与名单一致。登记实例 = 琴音的剩余座位帧
+  （`src/sgs/skills/phase_body.py:_qinyin_effect`）与罪论 X=0 的两段并列帧
+  （`src/sgs/skills/hero_lei.py:_zuilun_apply`）；`06`（§5「程序化约定与偏离一手」）§5.32
+  同条登记。除这两处外不适用。
 
 ## 4. 断**次序**的断言不许先把次序归一化
 
