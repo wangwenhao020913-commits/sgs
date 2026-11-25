@@ -365,6 +365,17 @@ _ANSWER_ORIGIN_KEY = "answer_origin"
 """
 
 
+_DEATH_WINDOW_TIMINGS: frozenset[Timing] = frozenset(
+    {Timing.DEATH_ON, Timing.DEATH_AFTER, Timing.MOVE_AFTER}
+)
+"""死亡时技能窗口（``death_time_skills_active``）覆盖的**派发时机**（spec §1.2 的窗口例外）。
+
+``DEATH_ON`` / ``DEATH_AFTER`` 是窗口自己的两个时点，``MOVE_AFTER`` 是窗口内死亡奖惩的那次
+弃置派发产生的「失去牌后」。窗口外这三个时机照旧不放行任何向死者的询问——窗口是**状态位**
+（只在该死者的死亡段为真），不是"这三个时机一律例外"。
+"""
+
+
 def _ask_origin(frame: Frame) -> int | None:
     """一次询问的**发问帧身份**（票 02 的应答归属键第三位）。
 
@@ -1851,6 +1862,10 @@ class Engine:
         """终局是否已判定（只读；死亡时技能据此跳过，票 07 V3）。"""
         return self.pending_outcome is not None
 
+    def turn_end_emitted(self) -> bool:
+        """本回合的 ``TURN_END`` 是否已经发出（只读；死亡入口据此不重发，票 05）。"""
+        return bool(self._turn_data.get("turn_end_emitted"))
+
     def discard_dead_cards(self, frame: Frame) -> None:
         """``DEATH_ON`` Ⅰ.a：把死亡角色区域里所有的牌置入弃牌堆（规则 4.8 第 2 步）。
 
@@ -2292,15 +2307,66 @@ class Engine:
         """
         return value is Cancelled
 
-    def _refuse_ask(self, actor: int) -> bool:
-        """这次询问要不要**取消**：应答者已阵亡、且不在死亡时技能窗口。
+    def _refuse_ask(
+        self,
+        actor: int,
+        *,
+        timing: Timing | None = None,
+        frame: Frame | None = None,
+        own_seat: int | None = None,
+    ) -> bool:
+        """这次询问要不要**取消**：应答者已阵亡、且不是**死者本人的死亡时技能派发**。
 
-        死亡时技能窗口（``death_time_skills_active``）**只放开询问死者本人**：窗口里
-        武魂平票仍问已阵亡的神关羽（`tests/test_hero_feng.py`），窗口外（包括别的在飞
-        效果）一律不向死者发问。授予口不读这个例外（见各写入口的 ``alive`` 判据）。
+        死亡时技能窗口（``death_time_skills_active``）**只放开死者本人的死亡时技能**：窗口里
+        武魂平票仍问已阵亡的神关羽（`tests/test_hero_feng.py`）。放行判据三条同时成立
+        （dead-actor-in-flight 票 07）：
+
+        1. **承载帧** = 该死者的 ``DEATH`` 帧（``frame.data["target"] == actor``，不是别的
+           在飞效果 / 别的座位）；
+        2. **时机**在窗口内（:data:`_DEATH_WINDOW_TIMINGS`）；
+        3. 帧上正在跑的是**死者本人**的技能：``running_skill`` / ``skill_owner`` 由派发环在
+           回调前写入（``sgs.skills.catalog._enter_skill_keys``），两条缺一不可。
+
+        ``own_seat`` 是给**发动询问**用的显式归属证明（它装的是**座位**，不是技能 id）：
+        ``ask_skill_activation`` 发问时派发环还没跑回调、两个键尚未写（它们写在回调前），
+        此刻的归属事实是"这张面整张都是死者的技能"（``own_seat = 候选的持有者座位``）。
+        其余询问一律走帧上的两个键，不传它——多一条放行口就是多一处"窗口内谁都能问死者"
+        的旁路。
+
+        窗口外（包括别的在飞效果）一律不向死者发问；授予口不读这个例外（见各写入口的
+        ``alive`` 判据）。
         """
         player = self.state.player(actor)
-        return not player.alive and not player.death_time_skills_active
+        if player.alive:
+            return False
+        if not player.death_time_skills_active:
+            return True
+        if not self._in_death_time_window(actor, timing, frame):
+            return True
+        # 归属闸的**拒绝方向**在今天将池里没有产品载体：死者只能"在自己的技能跑到一半"时
+        # 阵亡，而唯一死亡时技能是【武魂】，它问的就是自己的持有者 ⇒ 窗口内"问死者、却不是
+        # 死者本人的死亡时技能"只能由合成用例造。这一支是**纵深防御**，
+        # `tests/test_death.py::test_the_death_time_window_only_opens_the_dying_actors_own_skill_dispatch`
+        # 是它唯一的覆盖面。
+        if own_seat is not None:
+            return int(own_seat) != actor
+        owner = frame.data.get("skill_owner")
+        return (
+            frame.data.get(RUNNING_SKILL_KEY) is None
+            or owner is None
+            or int(owner) != actor
+        )
+
+    @staticmethod
+    def _in_death_time_window(
+        actor: int, timing: Timing | None, frame: Frame | None
+    ) -> bool:
+        """承载帧 / 时机两条是否指向"该死者的死亡时技能窗口"（不含技能归属，见上）。"""
+        if frame is None or frame.kind is not FrameKind.DEATH:
+            return False
+        if frame.data.get("target") != actor:
+            return False
+        return timing is not None and timing in _DEATH_WINDOW_TIMINGS
 
     def _refuse_grant_zone(self, to_zone: ZoneRef) -> bool:
         """这次搬牌的目的地是不是"向已阵亡者授予牌"（牌进其座位级区域）。
@@ -2354,7 +2420,7 @@ class Engine:
         分层完全落在"问一次 / 答一次"这两条既有接缝之间。
         """
         need_card = kind in (QueryKind.DODGE, QueryKind.PEACH)
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         identity = self._ask_identity(kind, actor, frame)
         while True:
@@ -2364,6 +2430,8 @@ class Engine:
                 ),
                 identity=identity,
                 actor=actor,
+                timing=timing,
+                frame=frame,
             )
             if self.cancelled(action):
                 return action
@@ -2431,7 +2499,7 @@ class Engine:
         档）。它**不进**答案缓存键：一帧一次排列，键的口径保持票 10 的
         ``("arrange", actor, timing, cards)``（spec S1）。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("arrange", actor, timing.value, tuple(card.card_id for card in cards))
@@ -2450,6 +2518,8 @@ class Engine:
             ),
             identity=self._ask_identity(QueryKind.ARRANGE, actor, frame),
             actor=actor,
+            timing=timing,
+            frame=frame,
         )
         if action is SUSPEND:
             return SUSPEND
@@ -2488,7 +2558,7 @@ class Engine:
         合计 ≤ ``max_total``」的全量枚举。答案按 ``(skill_id, actor)`` 帧内缓存——同一帧
         重入不重发（与 :meth:`ask_option` 同一口径）。返回 ``Distribute`` / ``SUSPEND``。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("distribute", skill_id, actor)
@@ -2509,6 +2579,8 @@ class Engine:
             ),
             identity=self._ask_identity(QueryKind.DISTRIBUTE, actor, frame),
             actor=actor,
+            timing=timing,
+            frame=frame,
         )
         if action is SUSPEND:
             return SUSPEND
@@ -3455,7 +3527,7 @@ class Engine:
         ``ctx.floor``（档位的唯一写入点是承载帧），其余字段仍是调用方那一份。
         """
         need_card = ctx.mode is not RespondMode.REJUDGE
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         identity = self._ask_identity(QueryKind.RESPOND, actor, frame)
         payload = ctx
@@ -3466,6 +3538,8 @@ class Engine:
                 ),
                 identity=identity,
                 actor=actor,
+                timing=timing,
+                frame=frame,
             )
             if self.cancelled(action):
                 return action
@@ -3659,7 +3733,7 @@ class Engine:
         铺的是"牌堆顶 2 张"这样的实体牌，但牌面本身本不该进任何视角）。通道与
         :meth:`ask_query` 完全同一条（票 10 §①）。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         if (build_face is None) == (face is None):
             raise TypeError(
@@ -3698,6 +3772,8 @@ class Engine:
             ),
             identity=self._ask_identity(QueryKind.SELECT_CARDS, actor, frame),
             actor=actor,
+            timing=timing,
+            frame=frame,
         )
         if action is SUSPEND:
             return SUSPEND
@@ -3755,7 +3831,14 @@ class Engine:
         """
         first = candidates[0]
         actor = first.actor
-        if self._refuse_ask(actor):
+        # 死亡时技能窗口的**发动询问**：派发环此刻还没跑回调，``running_skill`` /
+        # ``skill_owner`` 尚未写（它们写在回调前）⇒ 归属证明 = 整张面都是死者本人的技能。
+        # 共享技可以让"被问的座位"≠持有者，故混合面不构成证明（传 None ⇒ 按帧上的键判）。
+        # ``face_seat`` 装的是**座位**（候选实例的持有者），不是技能 id。
+        face_seat = first.instance.owner
+        if any(candidate.instance.owner != face_seat for candidate in candidates):
+            face_seat = None
+        if self._refuse_ask(actor, timing=timing, frame=frame, own_seat=face_seat):
             return Cancelled
         skill_ids = tuple(candidate.skill_id for candidate in candidates)
         # 「可以 / 必须」是效果属性（与 ``locked`` 正交）：缺省口径 = 面里只要有一条"必须发动"，
@@ -3814,6 +3897,8 @@ class Engine:
             ),
             identity=self._ask_identity(QueryKind.SKILL_ACTIVATION, actor, frame),
             actor=actor,
+            timing=timing,
+            frame=frame,
         )
         if action is SUSPEND:
             return SUSPEND
@@ -3885,7 +3970,7 @@ class Engine:
 
         答案按 ``(skill_id, actor)`` 帧内缓存，重入不重发。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         answers = frame.data.setdefault("ask_answers", {})
         # M6 票 20：键带上**这次派发的范围**（``_DISPATCH_SCOPE``）。同一帧里同一技能的第二次
@@ -3922,6 +4007,8 @@ class Engine:
             ),
             identity=self._ask_identity(QueryKind.SELECT_OPTION, actor, frame),
             actor=actor,
+            timing=timing,
+            frame=frame,
         )
         if action is SUSPEND:
             return SUSPEND
@@ -3963,7 +4050,7 @@ class Engine:
 
         答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（同 :meth:`ask_option`），重入不重发。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = _option_answer_key(frame, skill_id, actor)
@@ -3997,6 +4084,8 @@ class Engine:
             ),
             identity=self._ask_identity(QueryKind.SELECT_OPTIONS, actor, frame),
             actor=actor,
+            timing=timing,
+            frame=frame,
         )
         if action is SUSPEND:
             return SUSPEND
@@ -4035,7 +4124,7 @@ class Engine:
         :data:`SUSPEND`。答案按 ``(skill_id, actor, 派发范围)`` 帧内缓存（与
         :meth:`ask_options` 同键同源），钩子重入不重发。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         seats = tuple(int(seat) for seat in pool)
         answer = self.ask_options(
@@ -6696,13 +6785,17 @@ class Engine:
         *,
         identity: tuple[object, ...],
         actor: int,
+        timing: Timing | None = None,
+        frame: Frame | None = None,
     ) -> Action | _Suspend | _Cancelled:
         """把一次询问交给参与者；**只有这一问自己**被接受过时，才直接返回那条应答。
 
-        **阵亡闸（dead-actor-in-flight 票 01）**：``actor`` 已阵亡、且不在死亡时技能窗口
-        ⇒ **不开询问、不落 ``QueryRecord``、不占询问序号**，直接返回 :data:`Cancelled`。
-        判据在 :meth:`_refuse_ask`；``ask_query`` 等各询问助手在**读帧内缓存之前**也各查
-        一次同一个判据，使"重入时读到死亡前存下的应答"同样被取消。
+        **阵亡闸（dead-actor-in-flight 票 01）**：``actor`` 已阵亡、且不是死者本人的死亡时
+        技能派发 ⇒ **不开询问、不落 ``QueryRecord``、不占询问序号**，直接返回
+        :data:`Cancelled`。判据在 :meth:`_refuse_ask`；``ask_query`` 等各询问助手在**读帧内
+        缓存之前**也各查一次同一个判据（并把 ``timing`` / ``frame`` 一并传来），使"重入时
+        读到死亡前存下的应答"同样被取消。``ask`` 是最后一道闸：不带上下文的直接调用（回合环
+        那两问）按"窗口不适用"处理。
 
         票 02（界司马懿【反馈】）：派发环在跑完一条 effect（它压出了子帧）之后**继续**问下
         一个实例，于是恢复点落在新子帧上——被挂起的那一问还没重入，应答却先回来了。旧实现
@@ -6721,7 +6814,7 @@ class Engine:
         只剩回合环那两问（``PLAY_PHASE`` / ``DISCARD``），它们没有帧号可区分，只按
         ``(kind, actor)`` 认同一问。
         """
-        if self._refuse_ask(actor):
+        if self._refuse_ask(actor, timing=timing, frame=frame):
             return Cancelled
         accepted = self._answers.pop(identity, None)
         if accepted is not None:
@@ -8498,6 +8591,12 @@ class Engine:
         答发动就把一个额外回合压进待执行栈，故本步可以返回 ``"stay"``（钩子提过问），
         回合环于是原地重入本步、复用同一个帧与同一份应答缓存。
         """
+        # 本回合的 ``TURN_END`` 已发（dead-actor-in-flight 票 05）：位在**发记录之前**置，
+        # 因为派发里就可能打死回合角色（【摧锋】把 ``state.turn_seat`` 当定死目标），死亡入口
+        # 必须读到"已发"才不在 DEATH 帧上重发一条、也不重跑一遍 TURN_END 钩子。跳过路径
+        # （``_turn_is_over`` 直接拨到 ``_turn_after_end``）从没进过本方法，位保持假，死亡入口
+        # 照旧补发那唯一一条。
+        self._turn_data["turn_end_emitted"] = True
         return self._dispatch_phase_body(Timing.TURN_END, "turn_end_body")
 
     def _turn_after_end(self) -> str | None:

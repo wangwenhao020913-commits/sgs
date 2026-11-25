@@ -23,7 +23,7 @@ from __future__ import annotations
 from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import transformed_card
-from sgs.state import Pass, QueryKind, UseCard
+from sgs.state import FrameKind, Pass, QueryKind, UseCard
 
 from support import PassPlayer, SeatSpec, build_state, cards_of_type, run_until
 from test_skills import _deck_excluding, _use_frame_popped
@@ -233,3 +233,51 @@ def test_jie_jizhi_does_not_fire_on_a_transformed_trick_card():
     assert _jizhi_queries(engine, JIE_JIZHI) == [], "界版把转化牌挡在触发条件之外"
     assert list(engine.state.player(0).hand) == [], "来源牌已按使用路径离手，且没有集智摸牌"
 
+
+def test_jie_jizhi_cancelled_ask_does_not_discard_the_drawn_card():
+    """界【集智】的"弃置换 +1"询问被取消 ⇒ 不发动（票 06；``use_after.py:303`` 那个站点）。
+
+    窗口外已阵亡的持有者：``ask_option`` 返回 ``Cancelled``——它不是 ``Pass``，所以旧实现
+    ``isinstance(answer, Pass)`` 为假、把取消读成"发动"：弃掉刚摸到的基本牌并加手牌上限。
+    正确读法是"这一问没有发生" ⇒ 不弃牌、不加式、整段收口。
+
+    直调 ``_jie_jizhi``（与 01 票借刀用例同一姿态）：钩子只在"使用牌时"派发，而
+    ``resolve_instances`` 不会为已阵亡的座位产出实例——"钩子已经跑起来、持有者随后阵亡"
+    这一中间态只能这样摆；``Engine`` 与 ``ask_option`` 仍是产品路径。
+    """
+    from sgs.resolution import Frame
+    from sgs.skills.use_after import (
+        _JIE_CARD_KEY,
+        _JIE_DRAWN_KEY,
+        _JIE_BONUS_KEY,
+        _jie_jizhi,
+    )
+
+    drawn = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(drawn,), hp=0, alive=False), SeatSpec()],
+        deck=_deck_excluding(drawn),
+        turn_seat=1,
+    )
+    engine = Engine.from_state(state, seed=3)
+    frame = Frame(
+        kind=FrameKind.SKILL,
+        data={
+            "source": 0,
+            "targets": (),
+            "skill_id": JIE_JIZHI,
+            "skill_owner": 0,
+            _JIE_DRAWN_KEY: True,
+            _JIE_CARD_KEY: drawn,
+        },
+    )
+
+    assert _jie_jizhi(engine, frame) is None, "取消 = 整段收口（不返回 'stay'、不再发动）"
+    assert drawn in engine.state.player(0).hand, "取消不是'发动'：这张牌不弃置"
+    assert drawn not in engine.state.discard, "没有弃牌发生"
+    assert engine.state.player(0).hand_limit_bonus == 0, "取消不是'发动'：不加手牌上限"
+    assert frame.data.get(_JIE_BONUS_KEY) is True, "整段收口要落'本帧已处理'游标"
+    assert [record for record in engine.records if record.kind == "query"] == [], (
+        "死者的询问不落 QueryRecord（引擎闸在发问前取消）"
+    )

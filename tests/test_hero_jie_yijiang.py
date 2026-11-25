@@ -3889,6 +3889,60 @@ def test_sidi_mark_and_prediction_are_cleared_when_the_owner_dies():
     assert _markers(engine.state, 1) == (), "阵亡清标记（2018 死亡流程 Ⅰ.c 同一姿态）"
 
 
+def test_sidi_a_dead_owner_does_not_fall_into_the_draw_two_branch():
+    """② 的二选一询问被取消 ⇒ 不取消牌、不摸牌、不造伤（dead-actor-in-flight 票 06）。
+
+    持有者在窗口外已阵亡：``ask_option`` 返回 ``Cancelled``——它不是 ``SelectOption``，
+    旧实现 ``str(getattr(answer, "choice", answer))`` 于是得到哨兵的 ``repr``，既不等于
+    ``sidi:cancel`` 就落进"摸两张"：``draw_from_deck`` 会先把弃牌堆重洗进牌堆（可观测），
+    再按"向死者授予"被授予口拒掉牌。正确读法是"这一问没有发生" ⇒ 整段收口。
+
+    直调 ``_sidi_redeem``（与 01 票借刀用例同一姿态）：② 只在"别人的牌指定目标后"派发，
+    而 ``resolve_instances`` 不会为已阵亡的座位产出实例——"钩子已经跑起来、持有者随后阵亡"
+    这一中间态只能这样摆；``Engine`` 与 ``ask_option`` 仍是产品路径。
+    """
+    from sgs.resolution import Frame
+    from sgs.skills.sidi import _SIDI_DRAWN_TWO, _sidi_redeem
+
+    trick = _non_delayed_trick()
+    slash = cards_of_type(PACK, "slash")[0]
+    peach = cards_of_type(PACK, "peach")[:2]
+    state = _sidi_state(mine=trick, user=slash)
+    state.deck.clear()
+    state.discard[:] = list(peach)
+    state.player(0).alive = False
+    state.player(0).hp = 0
+    state.player(0).sidi_marks = {1: 2}
+    engine = Engine.from_state(state, seed=30)
+    frame = Frame(
+        kind=FrameKind.USE,
+        data={
+            "card": state.card(slash),
+            "source": 1,
+            "targets": (2,),
+            "skill_id": SIDI,
+            "skill_owner": 0,
+        },
+    )
+
+    deck_before = list(state.deck)
+    discard_before = list(state.discard)
+    result = _sidi_redeem(engine, frame)
+
+    assert result is None, "取消 = 整段收口（不是 draw-two 的 True）"
+    assert list(state.deck) == deck_before, "没摸牌：连重洗都不该发生"
+    assert list(state.discard) == discard_before, "弃牌堆不动"
+    assert _SIDI_DRAWN_TWO not in frame.data, "没有落进『摸两张』分支"
+    assert not [current for current in engine.stack.frames if current.kind is FrameKind.DAMAGE], (
+        "也没有落进『取消之 + 造成 1 点伤害』分支"
+    )
+    assert engine.state.player(2).hp == 4, "预测目标不掉血"
+    assert engine.state.player(0).sidi_marks == {}, "清除先于兑现（中没中都清）"
+    assert [record for record in engine.records if record.kind == "query"] == [], (
+        "死者的询问不落 QueryRecord（引擎闸在发问前取消）"
+    )
+
+
 def test_near_death_in_flight_reads_the_stack():
     trick = _non_delayed_trick()
     state = _sidi_state(mine=trick, user=cards_of_type(PACK, "slash")[0])

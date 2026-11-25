@@ -27,7 +27,7 @@ import pytest
 
 from sgs.data import RuleConfig, load_content_pack
 from sgs.effects import CARD_BEHAVIORS, FinalZone, ResponseWindow, legal_actions_for
-from sgs.engine import Engine, dump_journal, read_journal
+from sgs.engine import Cancelled, Engine, dump_journal, read_journal
 from sgs.engine.steps import _collected_response_window, _dodge_window
 from sgs.resolution import Frame
 from sgs.state import (
@@ -764,6 +764,10 @@ class _DodgeWindowHost:
     def suspended(self, action):
         return False
 
+    def cancelled(self, action):
+        # 与真宿主同一判据（哨兵身份）；本宿主今天没有取消路径，读取口仍要实现。
+        return action is Cancelled
+
     def provider_registered(self, skill_id):
         raise AssertionError("本用例不提供提供者")
 
@@ -831,6 +835,10 @@ class _NullifyWindowHost:
 
     def suspended(self, action):
         return False
+
+    def cancelled(self, action):
+        # 与真宿主同一判据（哨兵身份）；本宿主今天没有取消路径，读取口仍要实现。
+        return action is Cancelled
 
     def provider_registered(self, skill_id):
         return False

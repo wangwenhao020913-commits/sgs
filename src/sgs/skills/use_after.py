@@ -310,6 +310,15 @@ def _jie_jizhi(host: Any, frame: Frame) -> Control:
         )
         if host.suspended(answer):
             return "stay"
+        if host.cancelled(answer):
+            # 应答被取消（持有者已在窗口外阵亡）：取消不是 ``Pass``，更不是"发动"——
+            # 不弃牌、不加手牌上限，整段收口（dead-actor-in-flight 票 06 / spec §1.2）。
+            # **纵深防御**：今天将池里没有"持有者在本技能跑到一半时阵亡"的载体（唯一死亡时
+            # 技能是【武魂】，它问的是自己的持有者）⇒ 这一支只有合成用例能走到，
+            # `tests/test_hero_use_after.py::test_jie_jizhi_cancelled_ask_does_not_discard_the_drawn_card`
+            # 是它唯一的可能覆盖；不要为它虚构产品载体。
+            frame.data[_JIE_BONUS_KEY] = True
+            return None
         frame.data[_JIE_CHOICE_KEY] = answer
     if isinstance(answer, Pass):
         frame.data[_JIE_BONUS_KEY] = True

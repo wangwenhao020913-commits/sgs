@@ -178,6 +178,8 @@ class FrameHost(StepHost, Protocol):
 
     def outcome_decided(self) -> bool: ...
 
+    def turn_end_emitted(self) -> bool: ...
+
     def discard_dead_cards(self, frame: Frame) -> None: ...
 
     def reveal_dead_identity(self, frame: Frame) -> None: ...
@@ -664,6 +666,11 @@ def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
     重入次序是本步的关键：窗口期间本帧一直**挂起**在 C2，故子帧出栈时传播来的
     ``canceled`` 一定在下次重入可见（票 11 §2 的"出栈序即自底向上序"）。被【闪】抵消
     之后，票 30 的**帧内接缝**（【青龙偃月刀】/【贯石斧】）在这里派发。
+
+    **取消 ≠ ``canceled``**（dead-actor-in-flight 票 06）：窗口的应答者已阵亡、且不在死亡时
+    技能窗口时，``ask`` 返回 :data:`Cancelled`，窗口落 :data:`WINDOW_CANCELLED_KEY` 而不是
+    ``canceled``。重入时这一支把本目标直接放行给 C3–C5——效果段"不发生"由
+    ``apply_effects`` 的目标存活闸兑现，与目标在 C2 之后阵亡同形。
     """
     if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
         # 濒死求桃建立的使用：回复结算已由求桃窗口显式压好（票 21），故跳过
@@ -674,6 +681,12 @@ def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
             return control
         frame.data["canceled"] = False
         return Goto(RESOLVE_END_PC)
+    if frame.data.get(WINDOW_CANCELLED_KEY):
+        # 本目标的响应窗口**取消**（应答者已阵亡、窗口外）：与"没出闪 / 没声明"不同，
+        # 这一份效果段根本不发生。放行到 C3–C5：C3/C4 的时机照记、C4 的效果表由
+        # `apply_effects` 的目标存活闸整段跳过、C5 照常收尾——与"目标在 C2 之后阵亡"
+        # 完全同形（票 01 的存活闸；不另立判据，票 06）。
+        return None
     if "canceled" in frame.data:
         # 本目标的响应窗口已经处理过：**按 canceled 标志**决定去向（票 07 §3）。
         # 无懈的成功与否由出栈传播写进来，故这条分支也是无懈的出口。
@@ -733,6 +746,17 @@ def _open_response_window(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
+WINDOW_CANCELLED_KEY = "window_cancelled"
+"""帧私有（**逐目标分槽**）：响应窗口的询问被引擎**取消**（应答者已阵亡、窗口外）。
+
+它不是 ``canceled``：``canceled = True`` 是"被抵消"、``False`` 是"没出闪 / 没声明"——
+两者都是**已接受**的裁决；取消是"这一问根本没有发生"（票 01 的 ``Cancelled`` 哨兵）。
+写入点只有 :func:`_dodge_window`（【闪】窗口的应答者恒是当前目标本人，故取消 ⟺ 目标在
+窗口外已阵亡）；读取点见 :func:`resolve_before_effect`。登在
+:data:`_PER_TARGET_FRAME_KEYS` 里，游标推进时随其他逐目标键一起清掉。
+"""
+
+
 def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     """【闪】响应窗口：真牌窗口 + "需要牌"提供者序列（票 10 §5 / 票 30 / 票 08 / 票 09）。
 
@@ -762,6 +786,12 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     引擎记进承载帧，更高优先的档不再进面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的
     时机了）。floor 与**提供者封禁**一起在 :func:`_accept` 里清回最高档，故【无双】的第二张
     【闪】仍可发动【八卦阵】（两次需要牌事件）。
+
+    **取消的终态**（dead-actor-in-flight 票 06）：本窗口的应答者恒是当前目标，故
+    ``ask_query`` 返回 :data:`Cancelled` ⟺ 目标在窗口外已阵亡。此时**不写** ``canceled``
+    （它的两个值都是"答过了"：被抵消 / 没出闪），改写 :data:`WINDOW_CANCELLED_KEY` 并
+    ``"stay"``；重入由 :func:`resolve_before_effect` 放行到 C3–C5，效果段交给
+    ``apply_effects`` 的目标存活闸——"这一份效果段不发生"与"目标在 C2 之后阵亡"同形。
     """
     # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
     # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
@@ -852,6 +882,13 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     )
     if host.suspended(action):
         return "stay"
+    if host.cancelled(action):
+        # 应答者（本目标）已在窗口外阵亡：这不是"没出闪"——那是**答过了**的裁决
+        # （``canceled = False``），而取消是"这一问没有发生"。记一个逐目标终态，
+        # 重入时由 :func:`resolve_before_effect` 直接放行到 C3–C5（效果段由
+        # ``apply_effects`` 的目标存活闸整段跳过；票 01 的闸，不另立判据）。
+        frame.data[WINDOW_CANCELLED_KEY] = True
+        return "stay"
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
@@ -901,6 +938,11 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
 
     声明已存在时**不再派发提供者**（``declared`` 随询问下传，候选面据此收口）：赢家已定，
     再扣置一张牌只会让那张牌白白离开手牌——质疑段已经答过，可它不会进结算。
+
+    **已阵亡的询问者**（dead-actor-in-flight 票 06）：询问者区间是全部座位，死座也在名单里；
+    ``ask_respond`` 对它返回 :data:`Cancelled`——那是"询问从未发生"，不是"不声明"的裁决。
+    本窗口**跳过这一个座位**（``response_next`` 前进）：它不进记录、不成为声明、不耗牌；
+    其余座位照常问，窗口的收尾与抵消语义不变。
     """
     if frame.data.get("response_used"):
         # 赢家的响应牌使用已完整结算：出栈传播（若成功）会先被上面的 ``canceled``
@@ -950,6 +992,11 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
             )
             if host.suspended(action):
                 return "stay"
+            if host.cancelled(action):
+                # 这个座位已在窗口外阵亡：**询问从未发生**（不是 ``Pass``、也不是"不声明"
+                # 的裁决）⇒ 跳过它、不记声明、不耗牌，窗口照旧问下一个座位（票 06）。
+                frame.data["response_next"] = index + 1
+                continue
             if isinstance(action, ActivateSkill):
                 if not host.provider_registered(action.skill_id):
                     # 与【决斗】同一道闸：没有惰性判定式的提供者 ⇒ fail-closed。
@@ -1029,6 +1076,7 @@ def resolve_advance(host: FrameHost, frame: Frame) -> Control:
 
 _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "canceled",
+    WINDOW_CANCELLED_KEY,
     "window_open",
     "after_effect_emitted",
     "effect_pc",
@@ -1060,7 +1108,8 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
 
-``canceled`` / ``window_open`` / ``after_effect_emitted`` / ``effect_pc`` 在 :mod:`steps`
+``canceled`` / :data:`WINDOW_CANCELLED_KEY` / ``window_open`` / ``after_effect_emitted`` /
+``effect_pc`` 在 :mod:`steps`
 维护，``response_*``（收集式响应窗口的进度）同样在 :mod:`steps` 维护，``asks``（选择面记忆）
 在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
 集中列在这里，使"新加一个按目标分槽的键"只需改这一处。
@@ -1458,13 +1507,44 @@ DAMAGE_AFTER_REWRITE_PC = len(DAMAGE_STEPS)
 
 # ---- LIFE_DECREASE 帧：L8 三个时机 + 在"扣减体力时"插入濒死 ------------------
 
+LIFE_DECREASE_CLOSED_KEY = "life_decrease_closed"
+"""帧私有：目标在帧**进入时**已阵亡 ⇒ 整帧收口（dead-actor-in-flight 票 07）。
+
+帧已压出之后目标才阵亡（琴音剩余座位帧一次压出后的中途死座）：这一份失去体力**什么
+都不做**——不派发 ``LIFE_DECREASE_BEFORE`` / ``ON`` / ``AFTER``、不写体力、不重置横置。
+写入点只有 :func:`life_decrease_before`（帧的第一步）；读它的三处是
+:func:`life_decrease_on` / :func:`life_decrease_reset_chain` / :func:`life_decrease_after`
+（各自跳过本步），``dying`` 仍照常落帧（``life_decrease_trigger_near_death`` 读它，对
+已阵亡者的早退在那一侧）。
+
+为什么不在 :func:`~sgs.skills.phase_body._qinyin_effect` 压帧时判：那一处判的是"轮到
+座位时**已经**死了"（不压帧）；本键管的是"压帧之后才死"——两者的现场不同，且这里对
+**所有**在飞的 ``LIFE_DECREASE`` 帧成立，不另立第二份判据。
+"""
+
 
 def life_decrease_before(host: FrameHost, frame: Frame) -> Control:
-    return _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=frame.data["target"])
+    """**失去体力前**：目标已阵亡 ⇒ 帧入口收口（不派发、不写体力，帧照常出栈）。
+
+    票 07 判据的落点：目标在帧压出**之后**才阵亡时，授予口（票 01）挡住了体力写入，但
+    三个时机会照旧派发——「轮到已死座位跳过」（spec §1.4 第 13 行）要求的是整帧不动作。
+    已压出的帧不追溯改来源 / 不改名单，只在这里收口。
+    """
+    target = frame.data["target"]
+    player = host.state.player(target)
+    if not player.alive:
+        frame.data[LIFE_DECREASE_CLOSED_KEY] = True
+        # 濒死判据仍落帧：`life_decrease_trigger_near_death` 无条件读它（对死者早退在那边）。
+        frame.data["dying"] = player.hp <= 0
+        return None
+    return _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=target)
 
 
 def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     """**扣减体力时** = 唯一的体力写入点；先 dispatch 时机，再把体力扣到目标值。
+
+    目标已在帧入口收口（``life_decrease_closed``）⇒ 整步零动作（见
+    :func:`life_decrease_before`）。
 
     目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。结算完**立刻**把
     结果记进帧：濒死与否是这次扣减的结果，"扣减体力时"之后据此决定是否压入濒死帧
@@ -1489,6 +1569,8 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     - **惰性**：护甲为 0 时 ``absorbed = 0`` ⇒ 逐字走原路径（47 条金录像逐字节不变）。
     """
     target = frame.data["target"]
+    if frame.data.get(LIFE_DECREASE_CLOSED_KEY):
+        return None
     control = _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
     if control is not None:
         return control
@@ -1532,7 +1614,11 @@ def life_decrease_reset_chain(host: FrameHost, frame: Frame) -> None:
 
     判据（``chain_reset``）由 DAMAGE 帧在数值定稿时算好并随载荷传来：横置 ∧ 属性伤害
     （火 / 雷）∧ 实际伤害 > 0 ∧ 未被防止。普通伤害与未被横置的受伤害者都是零动作。
+    目标已在帧入口收口（``life_decrease_closed``）⇒ 同样零动作（``set_chained`` 对死者
+    本就拒绝，这里不靠那条守卫表达"整帧无动作"）。
     """
+    if frame.data.get(LIFE_DECREASE_CLOSED_KEY):
+        return
     if not frame.data.get(CHAIN_RESET_KEY):
         return
     host.set_chained(frame, frame.data["target"], False)
@@ -1593,7 +1679,10 @@ def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
 
     无人救的死亡路径上这一步**不会被走到**——濒死帧在"濒死结算结束后"直接压入 DEATH
     子帧并留在栈上，整条伤害链（含本帧）由终局清栈统一丢弃（票 22）；救回时才回到这里。
+    目标已在帧入口收口（``life_decrease_closed``）⇒ 一轮都不派发（票 07 中途死座）。
     """
+    if frame.data.get(LIFE_DECREASE_CLOSED_KEY):
+        return None
     amount = int(frame.data.get("amount", 1))
     if amount <= 0:
         return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
@@ -1851,6 +1940,13 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
     ``killer`` 只在**有来源的伤害且来源 ≠ 死者**时定格：失去体力 / 无来源伤害（闪电）/
     自杀 ⇒ 未定格 ⇒ 无奖惩。来源由死亡帧的 ``damage_source`` 带下来（帧私有载荷，
     不进 ``timing`` 记录的 ``source``，故记录面不变）。
+
+    **本回合的 ``TURN_END`` 只发一条**（dead-actor-in-flight 票 05）：``TURN_END`` 钩子里
+    打死回合角色时，回合环已经由 ``_turn_end`` 发过本回合的 ``TURN_END``（并置
+    ``turn_end_emitted``）；死亡入口若照旧只看 ``turn_seat == seat``，就会在 DEATH 帧上再发
+    一条、并让所有 ``TURN_END`` 钩子重跑一遍。故只在"该位为假"时补发——跳过路径
+    （``_turn_is_over`` 直接拨到 ``_turn_after_end``、``_turn_end`` 没跑过）位仍为假，
+    行为不变。
     """
     control = _emit_death(host, frame, Timing.DEATH_BEFORE_START)
     if control is not None:
@@ -1860,7 +1956,7 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
         return None
     seat = frame.data["target"]
     if mode is Mode.PVE:
-        if host.state.turn_seat == seat:
+        if host.state.turn_seat == seat and not host.turn_end_emitted():
             return _emit(host, frame, Timing.TURN_END, actor=seat)
         return None
     if host.state.player(seat).identity is Identity.LORD:
@@ -1869,7 +1965,7 @@ def death_before_start(host: FrameHost, frame: Frame) -> Control:
     source = frame.data.get("damage_source")
     if source is not None and source != seat:
         frame.data["killer"] = source
-    if host.state.turn_seat == seat:
+    if host.state.turn_seat == seat and not host.turn_end_emitted():
         return _emit(host, frame, Timing.TURN_END, actor=seat)
     return None
 
