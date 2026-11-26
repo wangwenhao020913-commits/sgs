@@ -311,7 +311,9 @@ def test_the_distribute_query_also_has_a_constructed_parity_case():
             key = weights.b_key(item)
             expected[key] = expected.get(key, 0.0) + item_value
         checked += 1
-        assert features.candidate_score(store) == float(value), action
+        # 与打分器的 parity 是**未加权**的项和（candidate_score 是带权生产路径；
+        # ai-v13 里这条键恰好是锚 1.0，落 ai-v14 后带权值会差 0.014 而假红）。
+        assert features.unweighted_candidate_score(store) == float(value), action
         assert dict(store.b()) == expected, action
 
     assert checked >= 3, f"只构造出 {checked} 个分配候选"
