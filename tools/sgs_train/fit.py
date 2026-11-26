@@ -9,17 +9,23 @@
    **训练 venv**（numpy；§2.8 的常设约束：训练栈不进 ``SGS/.venv``）：仓库外那个
    ``../.venv-train``，命令见票面。
 
-**拟合目标**（票 08c：成对偏好 / 行为克隆，替换 08b 的终局值回归）：
+**拟合目标**（票 08c：成对偏好 / 行为克隆；`ai-train` 票 01 加三个旋钮）：
 
-    minimize  Σ_pairs softplus(−S·(s_chosen − s_alt)) + λ_B·Σ(w − anchor)²
+    minimize  Σ_pairs w_pair·softplus(−S·(s_chosen − s_alt)) + λ_B·Σ(w − anchor)²
+    s.t.      ‖w − anchor‖∞ ≤ ε
 
 - 每一对是**同一次询问**里的"选中动作 vs 另一个候选"：**选中动作恒为被偏好的一方**
   （行为克隆），``S`` = 样本里**选中候选分的中位数**（08b 的同一口径）。``w = 1`` 必须读出
   "手写价"，故目标量纲取分数本身，而不是 ±1（理由见 08b 的模块 docstring）。
-- **口径裁定**：票面第 2 条把 ``y = ±S``（结局）写在 softplus 的方向位，与第 1 句「结局只作
-  **样本权重**」冲突；2026-11-26 用户裁定取**行为克隆**口径（票面 ``## Comments``）：结局不进
-  方向位，本轮也不额外加权（等权 = 所选选项的读数；胜负加权留给后续票）。样本表里仍保留
-  每局的 ``y = ±1``（采集口径不变），拟合只读 ``S``。
+- **结局只作样本权重**（票 01）：``w_pair`` = 1.0（该座位所在方胜）/ ``lose_weight``（负）。
+  ``lose_weight = 1.0``（默认）就是 08c 的等权读数；``0.0`` = 只用胜方 pair。样本表里每局的
+  ``y = ±1``（采集口径不变）只在这里被读，**不进** softplus 的方向位。
+- **主正则 = 信任域**（票 01）：λ 锚先验保留，但每次 Newton 步把 ``w`` 投影到
+  ``[anchor − ε, anchor + ε]``（贴界键只许朝域内走，其余键在自由集上重解 Newton），
+  Armijo 线搜索走投影后的可行方向；收敛判据在 ``ε > 0`` 时取投影梯度（KKT 残差）。
+  ``ε = 0``（默认）= 关闭，逐字节复现 08c 的落仓权重。
+- **按局切分**（票 01）：``valid = seed % valid_mod == 0``；``valid_mod = 0``（默认）不切分。
+  拟合只用 train，valid 只报**未加权** pair log loss 与 accuracy，不参与拟合。
 - **没有截距**——只约束候选间的**差**，故 anchor = 1.0 在差尺度上天然成立，不会被结局的均值
   压平（08b 值回归的根因）。
 - 其余候选**按值域截断**：每条询问只留**手写分最高**的 ``K`` 个（``--alternatives``，
@@ -52,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import statistics
 import sys
@@ -65,6 +72,9 @@ from typing import Any
 
 __all__ = [
     "ALTERNATIVES",
+    "DEFAULT_LOSE_WEIGHT",
+    "DEFAULT_TRUST_REGION",
+    "DEFAULT_VALID_MOD",
     "LAMBDA_GRID",
     "SCHEMA",
     "PairSamples",
@@ -72,7 +82,10 @@ __all__ = [
     "fit_pairwise",
     "load_pair_samples",
     "main",
+    "pair_weights_from_sign",
+    "project_weights_to_trust_region",
     "render_weights_data",
+    "split_train_valid_masks",
 ]
 
 SCHEMA = "sgs.fit.samples.v2"
@@ -94,6 +107,15 @@ LAMBDA_GRID: tuple[float, ...] = (1e3, 3e3, 1e4, 3e4, 1e5, 3e5)
 补的理由（见票面 ``## Comments`` 与 ``## Answer``）：行为克隆口径下 1e5 仍差 D4 一条 0.1 分
 margin 的用例（79/80），3e5 是第一个三条判据全过的候选。网格仍按"跑完不许改"执行一次，
 不因为结果再动。"""
+
+DEFAULT_LOSE_WEIGHT = 1.0
+"""负方 pair 的默认权重：1.0 = 等权（08c 的读数；票 01 的默认路径必须逐字节复现它）。"""
+
+DEFAULT_TRUST_REGION = 0.0
+"""信任域默认 ``ε``：0 = 关闭（08c 的无投影路径；票 01 的默认路径）。"""
+
+DEFAULT_VALID_MOD = 0
+"""valid 切分默认：0 = 不切分（全量拟合；票 01 的默认路径）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +295,68 @@ def collect_games(
 # ---------------------------------------------------------------------------
 
 
+# 纯 Python 辅助（票 01）：门禁的仓内 venv **没有 numpy**，`tests/test_ai_train_fit.py`
+# 只测这一段；numpy 只在 `fit_pairwise` 里被 import，且口径必须与这里逐式一致。
+
+def pair_weights_from_sign(
+    query_sign: Iterable[int], lose_weight: float
+) -> list[float]:
+    """结局符号 → 每对的样本权重：胜方 1.0，负方 ``lose_weight``（票 01）。
+
+    ``query_sign`` 是样本行里的 ``y``（每局胜负，±1）；``0`` 或负数一律按负方处理
+    （采集口径只写 ±1，这里只钉容错方向，不新增语义）。
+    """
+    winner = 1.0
+    loser = float(lose_weight)
+    return [winner if int(sign) > 0 else loser for sign in query_sign]
+
+
+def project_weights_to_trust_region(
+    fitted: Sequence[float], anchor: Sequence[float], epsilon: float
+) -> list[float]:
+    """逐键投影到 ``[a − ε, a + ε]``（票 01 的 ``‖w − anchor‖∞ ≤ ε``）。
+
+    ``ε <= 0`` = **关闭**：原样返回（不是投影到锚——08c 的默认路径必须无投影）。
+    端点用 ``min/max`` 夹取，确定性、无浮点随机源。
+    """
+    values = [float(value) for value in fitted]
+    if epsilon <= 0.0:
+        return values
+    limits = [float(value) for value in anchor]
+    if len(values) != len(limits):
+        raise ValueError(f"权重与锚的键数不同：{len(values)} != {len(limits)}")
+    return [
+        min(max(value, base - epsilon), base + epsilon)
+        for value, base in zip(values, limits, strict=True)
+    ]
+
+
+def split_train_valid_masks(
+    query_seed: Iterable[int], valid_mod: int
+) -> tuple[list[bool], list[bool]]:
+    """按**局种子**切 train / valid：``seed % valid_mod == 0`` 进 valid（票 01）。
+
+    返回 ``(train_mask, valid_mask)``，每个询问一个布尔，二者互补；``valid_mod <= 0`` =
+    不切分（全部进 train、valid 为空）。切分单位是**局**而不是样本：同一局的所有询问
+    必须落在同一侧，否则同一局内的相关样本会同时进训练和验证。
+    """
+    seeds = [int(seed) for seed in query_seed]
+    if valid_mod <= 0:
+        return [True] * len(seeds), [False] * len(seeds)
+    valid = [seed % valid_mod == 0 for seed in seeds]
+    return [not flag for flag in valid], valid
+
+
 @dataclass
 class PairSamples:
     """一次成对拟合的样本面（紧凑平铺：候选 × 特征 + 询问 × 候选对）。
 
     - ``index`` / ``values`` / ``starts``：**候选**的稀疏特征（CSR 形状；候选按出现序）；
-    - ``query_sign`` / ``query_value``：每个询问的结局符号（±1）与选中候选分（定 S 用）；
+    - ``query_sign`` / ``query_seed`` / ``query_value``：每个询问的结局符号（±1）、所在
+      **局种子**（train / valid 按它切）与选中候选分（定 S 用）；
     - ``chosen``：每个询问的选中候选下标；
-    - ``pair_query`` / ``pair_alt``：每一对 = ``(询问, 另一个候选)``（选中侧由 ``chosen`` 查）。
+    - ``pair_query`` / ``pair_alt``：每一对 = ``(询问, 另一个候选)``（选中侧由 ``chosen`` 查）；
+    - ``data_sha256``：样本文件的字节摘要（报表留痕；``PairSamples()`` 手建时为空串）。
 
     用 ``array`` 而不是 Python 对象：10⁶ 量级的询问 × 9 个候选，``list[tuple[...]]`` 会
     吃掉十几 GB；平铺数组在 numpy 侧可零拷贝。
@@ -291,12 +367,14 @@ class PairSamples:
     values: array = field(default_factory=lambda: array("d"))
     starts: array = field(default_factory=lambda: array("q"))
     query_sign: array = field(default_factory=lambda: array("b"))
+    query_seed: array = field(default_factory=lambda: array("q"))
     query_value: array = field(default_factory=lambda: array("d"))
     chosen: array = field(default_factory=lambda: array("i"))
     pair_query: array = field(default_factory=lambda: array("i"))
     pair_alt: array = field(default_factory=lambda: array("i"))
     scale: float = 0.0
     games: int = 0
+    data_sha256: str = ""
 
     @property
     def queries(self) -> int:
@@ -311,9 +389,23 @@ class PairSamples:
         return len(self.starts) - 1
 
 
+def _file_sha256(path: Path) -> str:
+    """样本文件的字节摘要（报表 ``data_sha256``；只读原始字节，不改读法）。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def load_pair_samples(path: Path) -> PairSamples:
-    """读 v2 ``jsonl.gz``；``S`` 取**选中候选分 > 0** 的中位数（口径同 08b）。"""
+    """读 v2 ``jsonl.gz``；``S`` 取**选中候选分 > 0** 的中位数（口径同 08b）。
+
+    同时把每行的局种子（``s``）收进 ``query_seed``（票 01 的按局切分用），并对**文件字节**
+    取 sha256 存进 ``data_sha256``——报表留痕到具体一份样本表，不换 schema、不新增字段。
+    """
     store = PairSamples()
+    store.data_sha256 = _file_sha256(path)
     seeds: set[int] = set()
     opener = gzip.open if path.suffix == ".gz" else open
 
@@ -340,6 +432,7 @@ def load_pair_samples(path: Path) -> PairSamples:
             query = len(store.query_value)
             seeds.add(int(row["s"]))
             store.query_sign.append(int(row["y"]))
+            store.query_seed.append(int(row["s"]))
             store.query_value.append(float(row["v"]))
             where = f"seed={row['s']} seat={row['p']} seq={row['q']}"
             store.chosen.append(add(row["c"], where))
@@ -386,35 +479,36 @@ def _sigmoid(np: Any, z: Any) -> Any:
 
 
 def _objective(
-    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, w: Any,
-    anchor: Any, lambda_b: float,
+    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, pair_weight: Any,
+    w: Any, anchor: Any, lambda_b: float,
 ) -> float:
-    """成对 logistic 损失 + 锚先验（标量；线搜索与收敛判据共用）。"""
+    """加权成对 logistic 损失 + 锚先验（标量；线搜索与收敛判据共用）。"""
     scores = matrix @ w
     delta = scores[pair_chosen] - scores[pair_alt]
     z = -y_pair * delta
-    loss = float(np.logaddexp(0.0, z).sum())
+    loss = float((pair_weight * np.logaddexp(0.0, z)).sum())
     gap = w - anchor
     return loss + lambda_b * float(gap @ gap)
 
 
 def _gradient_hessian(
-    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, w: Any,
-    anchor: Any, lambda_b: float, *, chunk: int = 262_144,
+    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, pair_weight: Any,
+    w: Any, anchor: Any, lambda_b: float, *, chunk: int = 262_144,
 ) -> tuple[Any, Any, float, float]:
-    """返回 ``(∇, ∇², 总目标, 成对损失)``；Hessian 按对分批累加（一次不物化全部候选差）。
+    """返回 ``(∇, ∇², 总目标, 加权成对损失)``；Hessian 按对分批累加（不物化全部候选差）。
 
-    Hessian = ``Σ h_p d_p d_pᵀ + 2λI``（``d_p`` = 选中候选 − 另一候选的特征差、
+    Hessian = ``Σ w_pair·h_p d_p d_pᵀ + 2λI``（``d_p`` = 选中候选 − 另一候选的特征差、
     ``h_p`` = σ(1−σ)）；只是候选**差**的函数，故没有截距、也不受"多数决策同分"影响。
+    ``w_pair`` 是每对的结局权重（票 01）：梯度与 Hessian 都乘它，``1.0`` 时与 08c 逐位相同。
     """
     scores = matrix @ w
     delta = scores[pair_chosen] - scores[pair_alt]
     z = -y_pair * delta
-    data_loss = float(np.logaddexp(0.0, z).sum())
+    data_loss = float((pair_weight * np.logaddexp(0.0, z)).sum())
     gap = w - anchor
     loss = data_loss + lambda_b * float(gap @ gap)
     probability = _sigmoid(np, z)
-    coefficient = -y_pair * probability
+    coefficient = -y_pair * probability * pair_weight
     candidates = matrix.shape[0]
     per_candidate = np.bincount(pair_chosen, weights=coefficient, minlength=candidates)
     per_candidate -= np.bincount(pair_alt, weights=coefficient, minlength=candidates)
@@ -423,7 +517,7 @@ def _gradient_hessian(
     dim = matrix.shape[1]
     hessian = np.zeros((dim, dim), dtype=np.float64)
     # 链式法则里 dz/dw = −y·d，故二阶项带 y²（y = ±S，S ≠ 1：漏掉它 Hessian 会小 S² 倍）。
-    weight = probability * (1.0 - probability) * (y_pair * y_pair)
+    weight = probability * (1.0 - probability) * (y_pair * y_pair) * pair_weight
     total = len(pair_chosen)
     for start in range(0, total, chunk):
         stop = min(start + chunk, total)
@@ -437,16 +531,36 @@ def fit_pairwise(
     samples: PairSamples,
     *,
     lambda_b: float,
+    lose_weight: float = DEFAULT_LOSE_WEIGHT,
+    trust_region: float = DEFAULT_TRUST_REGION,
+    valid_mod: int = DEFAULT_VALID_MOD,
     max_iterations: int = 60,
     tolerance: float = 1e-6,
 ) -> dict[str, Any]:
-    """单个 ``λ_B`` 的成对拟合（Newton + Armijo；确定性、不取随机数）；返回报告。"""
+    """单个 ``λ_B`` 的成对拟合（Newton + 投影 + Armijo；确定性、不取随机数）。
+
+    三个旋钮（票 01）都有"复现 08c"的默认值：``lose_weight=1.0`` / ``trust_region=0`` /
+    ``valid_mod=0``。默认路径的数值（含迭代轨迹）与 08c **逐位相同**——这是本票的硬验收。
+
+    - 加权：每对乘 ``w_pair``（胜 1.0 / 负 ``lose_weight``），梯度与 Hessian 同步乘；
+    - 信任域：``trust_region > 0`` 时每次 Newton 步投影到 ``[anchor−ε, anchor+ε]``；贴界键
+      按方向进活跃集（只许朝域内走），其余键在自由集上重解 Newton，线搜索走投影后的可行
+      方向（必要时退到投影梯度）；收敛判据换成投影梯度（KKT 残差，``history[*].kkt_inf``）；
+    - 切分：``valid_mod > 0`` 时只用 train 拟合；``valid`` 只算未加权 pair log loss 与
+      accuracy（严格 ``选中分 > 其它分``），不参与拟合、不当判据。
+    """
     import numpy as np
 
     from sgs.agents import weights as weight_module
 
     if lambda_b <= 0:
         raise SystemExit(f"λ_B 必须为正：{lambda_b}")
+    if not 0.0 <= lose_weight <= 1.0:
+        raise SystemExit(f"--lose-weight 必须在 [0, 1]（1.0 = 08c 等权）：{lose_weight}")
+    if trust_region < 0.0:
+        raise SystemExit(f"--trust-region 必须 ≥ 0（0 = 关闭）：{trust_region}")
+    if valid_mod < 0:
+        raise SystemExit(f"--valid-mod 必须 ≥ 0（0 = 不切分）：{valid_mod}")
     keys = tuple(samples.keys)
     if not keys:
         raise SystemExit("样本里没有任何 B 键")
@@ -454,14 +568,48 @@ def fit_pairwise(
         if weight_module.family(key) != weight_module.FAMILY_B:
             raise SystemExit(f"成对拟合只收 B 族键，收到 {key!r}")
     anchor = np.asarray([weight_module.anchor(key) for key in keys], dtype=np.float64)
+    anchor_values = anchor.tolist()
     matrix = _matrix(np, samples)
-    pair_chosen = np.frombuffer(samples.chosen, dtype=np.int32)[
-        np.frombuffer(samples.pair_query, dtype=np.int32)
-    ]
+
+    pair_query = np.frombuffer(samples.pair_query, dtype=np.int32)
+    pair_chosen = np.frombuffer(samples.chosen, dtype=np.int32)[pair_query]
     pair_alt = np.frombuffer(samples.pair_alt, dtype=np.int32)
-    # 行为克隆：选中候选恒为被偏好方，结局不进方向位（用户 2026-11-26 裁定）。
-    # 样本表里的 query_sign 仍保留每局胜负，供后续票做结局加权；本票等权。
-    y_pair = np.full(len(samples.pair_query), samples.scale, dtype=np.float64)
+    query_sign = np.frombuffer(samples.query_sign, dtype=np.int8)
+    query_seed = np.frombuffer(samples.query_seed, dtype=np.int64)
+    if len(query_sign) != samples.queries or len(query_seed) != samples.queries:
+        raise SystemExit("样本平铺数组长度不一致：query_sign / query_seed / queries")
+    # 行为克隆方向：选中候选恒为被偏好方（用户 2026-11-26 裁定）；每局的胜负
+    # （query_sign）只作 pair 的样本权重（票 01），不进 softplus 的方向位。
+    y_pair = np.full(len(pair_query), samples.scale, dtype=np.float64)
+    pair_weight = np.asarray(
+        pair_weights_from_sign(query_sign[pair_query], lose_weight), dtype=np.float64
+    )
+
+    train_query_mask, valid_query_mask = split_train_valid_masks(query_seed, valid_mod)
+    train_query = np.asarray(train_query_mask, dtype=bool)
+    valid_query = np.asarray(valid_query_mask, dtype=bool)
+    train_pairs = train_query[pair_query]
+    valid_pairs = valid_query[pair_query]
+    if not bool(train_pairs.any()):
+        raise SystemExit("train 集没有成对样本：检查 --valid-mod 与样本种子")
+    if valid_mod > 0:
+        if not bool(valid_query.any()):
+            raise SystemExit(f"valid 集为空：seed % {valid_mod} == 0 的局一条都没有")
+        if not bool(valid_pairs.any()):
+            raise SystemExit("valid 集没有成对样本（全是被截断的单候选询问）")
+    train_chosen = pair_chosen[train_pairs]
+    train_alt = pair_alt[train_pairs]
+    train_y = y_pair[train_pairs]
+    train_weight = pair_weight[train_pairs]
+
+    def project(point: Any) -> Any:
+        """投影到信任域；``ε = 0`` 不投影（保持 08c 的逐位路径）。"""
+        if trust_region <= 0.0:
+            return point
+        return np.asarray(
+            project_weights_to_trust_region(point.tolist(), anchor_values, trust_region),
+            dtype=np.float64,
+        )
 
     w = anchor.copy()
     history: list[dict[str, Any]] = []
@@ -470,10 +618,24 @@ def fit_pairwise(
     loss = float("nan")
     for iteration in range(max_iterations):
         gradient, hessian, loss, data_loss = _gradient_hessian(
-            np, matrix, pair_chosen, pair_alt, y_pair, w, anchor, lambda_b
+            np, matrix, train_chosen, train_alt, train_y, train_weight,
+            w, anchor, lambda_b,
         )
-        norm = float(np.max(np.abs(gradient)))
-        history.append({"iteration": iteration, "loss": loss, "gradient_inf": norm})
+        raw_inf = float(np.max(np.abs(gradient)))
+        entry: dict[str, Any] = {
+            "iteration": iteration,
+            "loss": loss,
+            "gradient_inf": raw_inf,
+        }
+        if trust_region > 0.0:
+            # 约束面上的收敛判据 = 投影梯度（KKT 残差）：贴界键的原始梯度带着乘子，
+            # 不会归零（λ 锚项在边界上仍有 ~2λε），拿它当收敛判据会空转到 max_iterations。
+            kkt_inf = float(np.max(np.abs(w - project(w - gradient))))
+            entry["kkt_inf"] = kkt_inf
+            norm = kkt_inf
+        else:
+            norm = raw_inf
+        history.append(entry)
         if norm <= tolerance:
             converged = True
             break
@@ -484,25 +646,77 @@ def fit_pairwise(
         slope = float(gradient @ direction)
         if slope >= 0:
             raise SystemExit(f"Newton 方向不是下降方向（λ_B={lambda_b}）：{slope}")
+        if trust_region > 0.0:
+            # 活跃集：贴上界且梯度想再往上（g < 0）、贴下界且想再往下（g > 0）的键**钉住**；
+            # 其余键在自由集上重解 Newton——整步被约束面挡住时若直接退到投影梯度，
+            # 收敛会慢几十倍。判据用**梯度**而不是未约束的 Newton 方向：自由集解出来的
+            # 方向可能把某个贴界键推出去，投影会把它整段削掉（Armijo 随即失败）。
+            upper = anchor + trust_region
+            lower = anchor - trust_region
+            blocked = ((w >= upper - 1e-12) & (gradient < 0.0)) | (
+                (w <= lower + 1e-12) & (gradient > 0.0)
+            )
+            free = ~blocked
+            if not bool(free.all()):
+                reduced: Any = None
+                if bool(free.any()):
+                    try:
+                        reduced = np.zeros_like(direction)
+                        reduced[free] = np.linalg.solve(
+                            hessian[np.ix_(free, free)], -gradient[free]
+                        )
+                    except np.linalg.LinAlgError:
+                        reduced = None
+                if reduced is None or float(gradient @ reduced) >= 0.0:
+                    # 兜底：投影梯度（凸集投影保证下降）；再不行 = 约束面上的驻点。
+                    reduced = project(w - gradient) - w
+                direction = reduced
+            slope = float(gradient @ direction)
+            if slope >= 0.0:
+                converged = True
+                break
+            if np.array_equal(project(w + direction), w):
+                # 整步被约束面削平（自由集耦合把某个贴界键推出去）：改走投影梯度。
+                direction = project(w - gradient) - w
+                slope = float(gradient @ direction)
+                if slope >= 0.0:
+                    converged = True
+                    break
+            step_direction = direction
+        else:
+            step_direction = direction
         step = 1.0
         for _ in range(30):
-            candidate = w + step * direction
+            candidate = project(w + step * step_direction)
+            if trust_region > 0.0 and np.array_equal(candidate, w):
+                converged = True
+                break
             value = _objective(
-                np, matrix, pair_chosen, pair_alt, y_pair, candidate, anchor, lambda_b
+                np, matrix, train_chosen, train_alt, train_y, train_weight,
+                candidate, anchor, lambda_b,
             )
             if value <= loss + 1e-4 * step * slope:
                 break
             step *= 0.5
         else:
             raise SystemExit(f"线搜索失败（λ_B={lambda_b}，第 {iteration} 步）")
-        if float(np.max(np.abs(step * direction))) <= 1e-12:
+        if converged:
+            break
+        # 无投影时保持 08c 的原式（`step * direction`），避免多余的减法舍入。
+        moved = (
+            float(np.max(np.abs(step * step_direction)))
+            if trust_region <= 0.0
+            else float(np.max(np.abs(candidate - w)))
+        )
+        if moved <= 1e-12:
             w = candidate
             converged = True
             break
         w = candidate
     else:
         gradient, hessian, loss, data_loss = _gradient_hessian(
-            np, matrix, pair_chosen, pair_alt, y_pair, w, anchor, lambda_b
+            np, matrix, train_chosen, train_alt, train_y, train_weight,
+            w, anchor, lambda_b,
         )
 
     fitted = {
@@ -513,26 +727,75 @@ def fit_pairwise(
     quantized = {
         key: round(value * weight_module.WEIGHT_SCALE) for key, value in fitted.items()
     }
+
+    train_pairs_count = int(train_pairs.sum())
+    train_scores = matrix @ w
+    train_delta = train_scores[train_chosen] - train_scores[train_alt]
+    train_games = int(np.unique(query_seed[train_query]).size)
+    train_block = {
+        "games": train_games,
+        "samples": int(train_query.sum()),
+        "pairs": train_pairs_count,
+        "pair_loss": float(data_loss),
+        "mean_pair_loss": float(data_loss / train_pairs_count),
+        "pair_weight_sum": float(train_weight.sum()),
+        "accuracy": float(np.count_nonzero(train_delta > 0)) / train_pairs_count,
+    }
+
+    valid_block: dict[str, Any] | None = None
+    if valid_mod > 0:
+        valid_chosen = pair_chosen[valid_pairs]
+        valid_alt = pair_alt[valid_pairs]
+        valid_y = y_pair[valid_pairs]
+        valid_scores = matrix @ w
+        valid_delta = valid_scores[valid_chosen] - valid_scores[valid_alt]
+        valid_pointwise = np.logaddexp(0.0, -valid_y * valid_delta)
+        valid_loss = float(valid_pointwise.sum())
+        valid_pairs_count = len(valid_chosen)
+        valid_block = {
+            "games": int(np.unique(query_seed[valid_query]).size),
+            "samples": int(valid_query.sum()),
+            "pairs": valid_pairs_count,
+            "pair_loss": valid_loss,
+            # spec §2.3：valid 只报**未加权** pair log loss（= 每对 softplus 的均值）。
+            "pair_log_loss": float(valid_loss / valid_pairs_count),
+            "accuracy": float(np.count_nonzero(valid_delta > 0)) / valid_pairs_count,
+        }
+
+    trust_region_bound_keys = 0
+    if trust_region > 0.0:
+        trust_region_bound_keys = int(
+            np.count_nonzero(np.abs(np.abs(w - anchor) - trust_region) <= 1e-12)
+        )
+
     return {
-        "schema": "sgs.fit.pairwise.report.v1",
+        "schema": "sgs.fit.pairwise.report.v2",
         "samples": samples.queries,
         "pairs": samples.pairs,
         "games": samples.games,
         "keys": len(keys),
         "lambda_b": float(lambda_b),
+        "lose_weight": float(lose_weight),
+        "trust_region": float(trust_region),
+        "valid_mod": int(valid_mod),
+        "trust_region_bound_keys": trust_region_bound_keys,
         "target_scale": samples.scale,
         "target": "chosen-over-alternative",
-        "outcome": "not used in the pair direction (behavior cloning)",
+        "outcome": (
+            "pair weight only (behavior cloning): winner 1.0 / loser lose_weight"
+        ),
+        "data_sha256": samples.data_sha256 or None,
         "loss": float(loss),
         "pair_loss": float(data_loss),
-        "mean_pair_loss": (
-            float(data_loss / samples.pairs) if samples.pairs else float("nan")
-        ),
+        "mean_pair_loss": float(data_loss / train_pairs_count),
         "iterations": len(history),
         "converged": converged,
         "gradient_inf": history[-1]["gradient_inf"] if history else float("nan"),
+        "kkt_inf": history[-1].get("kkt_inf") if history else None,
         "elapsed_s": round(time.perf_counter() - started, 1),
         "history": history,
+        "train": train_block,
+        "valid": valid_block,
         "float_weights": fitted,
         "integer_weights": quantized,
         "anchor": {
@@ -549,6 +812,10 @@ def render_weights_data(
     B 族来自成对拟合（本票），A / C 族由 ``--ac-report`` 从 08b 的首轮报告原样搬入
     （票面：A/C 是票 09 的输入，与决策无关）。行长固定、键序按字典序——同一份报告渲染
     两次逐字节相同。
+
+    **配置行**（票 01）：报告里的 ``lose_weight`` / ``trust_region`` / ``valid_mod`` 非默认时，
+    生成文件的模块 docstring 多一行配置读数，让落仓权重自带"用哪个旋钮拟合的"；**默认
+    配置不写这一行**——默认路径必须与 08c 的落仓文件逐字节相同（票 01 验收 1）。
     """
     shared = sorted(report["integer_weights"].items())
     position = sorted(tuple(row) for row in ac_rows)
@@ -558,6 +825,19 @@ def render_weights_data(
     for key, _value in position:
         if key.startswith("b|"):
             raise SystemExit(f"A / C 块里混进了 B 键：{key!r}")
+    lose_weight = float(report.get("lose_weight", DEFAULT_LOSE_WEIGHT))
+    trust_region = float(report.get("trust_region", DEFAULT_TRUST_REGION))
+    valid_mod = int(report.get("valid_mod", DEFAULT_VALID_MOD))
+    configuration = ""
+    if (lose_weight, trust_region, valid_mod) != (
+        DEFAULT_LOSE_WEIGHT,
+        DEFAULT_TRUST_REGION,
+        DEFAULT_VALID_MOD,
+    ):
+        configuration = (
+            f"配置：lose_weight = {lose_weight!r} · trust_region = {trust_region!r} · "
+            f"valid_mod = {valid_mod}（默认 1.0 / 0 / 0 = 08c 等权无投影全量）。"
+        )
     lines = [
         '"""拟合出来的整数权重（`ai-view` 票 08c；生成文件，**不要手改**）。',
         "",
@@ -566,23 +846,29 @@ def render_weights_data(
         f"样本 {report['samples']} 条询问 / {report['pairs']} 对 · 键 {report['keys']} 个 · "
         f"λ_B = {report['lambda_b']!r} · 目标量纲 S = {report['target_scale']!r}"
         "（行为克隆：选中动作恒被偏好）。",
-        '"""',
-        "",
-        "from __future__ import annotations",
-        "",
-        "__all__ = [",
-        '    "FIT_LAMBDA",',
-        '    "FIT_SAMPLES",',
-        '    "IDENTITY_AC_ROWS",',
-        '    "SHARED_B_ROWS",',
-        "]",
-        "",
-        f"FIT_SAMPLES = {report['samples']}",
-        "",
-        f"FIT_LAMBDA = {float(report['lambda_b'])!r}",
-        "",
-        "SHARED_B_ROWS: tuple[tuple[str, int], ...] = (",
     ]
+    if configuration:
+        lines.append(configuration)
+    lines.extend(
+        [
+            '"""',
+            "",
+            "from __future__ import annotations",
+            "",
+            "__all__ = [",
+            '    "FIT_LAMBDA",',
+            '    "FIT_SAMPLES",',
+            '    "IDENTITY_AC_ROWS",',
+            '    "SHARED_B_ROWS",',
+            "]",
+            "",
+            f"FIT_SAMPLES = {report['samples']}",
+            "",
+            f"FIT_LAMBDA = {float(report['lambda_b'])!r}",
+            "",
+            "SHARED_B_ROWS: tuple[tuple[str, int], ...] = (",
+        ]
+    )
     lines.extend(f"    ({key!r}, {value})," for key, value in shared)
     lines.append(")")
     lines.append("")
@@ -611,7 +897,8 @@ def _ac_rows(path: Path) -> list[tuple[str, int]]:
     ]
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """CLI 定义（单独拆出来，测试不用跑拟合就能钉默认旋钮）。"""
     parser = argparse.ArgumentParser(prog="sgs_train.fit", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -633,6 +920,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     fit = sub.add_parser("fit", help="拟合并打印 weights_data.py（训练 venv）。")
     fit.add_argument("--samples", type=Path, required=True)
     fit.add_argument("--lambda-b", type=float, required=True, help="B 族的 λ（预注册网格之一）")
+    fit.add_argument(
+        "--lose-weight",
+        type=float,
+        default=DEFAULT_LOSE_WEIGHT,
+        help="负方 pair 的样本权重（1.0 = 08c 等权；0.0 = 只用胜方 pair）",
+    )
+    fit.add_argument(
+        "--trust-region",
+        type=float,
+        default=DEFAULT_TRUST_REGION,
+        help="信任域 ε：‖w − 1‖∞ ≤ ε（0 = 关闭，08c 路径）",
+    )
+    fit.add_argument(
+        "--valid-mod",
+        type=int,
+        default=DEFAULT_VALID_MOD,
+        help="valid = seed %% valid_mod == 0（0 = 不切分，08c 路径）",
+    )
     fit.add_argument("--out", type=Path, default=None)
     fit.add_argument("--report", type=Path, default=None)
     fit.add_argument(
@@ -643,8 +948,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     fit.add_argument("--max-iterations", type=int, default=60)
     fit.add_argument("--tolerance", type=float, default=1e-6)
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
     if args.command == "collect":
         summary = collect_games(
             range(args.seed_start, args.seed_start + args.games),
@@ -665,6 +973,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = fit_pairwise(
         samples,
         lambda_b=args.lambda_b,
+        lose_weight=args.lose_weight,
+        trust_region=args.trust_region,
+        valid_mod=args.valid_mod,
         max_iterations=args.max_iterations,
         tolerance=args.tolerance,
     )
