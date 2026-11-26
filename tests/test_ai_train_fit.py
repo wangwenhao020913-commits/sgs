@@ -9,6 +9,7 @@ venv 里跑，读数写进票面 `## Answer`），也不碰 `.scratch/`。这里
 4. 样本读取（`query_seed` / `data_sha256`）与报告渲染（默认配置**不**加配置行——
    默认路径必须逐字节复现 08c 的落仓 `weights_data.py`）；
 5. 票 03 的语义约束：D4 向量来自**共用**局面构造器、半空间投影可行 / 幂等、报表字段；
+   票 08b 起键面是**桶化键**，token 由共用构造器的 ``features.bucket`` 现算；
 6. 票 06 的局面桶：边界 / token 闭集、v3 header+row 往返、按 `u` 展开基键、未知
    schema / 桶值 / 缺 `u` 响亮失败、v2 默认路径不变；
 7. 票 07 的候选矩阵：auto 阈值（键 / 字节预算）、dense / sparse 估算公式、report 字段、
@@ -30,8 +31,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from sgs.agents import features  # noqa: E402
+from sgs.agents import features, weights  # noqa: E402
 from sgs_train import fit, semantic_constraints  # noqa: E402
+from support import d4_query  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -267,35 +269,100 @@ def test_render_records_non_default_configuration():
 # ---------------------------------------------------------------------------
 
 
-D4_SAMPLE_KEYS = (
-    "b|装备先手",
-    "b|伤害牌底价",
-    "b|目标数",
-    "b|期望伤害",
-    "b|敌我关系",
+_D4_ITEMS = (
+    "装备先手",
+    "伤害牌底价",
+    "目标数",
+    "期望伤害",
+    "敌我关系",
 )
 
 
+def _d4_token() -> str:
+    """D4 的桶 token：从共用构造器 + ``features.bucket`` 现算（不手抄 ``a0p0``）。"""
+    return features.bucket(d4_query())
+
+
+def _d4_sample_keys() -> tuple[str, ...]:
+    """D4 约束的样本键面：``weights.bucket_key(项名, token)``（不手拼 ``@``）。"""
+    token = _d4_token()
+    return tuple(weights.bucket_key(item, token) for item in _D4_ITEMS)
+
+
 def test_d4_constraint_uses_the_shared_constructor_and_the_hand_rule():
-    """约束向量 = 同一 D4 构造器的 B 特征差：装刀 4.1（含手写 +0.1）− 杀 4.0 = 0.1。"""
-    constraint = semantic_constraints.d4_constraint(D4_SAMPLE_KEYS)
+    """桶化后的约束向量 = 同一 D4 构造器的 B 特征差：装刀 4.1（含手写 +0.1）− 杀 4.0。"""
+    token = _d4_token()
+    keys = _d4_sample_keys()
+    constraint = semantic_constraints.d4_constraint(keys)
     assert constraint.name == "d4_equip_before_lethal_slash"
+    assert constraint.keys == keys
     assert constraint.margin == pytest.approx(semantic_constraints.D4_MARGIN)
+    assert f"token={token}" in constraint.source
     lookup = dict(zip(constraint.keys, constraint.coefficients, strict=True))
-    assert lookup["b|装备先手"] == pytest.approx(4.1)
-    assert lookup["b|伤害牌底价"] == pytest.approx(-3.0)
-    assert lookup["b|目标数"] == pytest.approx(-1.0)
-    assert lookup["b|期望伤害"] == 0.0
-    assert lookup["b|敌我关系"] == 0.0
+    assert lookup[weights.bucket_key("装备先手", token)] == pytest.approx(4.1)
+    assert lookup[weights.bucket_key("伤害牌底价", token)] == pytest.approx(-3.0)
+    assert lookup[weights.bucket_key("目标数", token)] == pytest.approx(-1.0)
+    assert lookup[weights.bucket_key("期望伤害", token)] == 0.0
+    assert lookup[weights.bucket_key("敌我关系", token)] == 0.0
     # 锚点（w = 1）的 gap 就是手写 +0.1；约束在锚点可行。
-    assert constraint.gap([1.0] * len(D4_SAMPLE_KEYS)) == pytest.approx(0.1)
-    assert constraint.satisfied([1.0] * len(D4_SAMPLE_KEYS))
+    assert constraint.gap([1.0] * len(keys)) == pytest.approx(0.1)
+    assert constraint.satisfied([1.0] * len(keys))
+
+
+def test_d4_constraint_takes_the_bucket_token_from_features(monkeypatch):
+    """token **不是**常量：换掉 ``features.bucket``，约束键面跟着换（不手抄 ``a0p0``）。"""
+    token = "a2p1"
+    monkeypatch.setattr(features, "bucket", lambda _query: token)
+    keys = tuple(weights.bucket_key(item, token) for item in _D4_ITEMS)
+    constraint = semantic_constraints.d4_constraint(keys)
+    assert constraint.keys == keys
+    assert f"token={token}" in constraint.source
+    lookup = dict(zip(constraint.keys, constraint.coefficients, strict=True))
+    assert lookup[weights.bucket_key("装备先手", token)] == pytest.approx(4.1)
+    # 若实现里写死某个 D4 token，这三条桶键一个都对不上，上面会在 SystemExit 处先红。
 
 
 def test_d4_constraint_rejects_a_sample_key_space_without_the_d4_keys():
-    """样本表缺 D4 的键 ⇒ 约束无法展开，响亮失败（不静默丢项）。"""
+    """样本表缺 D4 的桶键 ⇒ 约束无法展开，响亮失败（不静默丢项）。"""
+    keys = _d4_sample_keys()
     with pytest.raises(SystemExit):
-        semantic_constraints.d4_constraint(("b|装备先手", "b|伤害牌底价"))
+        semantic_constraints.d4_constraint(keys[:2])
+
+
+def test_d4_constraint_rejects_an_unbucketed_sample_key_space():
+    """v2 的基键样本键面（没有 ``@token``）⇒ 响亮失败，不静默退回无桶读法。"""
+    base_keys = tuple(weights.b_key(item) for item in _D4_ITEMS)
+    with pytest.raises(SystemExit):
+        semantic_constraints.d4_constraint(base_keys)
+
+
+def test_the_bucketed_d4_constraint_projects_and_reports_the_integer_gap():
+    """桶化约束的投影 / report 读法不变：投影后满足，整数量化 gap 仍 > 0。"""
+    token = _d4_token()
+    keys = _d4_sample_keys()
+    constraint = semantic_constraints.d4_constraint(keys)
+    values = [1.0] * len(keys)
+    values[keys.index(weights.bucket_key("伤害牌底价", token))] = 1.02
+    assert constraint.gap(values) == pytest.approx(0.04)  # 4.1 − 3.06 − 1.0 < margin
+    assert not constraint.satisfied(values)
+
+    lower = [0.95] * len(keys)
+    upper = [1.05] * len(keys)
+    projected = semantic_constraints.project_to_feasible(
+        values, (constraint,), lower, upper
+    )
+    assert constraint.satisfied(projected)
+    assert all(
+        low - 1e-12 <= value <= high + 1e-12
+        for value, low, high in zip(projected, lower, upper, strict=True)
+    )
+    integer = [round(value * weights.WEIGHT_SCALE) / weights.WEIGHT_SCALE for value in projected]
+    block = semantic_constraints.report_block(constraint, projected, integer)
+    assert block["margin"] == pytest.approx(semantic_constraints.D4_MARGIN)
+    assert block["gap"] == pytest.approx(semantic_constraints.D4_MARGIN)
+    assert block["satisfied"] is True
+    assert block["integer_gap"] > 0.0
+    assert block["integer_satisfied"] is True
 
 
 def test_half_space_projection_is_bounded_feasible_and_idempotent():

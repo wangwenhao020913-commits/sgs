@@ -695,6 +695,10 @@ def damage_window_engine(seed: int = 7):
 # 票 03 选项 A 把 D4 写成 fit 的线性约束；约束向量必须从**同一个**局面构造器生成，
 # 不许在训练脚本里手抄一份特征。故构造器住这里（测试支撑），`test_ai_cases.py` 与
 # `tools/sgs_train/semantic_constraints.py` 都调它。
+#
+# 票 08b 起 D4 的桶也走同一个询问：token 由 ``features.bucket(query)`` 算（本局面 = 2 人 /
+# PLAY_PHASE ⇒ ``a0p0``），桶键由 ``weights.bucket_key(项名, token)`` 拼。这里**不**导出
+# 硬编码 token，训练与测试都从构造器的询问现算，避免"夹具改了、约束还钉着旧桶"。
 # ---------------------------------------------------------------------------
 
 
@@ -795,7 +799,11 @@ def d4_session(
 
 
 def d4_query(**kwargs):
-    """只要 D4 询问（约束提取用；两步链另走 :func:`d4_session`）。"""
+    """只要 D4 询问（约束提取用；两步链另走 :func:`d4_session`）。
+
+    桶 token 由调用方从返回的询问经 ``features.bucket`` 现算（票 08b），本函数不返回
+    硬编码的 ``a0p0``。
+    """
     return d4_session(**kwargs)[1]
 
 

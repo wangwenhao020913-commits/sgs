@@ -8,9 +8,14 @@
 - ``x`` 是 D4 询问里两个候选的 **B 族特征向量**，由
   :mod:`tests.support.positions` 的**同一个**局面构造器（``d4_query`` / ``d4_actions``）
   派生，不在训练脚本里手抄一份特征（train/serve skew 的头号来源）；
+- 键面是**桶化键** ``b|<项名>@<token>``（`ai-train` 票 08b）：token 从
+  ``features.bucket(query)`` 取（D4 局面 = 2 人 / PLAY_PHASE ⇒ ``a0p0``），键一律由
+  ``weights.bucket_key(项名, token)`` 拼——训练侧不手写 ``@``、不手抄 token；
+- 约束只接受**桶化样本键面**（v3 + ``--bucket-set alive,phase``）：缺桶键 / 拿到 v2 的基键
+  都响亮失败，不静默退回"无桶"（那会让同一张票在两种键面上读出两种 gap）；
 - 约束是**一条半空间**（先只有 D4；不扩大约束集），投影到 ``{w : a·w ≥ margin}`` 与信任域
   的交集：一条半空间 + 一个盒子的投影有闭式（盒子内再沿 ``a`` 找到刚好满足的 λ），
-  实现走纯 Python（82 维，单步 < 1e-4 s）；
+  实现走纯 Python（样本全键向量；容量表 245–492 维，单步 < 1e-4 s）；
 - ``margin`` 取 **0.05（手写 +0.1 的一半，50 个整数量化格）**：它保住"严格先装"并给量化
   留 50 倍余量，又**不**要求拟合保留手写 +0.1 的全部间隙（ai-v13 在加权后只剩 0.0164；
   实测 0.1 在当前等式约束 Newton / 线搜索上不可行）。手写 ``_EQUIP_SETUP_MARGIN = 0.1``
@@ -32,12 +37,12 @@ D4_MARGIN = 0.05
 票 03 的 Answer）。整数表至少留 0.0488 的 gap，远高于 ``WEIGHT_SCALE = 1000`` 的舍入。
 """
 
-_D4_KEYS = (
-    "b|装备先手",
-    "b|伤害牌底价",
-    "b|目标数",
+_D4_ITEMS = (
+    "装备先手",
+    "伤害牌底价",
+    "目标数",
 )
-"""D4 两个候选实际不同的 B 键（自检用；训练按样本键序展开成全向量）。"""
+"""D4 两个候选实际不同的 B **项名**（自检用；键面由 ``weights.bucket_key`` 加本次 token 拼出）。"""
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,11 @@ def build(name: str, sample_keys: Sequence[str]) -> LinearConstraint:
 def d4_constraint(sample_keys: Sequence[str]) -> LinearConstraint:
     """从**共用的** D4 局面构造器取两个候选的 B 特征差，展开到样本键序。
 
+    特征差按**项名**算，展开前一律走 ``weights.bucket_key(项名, token)``：token 由同一个
+    构造器的 ``features.bucket(query)`` 给出（票 08b；D4 = ``a0p0``），不手写 ``@``、不在
+    这里另抄一份 token。样本键面必须是桶化键（v3 + ``--bucket-set alive,phase``）；拿到
+    v2 的基键 / 缺任何一个 D4 桶键都 ``SystemExit``，不静默退回无桶读法。
+
     训练 venv（只有 numpy）不装 pytest；``tests.support`` 本身不 import pytest，故可以
     在训练进程里直接用同一份构造器。路径按 ``__file__`` 定位仓库根，不依赖 cwd。
     """
@@ -91,39 +101,53 @@ def d4_constraint(sample_keys: Sequence[str]) -> LinearConstraint:
     root = Path(__file__).resolve().parents[2]
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    from sgs.agents import features  # 延迟 import：默认路径不碰 tests/support
+    from sgs.agents import features, weights  # 延迟 import：默认路径不碰 tests/support
 
     from tests.support.positions import d4_actions, d4_query
 
     query = d4_query()
+    token = features.bucket(query)
     equipment, slash = d4_actions(query)
-    # 与采集（sgs_train.fit._b_items）**同一个** trace 入口 / 同一个归并函数。
-    equip_items = features.b_family(features._scored_items(query, equipment))
-    slash_items = features.b_family(features._scored_items(query, slash))
+    # 与采集（sgs_train.fit._b_items）**同一个** trace 入口 / 同一个归并函数；这里保留
+    # **项名**，因为桶键要从项名 + token 拼（不先拼基键再反解）。
+    equip_items = features._group(features._scored_items(query, equipment))
+    slash_items = features._group(features._scored_items(query, slash))
+    # 键的拼法只有一处：weights.bucket_key（项名 / token 的合法性也在那里 fail-closed）。
+    equip_keys = {
+        weights.bucket_key(item, token): float(value) for item, value in equip_items.items()
+    }
+    slash_keys = {
+        weights.bucket_key(item, token): float(value) for item, value in slash_items.items()
+    }
     keys = tuple(sample_keys)
-    unknown = sorted((set(equip_items) | set(slash_items)) - set(keys))
+    unknown = sorted((set(equip_keys) | set(slash_keys)) - set(keys))
     if unknown:
         raise SystemExit(
             f"D4 特征键不在样本键里（约束无法展开）：{unknown[:5]}；"
-            "样本表与当前打分器不是同一份口径"
+            f"现在按桶 token {token!r} 拼键，样本键面必须是桶化键"
+            "（--bucket-set alive,phase 的 b|<项名>@<token>），不是 v2 的基键"
         )
     coefficients = tuple(
-        float(equip_items.get(key, 0.0)) - float(slash_items.get(key, 0.0)) for key in keys
+        equip_keys.get(key, 0.0) - slash_keys.get(key, 0.0) for key in keys
     )
     actual_keys = {
         key for key, coefficient in zip(keys, coefficients, strict=True) if coefficient != 0.0
     }
-    if actual_keys != set(_D4_KEYS):
+    expected_keys = {weights.bucket_key(item, token) for item in _D4_ITEMS}
+    if actual_keys != expected_keys:
         raise SystemExit(
-            f"D4 的非零 B 键变了：{sorted(actual_keys)}（期望 {sorted(_D4_KEYS)}）；"
-            "打分器 / 构造器漂移，先核对再改约束"
+            f"D4 的非零 B 键变了：{sorted(actual_keys)}（期望 {sorted(expected_keys)}，"
+            f"token={token!r}）；打分器 / 构造器 / 桶函数漂移，先核对再改约束"
         )
     constraint = LinearConstraint(
         name="d4_equip_before_lethal_slash",
         keys=keys,
         coefficients=coefficients,
         margin=D4_MARGIN,
-        source="ai-train 票 03 选项 A / 票 25 D4（tests/support/positions.py::d4_query）",
+        source=(
+            "ai-train 票 03 选项 A / 票 25 D4 / 票 08b 桶化"
+            f"（tests/support/positions.py::d4_query，token={token}）"
+        ),
     )
     anchor_gap = sum(coefficients)
     if anchor_gap < D4_MARGIN - 1e-12:

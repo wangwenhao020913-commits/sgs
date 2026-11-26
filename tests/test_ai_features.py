@@ -453,6 +453,67 @@ def test_the_weights_table_is_wired_into_the_decision_path():
 
 
 # ---------------------------------------------------------------------------
+# D4 桶化（`ai-train` 票 08b）：token 来自共用构造器；桶在权重键上，不在 frame
+# ---------------------------------------------------------------------------
+
+
+def test_the_d4_query_bucket_comes_from_the_shared_position_constructor():
+    """D4 的桶 token 由 ``features.bucket`` 从共用询问算：2 人 / PLAY_PHASE ⇒ ``a0p0``。
+
+    token 在测试里**只作为期望值**出现；约束（``semantic_constraints``）与读路径都从
+    ``features.bucket`` 现算，不手抄。
+    """
+    from support import d4_actions, d4_query
+
+    query = d4_query()
+    token = features.bucket(query)
+    assert features.validate_bucket_token(token) == token
+    # 桶化在**权重读口**（键）上，不进 frame：D4 两个候选的 B 键仍是基键。
+    for action in d4_actions(query):
+        keys = features.frame(query, action).b()
+        assert keys, "D4 候选没有 B 项，夹具失效"
+        assert all("@" not in key for key in keys), keys
+
+
+def test_all_one_bucket_weights_reproduce_the_d4_score_float_for_float(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """桶权重全 1 ⇒ D4 候选的带权分逐 float 等于原 ``Score`` 总分。
+
+    08a 的整局 parity 覆盖真实对局；这条把同一个桶化读口钉在 08b 的 D4 询问上：
+    token 来自 ``features.bucket``、键来自 ``weights.bucket_key``，不另写回落链。
+    """
+    from support import d4_actions, d4_query
+
+    query = d4_query()
+    token = features.bucket(query)
+    table = weights.WeightTable(
+        name="d4-all-one",
+        families=(weights.FAMILY_B,),
+        rows=tuple(
+            (weights.bucket_key(item, token), weights.WEIGHT_SCALE)
+            for item in ("装备先手", "伤害牌底价", "目标数")
+        ),
+    )
+    weights.b_weight_cached.cache_clear()
+    monkeypatch.setattr(weights, "SHARED_B", table)
+    assert weights.has_bucketed_b() is True
+    try:
+        scorer = heuristic_scoring._SCORERS[QueryKind(query.kind)]
+        actions = d4_actions(query)
+        for action in actions:
+            with heuristic_scoring.Score.tracing():
+                bare = float(scorer(query, action))
+            weighted = heuristic_scoring._weighted_candidate_score(
+                scorer, query, action, token
+            )
+            assert weighted == bare, action
+        assert len(actions) == 2
+    finally:
+        weights.b_weight_cached.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # ③ A 族完备性：每条流水线的每个步骤 + 每个 Hook.timing
 # ---------------------------------------------------------------------------
 
