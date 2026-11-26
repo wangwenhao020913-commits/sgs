@@ -48,8 +48,14 @@ from support import (
     SeatSpec,
     build_state,
     cards_of_type,
+    d4_card,
+    d4_query,
+    d4_session,
     deck_excluding,
+    deck_with_inert_top,
     find_action,
+    lethal_play_query,
+    lethal_play_session,
     ran_timing,
     run_queries,
 )
@@ -636,70 +642,14 @@ SLASH_160 = cards_of_type(PACK_160, "slash")[0]
 VINE_ARMOUR_160 = cards_of_type(PACK_160, "vine_armor")[0]
 
 
-def _inert_draws(pack, *, count: int, used: set[int]) -> tuple[int, ...]:
-    """牌堆顶 ``count`` 张「惰性牌」（【闪】）：出牌阶段没有使用候选，摸到它们不改变决策面。
-
-    避开 ``used``（构造在座位上的实体牌）保证一局里不出现重复的实体牌。
-    """
-    top = tuple(card_id for card_id in cards_of_type(pack, "dodge") if card_id not in used)[
-        :count
-    ]
-    assert len(top) == count, "牌堆顶的惰性【闪】不够（构造局面写错了）"
-    return top
-
-
-def _deck_with_inert_top(pack, *, seats, count: int) -> tuple[int, ...]:
-    """牌堆序：顶上 ``count`` 张惰性牌 + 其余不重复的实体牌（构造局面共用）。
-
-    惰性牌吸收摸牌阶段（见 :func:`_inert_draws`）；D2 的 `_lethal_play_session` 与 S1 的
-    贯石斧夹具都从这里取，不各抄一份"顶牌 + 剩余"的拼法。
-    """
-    used = {card_id for spec in seats for card_id in (*spec.hand, *spec.equip)}
-    top = _inert_draws(pack, count=count, used=used)
-    reserved = used | set(top)
-    return (
-        *top,
-        *(card_id for card_id in range(len(pack.deck.cards)) if card_id not in reserved),
-    )
-
-
 def _lethal_play_session(*, pack=PACK, seats, ai_seat: int, inert: int):
-    """推进到 ``ai_seat`` 的**第一个** ``PLAY_PHASE``，返回 ``(engine, query)``。
-
-    **先手座位不是随便选的**（票 19 的构造纪律）：身份局的先手是**主公座位**、无身份局
-    读 ``RuleConfig.first_seat``（``engine._first_seat``）。故身份局用例把 AI 放在主公座位
-    上（或主公次席——见 :func:`_enemy_vs_unknown_query`），并用牌堆顶的惰性【闪】吸收
-    这之前所有摸牌阶段：AI 的决策面因此只剩构造的手牌。
-
-    与 D1 / D3 同一驱动姿态：真局面 → ``Engine.from_state`` → ``run_queries`` → 真
-    ``HeuristicPlayer.respond``；本文件不抄候选。**返回 engine** 的用处只在一处：② 要真的
-    把【酒】提交进去、再问同一座位的下一条应答（"先酒再杀"是一条两步链）。
-    """
-    state = build_state(
-        pack=pack,
-        rule_config=RuleConfig(player_count=len(seats)),
-        seats=seats,
-        deck=_deck_with_inert_top(pack, seats=seats, count=inert),
-        turn_seat=ai_seat,
-    )
-    engine = Engine.from_state(state, seed=7)
-    run_queries(
-        engine,
-        [PassPlayer() for _ in seats],
-        lambda current: current.pending is not None
-        and current.pending.kind == "PLAY_PHASE"
-        and current.pending.actor == ai_seat,
-    )
-    query = engine.pending
-    assert query is not None, "推进器在到达 AI 的出牌阶段前就停了"
-    return engine, query
+    """D2 / S1 的薄包装：真正的推进器住 ``tests/support/positions.py``（票 03 抽走）。"""
+    return lethal_play_session(pack=pack, seats=seats, ai_seat=ai_seat, inert=inert)
 
 
 def _lethal_play_query(*, pack=PACK, seats, ai_seat: int, inert: int):
-    """只要询问的简写（四条夹具与自检用；② 另走 :func:`_lethal_play_session`）。"""
-    return _lethal_play_session(
-        pack=pack, seats=seats, ai_seat=ai_seat, inert=inert
-    )[1]
+    """D2 / S1 的薄包装；D4 用 ``support.d4_query``（同一构造器，票 03）。"""
+    return lethal_play_query(pack=pack, seats=seats, ai_seat=ai_seat, inert=inert)
 
 
 def _lethal_vs_full_query():
@@ -1687,7 +1637,7 @@ def _t01_query(*, card: int, lord_hp: int = 4, horse: int | None = T01_HORSE):
         pack=PACK,
         rule_config=RuleConfig(player_count=5),
         seats=seats,
-        deck=_deck_with_inert_top(PACK, seats=seats, count=4),
+        deck=deck_with_inert_top(PACK, seats=seats, count=4),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -1837,7 +1787,7 @@ def test_t01_the_lord_veto_leaves_forced_aoe_target_sets_to_the_price_model():
         pack=PACK,
         rule_config=RuleConfig(player_count=5),
         seats=seats,
-        deck=_deck_with_inert_top(PACK, seats=seats, count=4),
+        deck=deck_with_inert_top(PACK, seats=seats, count=4),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -1885,7 +1835,7 @@ def test_t01_an_unknown_seat_stays_worth_targeting():
         pack=PACK,
         rule_config=RuleConfig(player_count=5),
         seats=seats,
-        deck=_deck_with_inert_top(PACK, seats=seats, count=2),
+        deck=deck_with_inert_top(PACK, seats=seats, count=2),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -2002,7 +1952,7 @@ def _t11_query(
         pack=PACK,
         rule_config=RuleConfig(player_count=5),
         seats=seats,
-        deck=_deck_with_inert_top(PACK, seats=seats, count=8),
+        deck=deck_with_inert_top(PACK, seats=seats, count=8),
     )
     engine = Engine.from_state(state, seed=7)
     run_queries(
@@ -2260,7 +2210,7 @@ def _axe_session(*, defender_hp: int, hand, ai_seat=S1_AI_SEAT):
         pack=PACK,
         rule_config=RuleConfig(player_count=2),
         seats=seats,
-        deck=_deck_with_inert_top(PACK, seats=seats, count=2),
+        deck=deck_with_inert_top(PACK, seats=seats, count=2),
         turn_seat=ai_seat,
     )
     engine = Engine.from_state(state, seed=7)
@@ -2616,52 +2566,22 @@ def test_s1_qianxun_passes_at_one_hp_with_only_a_peach():
 # ---------------------------------------------------------------------------
 
 
-SCIMITAR_160 = cards_of_type(PACK_160, "ancient_scimitar")[0]
+SCIMITAR_160 = d4_card("ancient_scimitar")
 """【古锭刀】（只在军争 160）：目标**没有手牌**时你的【杀】伤害 +1。"""
 
-QINGGANG_160 = cards_of_type(PACK_160, "qinggang_sword")[0]
+QINGGANG_160 = d4_card("qinggang_sword")
 """【青釭剑】：无视防具（普通【杀】打【藤甲】不再被挡成 0）。"""
-
-
-def _setup_seats(*, hand, target_hp, target_hand=(), target_equip=()):
-    """无身份 2 人局：AI = 座位 0（先手）、握 ``hand``；座位 1 是**唯一**的目标。
-
-    无身份 ⇒ 关系项为 0，判据只剩"这一刀打不打得死"，不被"打谁是敌人"干扰；
-    目标只有一个 ⇒ 候选面里没有第二个目标可分心（与 D2 的 ``_wine_slash_seats`` 同形）。
-    """
-    return [
-        SeatSpec(hp=4, hp_max=4, hand=hand),
-        SeatSpec(
-            hp=target_hp, hp_max=4, hand=tuple(target_hand), equip=tuple(target_equip)
-        ),
-    ]
-
-
-def _setup_session(*, hand, target_hp, target_hand=(), target_equip=()):
-    """推进到 AI（座位 0）的第一个出牌阶段；返回 ``(engine, query)``。
-
-    两步链要**真的把装备提交进引擎**（见
-    :func:`test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks`）。
-    """
-    return _lethal_play_session(
-        pack=PACK_160,
-        seats=_setup_seats(
-            hand=hand,
-            target_hp=target_hp,
-            target_hand=target_hand,
-            target_equip=target_equip,
-        ),
-        ai_seat=0,
-        inert=2,
-    )
 
 
 def _scimitar_query():
     """手里【古锭刀】+【杀】，目标 2 体力 **0 手**：装上刀这一刀才是 2 点（斩杀）。
 
+    构造器住 ``tests/support/positions.py`` 的 ``d4_session``（票 03 抽走）：测试与训练
+    的线性约束读**同一份**局面 / 特征，不各抄一份。
+
     不装刀 = 1 点 ⇒ 打不死；装上 = 1 + 1（古锭刀的"目标没有手牌"）= 2 点 ⇒ 打死。
     """
-    return _setup_session(hand=(SCIMITAR_160, SLASH_160), target_hp=2)[1]
+    return d4_query()
 
 
 def _qinggang_query():
@@ -2670,9 +2590,9 @@ def _qinggang_query():
     装上青釭剑（无视防具）⇒ 1 点 ⇒ 正好打死。它**修复前已绿**（不装时这一刀被
     ``_WASTED_ATTACK_PENALTY`` 压在装备分之下），故是护栏而不是 xfail 判据。
     """
-    return _setup_session(
+    return d4_query(
         hand=(QINGGANG_160, SLASH_160), target_hp=1, target_equip=(VINE_ARMOUR_160,)
-    )[1]
+    )
 
 
 def _unrelated_setup_query():
@@ -2680,11 +2600,11 @@ def _unrelated_setup_query():
 
     它是"窄面"的对照面：装备分必须**逐值不变**（不因为"手里有刀"就抢在【杀】前面）。
     """
-    return _setup_session(
+    return d4_query(
         hand=(SCIMITAR_160, SLASH_160),
         target_hp=2,
         target_hand=(cards_of_type(PACK, "dodge")[4],),
-    )[1]
+    )
 
 
 QILIN_BOW_160 = cards_of_type(PACK_160, "qilin_bow")[0]
@@ -2820,7 +2740,7 @@ def test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks():
     **先打后装**，把残局放跑（seed 恒定，8 个平分子流全同一选择）。
     """
     _assert_equips_then_strikes(
-        session=lambda: _setup_session(hand=(SCIMITAR_160, SLASH_160), target_hp=2),
+        session=lambda: d4_session(),
         equipment=SCIMITAR_160,
         why="目标 2 体力 0 手：装上【古锭刀】这一刀才是 2 点（斩杀）",
     )
@@ -2834,7 +2754,7 @@ def test_d4_equips_qinggang_before_the_slash_vine_armour_would_swallow():
     装完青釭剑之后同一张【杀】才是斩杀。装配分的加法不许把这条改成"先杀后装"。
     """
     _assert_equips_then_strikes(
-        session=lambda: _setup_session(
+        session=lambda: d4_session(
             hand=(QINGGANG_160, SLASH_160),
             target_hp=1,
             target_equip=(VINE_ARMOUR_160,),

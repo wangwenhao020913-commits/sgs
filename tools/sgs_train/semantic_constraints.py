@@ -1,0 +1,262 @@
+"""语义约束集（`ai-train` 票 03 选项 A）：把 D4 的先后顺序写成 fit 的线性不等式。
+
+票 03 的裁定：D4「古锭刀先手」是**硬语义**——目标 2 体力 0 手时，先装【古锭刀】再补
+【杀】是规则级的要求，不是手写 tie-break 可以随便翻掉的软偏好。故本模块把它写进拟合：
+
+    w · (x_equip − x_slash) ≥ margin
+
+- ``x`` 是 D4 询问里两个候选的 **B 族特征向量**，由
+  :mod:`tests.support.positions` 的**同一个**局面构造器（``d4_query`` / ``d4_actions``）
+  派生，不在训练脚本里手抄一份特征（train/serve skew 的头号来源）；
+- 约束是**一条半空间**（先只有 D4；不扩大约束集），投影到 ``{w : a·w ≥ margin}`` 与信任域
+  的交集：一条半空间 + 一个盒子的投影有闭式（盒子内再沿 ``a`` 找到刚好满足的 λ），
+  实现走纯 Python（82 维，单步 < 1e-4 s）；
+- ``margin`` 取 **20 个整数量化格（0.02）**：它只保证"严格先装"并给量化留余量，**不**要求
+  拟合保留手写 +0.1 的全部间隙（ai-v13 在加权后只剩 0.0164，硬要 0.1 会把权重推得更远）。
+  手写 ``_EQUIP_SETUP_MARGIN = 0.1`` 的价不改，约束只把**符号**钉住。
+
+约束只在显式 ``--constraint d4`` 时生效；默认路径（无约束）仍逐字节复现 `ai-v13`。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping, Sequence
+
+D4_MARGIN = 0.02
+"""D4 约束的 margin（加权后的 B 分差下界）：20 个整数量化格。
+
+取 0.02 而不是 0.1：手写 +0.1 在权重里被压缩（ai-v13 实测 0.0164），把 0.1 当硬下界
+会把拟合推离数据；0.02 只要求"严格先装"并给 ``WEIGHT_SCALE = 1000`` 的量化留 10 倍余量。
+"""
+
+_D4_KEYS = (
+    "b|装备先手",
+    "b|伤害牌底价",
+    "b|目标数",
+)
+"""D4 两个候选实际不同的 B 键（自检用；训练按样本键序展开成全向量）。"""
+
+
+@dataclass(frozen=True)
+class LinearConstraint:
+    """一条 ``a·w ≥ margin`` 的线性语义约束（键序与样本键序一致）。"""
+
+    name: str
+    keys: tuple[str, ...]
+    coefficients: tuple[float, ...]
+    margin: float
+    source: str
+
+    def gap(self, values: Sequence[float]) -> float:
+        """``a·w``（``w`` 按 :attr:`keys` 的次序）；长度不符即炸，不静默截断。"""
+        if len(values) != len(self.coefficients):
+            raise SystemExit(
+                f"语义约束 {self.name!r} 的权重长度 {len(values)} != {len(self.coefficients)}"
+            )
+        return sum(
+            coefficient * float(value)
+            for coefficient, value in zip(self.coefficients, values, strict=True)
+        )
+
+    def gap_mapping(self, weights: Mapping[str, float]) -> float:
+        """按"键 → 权重"映射求 ``a·w``（报表 / 单测的读口）。"""
+        return sum(
+            coefficient * float(weights.get(key, 0.0))
+            for key, coefficient in zip(self.keys, self.coefficients, strict=True)
+        )
+
+    def satisfied(self, values: Sequence[float], *, tolerance: float = 1e-12) -> bool:
+        return self.gap(values) >= self.margin - tolerance
+
+
+def build(name: str, sample_keys: Sequence[str]) -> LinearConstraint:
+    """按名字造约束；目前只有 ``d4``。未知名字 / 缺键都响亮失败。"""
+    if name != "d4":
+        raise SystemExit(f"未知的语义约束 {name!r}（当前只登记 d4）")
+    return d4_constraint(sample_keys)
+
+
+def d4_constraint(sample_keys: Sequence[str]) -> LinearConstraint:
+    """从**共用的** D4 局面构造器取两个候选的 B 特征差，展开到样本键序。
+
+    训练 venv（只有 numpy）不装 pytest；``tests.support`` 本身不 import pytest，故可以
+    在训练进程里直接用同一份构造器。路径按 ``__file__`` 定位仓库根，不依赖 cwd。
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from sgs.agents import features  # 延迟 import：默认路径不碰 tests/support
+
+    from tests.support.positions import d4_actions, d4_query
+
+    query = d4_query()
+    equipment, slash = d4_actions(query)
+    # 与采集（sgs_train.fit._b_items）**同一个** trace 入口 / 同一个归并函数。
+    equip_items = features.b_family(features._scored_items(query, equipment))
+    slash_items = features.b_family(features._scored_items(query, slash))
+    keys = tuple(sample_keys)
+    unknown = sorted((set(equip_items) | set(slash_items)) - set(keys))
+    if unknown:
+        raise SystemExit(
+            f"D4 特征键不在样本键里（约束无法展开）：{unknown[:5]}；"
+            "样本表与当前打分器不是同一份口径"
+        )
+    coefficients = tuple(
+        float(equip_items.get(key, 0.0)) - float(slash_items.get(key, 0.0)) for key in keys
+    )
+    actual_keys = {
+        key for key, coefficient in zip(keys, coefficients, strict=True) if coefficient != 0.0
+    }
+    if actual_keys != set(_D4_KEYS):
+        raise SystemExit(
+            f"D4 的非零 B 键变了：{sorted(actual_keys)}（期望 {sorted(_D4_KEYS)}）；"
+            "打分器 / 构造器漂移，先核对再改约束"
+        )
+    constraint = LinearConstraint(
+        name="d4_equip_before_lethal_slash",
+        keys=keys,
+        coefficients=coefficients,
+        margin=D4_MARGIN,
+        source="ai-train 票 03 选项 A / 票 25 D4（tests/support/positions.py::d4_query）",
+    )
+    anchor_gap = sum(coefficients)
+    if anchor_gap < D4_MARGIN - 1e-12:
+        raise SystemExit(
+            f"D4 约束在锚点就不可行（gap={anchor_gap:.6f} < margin={D4_MARGIN}）："
+            "手写规则的 +0.1 没有进 B 特征，构造器 / 打分器已经漂了"
+        )
+    return constraint
+
+
+# ---------------------------------------------------------------------------
+# 投影：盒子（信任域）× 半空间交集
+# ---------------------------------------------------------------------------
+
+
+def _clip(
+    values: Sequence[float],
+    lower: Sequence[float] | None,
+    upper: Sequence[float] | None,
+) -> list[float]:
+    if lower is None or upper is None:
+        return [float(value) for value in values]
+    return [
+        min(max(float(value), float(low)), float(high))
+        for value, low, high in zip(values, lower, upper, strict=True)
+    ]
+
+
+def project(
+    values: Sequence[float],
+    constraint: LinearConstraint,
+    lower: Sequence[float] | None = None,
+    upper: Sequence[float] | None = None,
+) -> list[float]:
+    """把 ``values`` 投影到 ``{w : a·w ≥ margin} ∩ [lower, upper]``。
+
+    一条半空间 + 盒子的投影有闭式：盒子内沿 ``a`` 走，``λ`` 增大时 ``a·clip(v+λa)``
+    单调不减；二分找到 ``a·w = margin`` 的那个点。无盒子时直接闭式解。
+    """
+    vector = [float(value) for value in values]
+    candidate = _clip(vector, lower, upper)
+    if constraint.gap(candidate) >= constraint.margin:
+        return candidate
+    coefficients = constraint.coefficients
+    norm = sum(coefficient * coefficient for coefficient in coefficients)
+    if norm <= 0.0:
+        raise SystemExit(f"语义约束 {constraint.name!r} 的系数全 0：无法投影")
+    if lower is None or upper is None:
+        step = (constraint.margin - constraint.gap(vector)) / norm
+        return [
+            value + step * coefficient
+            for value, coefficient in zip(vector, coefficients, strict=True)
+        ]
+
+    def shifted(step: float) -> list[float]:
+        return _clip(
+            [
+                value + step * coefficient
+                for value, coefficient in zip(vector, coefficients, strict=True)
+            ],
+            lower,
+            upper,
+        )
+
+    def gap_at(step: float) -> float:
+        return constraint.gap(shifted(step))
+
+    high = 1.0
+    while gap_at(high) < constraint.margin:
+        high *= 2.0
+        if high > 1e15:
+            raise SystemExit(f"语义约束 {constraint.name!r} 在信任域内不可行")
+    low = 0.0
+    for _ in range(80):
+        middle = (low + high) / 2.0
+        if gap_at(middle) >= constraint.margin:
+            high = middle
+        else:
+            low = middle
+    return shifted(high)
+
+
+def project_to_feasible(
+    values: Sequence[float],
+    constraints: Sequence[LinearConstraint],
+    lower: Sequence[float] | None = None,
+    upper: Sequence[float] | None = None,
+) -> list[float]:
+    """逐条投影到所有约束的交集（当前只有一条，故一次即精确）。
+
+    多条时是交替投影的近似；约束集**刻意保持一条**（票 03「不扩大约束集」），多条要另票
+    换成 QP，不在这里悄悄扩。
+    """
+    point = _clip(values, lower, upper)
+    if not constraints:
+        return point
+    for _ in range(200):
+        before = list(point)
+        for constraint in constraints:
+            point = project(point, constraint, lower, upper)
+        if all(constraint.satisfied(point) for constraint in constraints):
+            return point
+        if max(abs(a - b) for a, b in zip(point, before, strict=True)) <= 1e-15:
+            break
+    return point
+
+
+def report_block(
+    constraint: LinearConstraint,
+    values: Sequence[float],
+    integer_values: Sequence[float] | None = None,
+) -> dict[str, object]:
+    """报表里的约束读数：名字 / margin / 拟合 gap / 是否满足（+ 整数量化后的 gap）。"""
+    gap = constraint.gap(values)
+    block: dict[str, object] = {
+        "name": constraint.name,
+        "margin": constraint.margin,
+        "gap": gap,
+        "satisfied": bool(gap >= constraint.margin - 1e-12),
+        "source": constraint.source,
+    }
+    if integer_values is not None:
+        integer_gap = constraint.gap(integer_values)
+        block["integer_gap"] = integer_gap
+        # 落仓的是整数表：测试只要求"严格先装"（> 0），不要求量化后仍留满 margin。
+        block["integer_satisfied"] = bool(integer_gap > 0.0)
+    return block
+
+
+__all__ = [
+    "D4_MARGIN",
+    "LinearConstraint",
+    "build",
+    "d4_constraint",
+    "project",
+    "project_to_feasible",
+    "report_block",
+]

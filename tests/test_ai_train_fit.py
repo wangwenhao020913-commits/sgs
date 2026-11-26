@@ -7,7 +7,8 @@ venv 里跑，读数写进票面 `## Answer`），也不碰 `.scratch/`。这里
 2. 信任域投影（`ε = 0` = 关闭，不能把权重拉回锚）；
 3. 按**局种子**切 train / valid（互补、不交、确定性）；
 4. 样本读取（`query_seed` / `data_sha256`）与报告渲染（默认配置**不**加配置行——
-   默认路径必须逐字节复现 08c 的落仓 `weights_data.py`）。
+   默认路径必须逐字节复现 08c 的落仓 `weights_data.py`）；
+5. 票 03 的语义约束：D4 向量来自**共用**局面构造器、半空间投影可行 / 幂等、报表字段。
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from sgs_train import fit  # noqa: E402
+from sgs_train import fit, semantic_constraints  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -229,3 +230,101 @@ def test_render_records_non_default_configuration():
     configured_lines = source.splitlines()
     assert len(configured_lines) == len(default_lines) + 1
     assert "LOSE_WEIGHT" not in source and "TRUST_REGION" not in source
+
+
+# ---------------------------------------------------------------------------
+# 票 03：D4 语义约束（选项 A）
+# ---------------------------------------------------------------------------
+
+
+D4_SAMPLE_KEYS = (
+    "b|装备先手",
+    "b|伤害牌底价",
+    "b|目标数",
+    "b|期望伤害",
+    "b|敌我关系",
+)
+
+
+def test_d4_constraint_uses_the_shared_constructor_and_the_hand_rule():
+    """约束向量 = 同一 D4 构造器的 B 特征差：装刀 4.1（含手写 +0.1）− 杀 4.0 = 0.1。"""
+    constraint = semantic_constraints.d4_constraint(D4_SAMPLE_KEYS)
+    assert constraint.name == "d4_equip_before_lethal_slash"
+    assert constraint.margin == pytest.approx(semantic_constraints.D4_MARGIN)
+    lookup = dict(zip(constraint.keys, constraint.coefficients, strict=True))
+    assert lookup["b|装备先手"] == pytest.approx(4.1)
+    assert lookup["b|伤害牌底价"] == pytest.approx(-3.0)
+    assert lookup["b|目标数"] == pytest.approx(-1.0)
+    assert lookup["b|期望伤害"] == 0.0
+    assert lookup["b|敌我关系"] == 0.0
+    # 锚点（w = 1）的 gap 就是手写 +0.1；约束在锚点可行。
+    assert constraint.gap([1.0] * len(D4_SAMPLE_KEYS)) == pytest.approx(0.1)
+    assert constraint.satisfied([1.0] * len(D4_SAMPLE_KEYS))
+
+
+def test_d4_constraint_rejects_a_sample_key_space_without_the_d4_keys():
+    """样本表缺 D4 的键 ⇒ 约束无法展开，响亮失败（不静默丢项）。"""
+    with pytest.raises(SystemExit):
+        semantic_constraints.d4_constraint(("b|装备先手", "b|伤害牌底价"))
+
+
+def test_half_space_projection_is_bounded_feasible_and_idempotent():
+    """半空间 × 盒子的投影：落在交集内、贴边可复现、边界上再投不变。"""
+    constraint = semantic_constraints.LinearConstraint(
+        name="synthetic", keys=("a", "b"), coefficients=(1.0, -1.0), margin=0.0,
+        source="test",
+    )
+    lower = [0.95, 0.95]
+    upper = [1.05, 1.05]
+    values = [0.95, 1.05]  # gap = 0.95 − 1.05 = −0.1，越界但盒内可行
+    projected = semantic_constraints.project_to_feasible(
+        values, (constraint,), lower, upper
+    )
+    assert constraint.gap(projected) >= -1e-12
+    assert all(lo - 1e-12 <= value <= hi + 1e-12 for value, lo, hi in zip(projected, lower, upper, strict=True))
+    again = semantic_constraints.project_to_feasible(
+        projected, (constraint,), lower, upper
+    )
+    assert again == pytest.approx(projected)
+
+
+def test_report_block_records_margin_gap_and_integer_reading():
+    constraint = semantic_constraints.LinearConstraint(
+        name="d4", keys=("a",), coefficients=(1.0,), margin=0.02, source="test"
+    )
+    block = semantic_constraints.report_block(constraint, [1.02], [1.02])
+    assert block["margin"] == pytest.approx(0.02)
+    assert block["gap"] == pytest.approx(1.02)
+    assert block["satisfied"] is True
+    assert block["integer_gap"] == pytest.approx(1.02)
+    assert block["integer_satisfied"] is True
+
+
+def test_cli_has_no_constraint_by_default_and_accepts_d4():
+    parser = fit._build_parser()
+    default = parser.parse_args(["fit", "--samples", "x", "--lambda-b", "1"])
+    assert default.constraint == []
+    chosen = parser.parse_args(
+        ["fit", "--samples", "x", "--lambda-b", "1", "--constraint", "d4"]
+    )
+    assert chosen.constraint == ["d4"]
+
+
+def test_render_records_the_semantic_constraint_line():
+    report = _report(lose_weight=0.5, trust_region=0.05, valid_mod=5)
+    report["constraints"] = [
+        {
+            "name": "d4_equip_before_lethal_slash",
+            "margin": 0.02,
+            "gap": 0.0201,
+            "satisfied": True,
+            "integer_gap": 0.019,
+            "integer_satisfied": True,
+            "source": "test",
+        }
+    ]
+    source = fit.render_weights_data(report)
+    assert "语义约束：" in source
+    assert "d4_equip_before_lethal_slash" in source
+    assert "margin = 0.02" in source
+    assert "整数量化满足 = True" in source

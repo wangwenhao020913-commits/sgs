@@ -70,6 +70,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import semantic_constraints
+
 __all__ = [
     "ALTERNATIVES",
     "DEFAULT_LOSE_WEIGHT",
@@ -536,6 +538,7 @@ def fit_pairwise(
     valid_mod: int = DEFAULT_VALID_MOD,
     max_iterations: int = 60,
     tolerance: float = 1e-6,
+    constraints: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """单个 ``λ_B`` 的成对拟合（Newton + 投影 + Armijo；确定性、不取随机数）。
 
@@ -567,6 +570,13 @@ def fit_pairwise(
     for key in keys:
         if weight_module.family(key) != weight_module.FAMILY_B:
             raise SystemExit(f"成对拟合只收 B 族键，收到 {key!r}")
+    constraints = tuple(constraints)
+    for constraint in constraints:
+        if tuple(constraint.keys) != keys:
+            raise SystemExit(
+                f"语义约束 {constraint.name!r} 的键序与样本键序不一致："
+                "约束必须由同一份 samples.keys 展开"
+            )
     anchor = np.asarray([weight_module.anchor(key) for key in keys], dtype=np.float64)
     anchor_values = anchor.tolist()
     matrix = _matrix(np, samples)
@@ -602,16 +612,35 @@ def fit_pairwise(
     train_y = y_pair[train_pairs]
     train_weight = pair_weight[train_pairs]
 
+    lower_values = (
+        [value - trust_region for value in anchor_values] if trust_region > 0.0 else None
+    )
+    upper_values = (
+        [value + trust_region for value in anchor_values] if trust_region > 0.0 else None
+    )
+
     def project(point: Any) -> Any:
-        """投影到信任域；``ε = 0`` 不投影（保持 08c 的逐位路径）。"""
-        if trust_region <= 0.0:
+        """投影到信任域（有约束时再投影到语义约束）；默认路径逐位保持 08c。"""
+        if trust_region <= 0.0 and not constraints:
             return point
-        return np.asarray(
-            project_weights_to_trust_region(point.tolist(), anchor_values, trust_region),
-            dtype=np.float64,
-        )
+        if trust_region > 0.0:
+            point = np.asarray(
+                project_weights_to_trust_region(point.tolist(), anchor_values, trust_region),
+                dtype=np.float64,
+            )
+        if constraints:
+            point = np.asarray(
+                semantic_constraints.project_to_feasible(
+                    point.tolist(), constraints, lower_values, upper_values
+                ),
+                dtype=np.float64,
+            )
+        return point
 
     w = anchor.copy()
+    if constraints:
+        # 锚点是约束的可行点（D4 的 +0.1 手写 margin 在锚点 gap=0.1）；通用约束也先投影一次。
+        w = project(w)
     history: list[dict[str, Any]] = []
     started = time.perf_counter()
     converged = False
@@ -646,7 +675,60 @@ def fit_pairwise(
         slope = float(gradient @ direction)
         if slope >= 0:
             raise SystemExit(f"Newton 方向不是下降方向（λ_B={lambda_b}）：{slope}")
-        if trust_region > 0.0:
+        if constraints and trust_region > 0.0:
+            # 语义约束活跃时，在"约束面 + 盒子活跃集"上解**等式约束 Newton**：
+            #   [H_ff  a_f] [d_f]   [-g_f]
+            #   [a_fᵀ   0 ] [λ ] = [ 0  ]
+            # 方向切于约束面；投影线搜索负责盒子与数值重整。只走无约束 Newton + 投影
+            # 时实测 60 步 KKT 停在 0.1（约束面与盒子面把方向削得只剩极小步），
+            # 故活跃面上必须解等式系统。
+            upper = anchor + trust_region
+            lower = anchor - trust_region
+            blocked = ((w >= upper - 1e-12) & (gradient < 0.0)) | (
+                (w <= lower + 1e-12) & (gradient > 0.0)
+            )
+            free = ~blocked
+            constraint = constraints[0]
+            gap = constraint.gap(w.tolist())
+            if gap <= constraint.margin + 1e-7 and bool(free.any()):
+                coefficients = np.asarray(constraint.coefficients, dtype=np.float64)
+                a_free = coefficients[free]
+                if float(np.max(np.abs(a_free))) > 0.0:
+                    count = int(free.sum())
+                    kkt = np.zeros((count + 1, count + 1), dtype=np.float64)
+                    kkt[:count, :count] = hessian[np.ix_(free, free)]
+                    kkt[:count, count] = a_free
+                    kkt[count, :count] = a_free
+                    rhs = np.zeros(count + 1, dtype=np.float64)
+                    rhs[:count] = -gradient[free]
+                    try:
+                        solution = np.linalg.solve(kkt, rhs)
+                    except np.linalg.LinAlgError:
+                        solution = None
+                    if solution is not None:
+                        reduced = np.zeros_like(w)
+                        reduced[free] = solution[:count]
+                        direction = reduced
+                    else:
+                        direction = project(w - gradient) - w
+                else:
+                    direction = project(w - gradient) - w
+            # 约束不在边界：保留无约束 Newton；投影线搜索会把越界的第一步拉回边界。
+            slope = float(gradient @ direction)
+            if slope >= 0.0:
+                direction = project(w - gradient) - w
+                slope = float(gradient @ direction)
+            if slope >= 0.0:
+                converged = True
+                break
+            if np.array_equal(project(w + direction), w):
+                direction = project(w - gradient) - w
+                slope = float(gradient @ direction)
+                if slope >= 0.0:
+                    converged = True
+                    break
+            step_direction = direction
+        elif trust_region > 0.0:
             # 活跃集：贴上界且梯度想再往上（g < 0）、贴下界且想再往下（g > 0）的键**钉住**；
             # 其余键在自由集上重解 Newton——整步被约束面挡住时若直接退到投影梯度，
             # 收敛会慢几十倍。判据用**梯度**而不是未约束的 Newton 方向：自由集解出来的
@@ -719,6 +801,22 @@ def fit_pairwise(
             w, anchor, lambda_b,
         )
 
+    final_gradient_inf = history[-1]["gradient_inf"] if history else float("nan")
+    final_kkt = history[-1].get("kkt_inf") if history else None
+    if constraints and trust_region > 0.0:
+        # 约束步的终点在**最后一步之后**：最后一步可能只动了一点点但跨过了活跃集，
+        # 用最后一步**开始前**的 KKT 会把已收敛的解误报成残差 0.025。终点重算一次。
+        final_gradient, _hessian_final, _loss_final, _data_final = _gradient_hessian(
+            np, matrix, train_chosen, train_alt, train_y, train_weight,
+            w, anchor, lambda_b,
+        )
+        final_gradient_inf = float(np.max(np.abs(final_gradient)))
+        final_kkt = float(np.max(np.abs(w - project(w - final_gradient))))
+        converged = converged and final_kkt <= tolerance
+    elif trust_region > 0.0 and history:
+        # 约束面 / 盒子活跃集上，"投影后无位移"只是驻点近似；只有 KKT 残差到阈值才算收敛。
+        converged = converged and float(history[-1].get("kkt_inf", float("inf"))) <= tolerance
+
     fitted = {
         key: float(value)
         for key, value in zip(keys, w, strict=True)
@@ -768,6 +866,22 @@ def fit_pairwise(
             np.count_nonzero(np.abs(np.abs(w - anchor) - trust_region) <= 1e-12)
         )
 
+    constraint_blocks: list[dict[str, Any]] = []
+    if constraints:
+        integer_values = [
+            float(
+                quantized.get(
+                    key, round(weight_module.anchor(key) * weight_module.WEIGHT_SCALE)
+                )
+            )
+            / weight_module.WEIGHT_SCALE
+            for key in keys
+        ]
+        constraint_blocks = [
+            semantic_constraints.report_block(constraint, w.tolist(), integer_values)
+            for constraint in constraints
+        ]
+
     return {
         "schema": "sgs.fit.pairwise.report.v2",
         "samples": samples.queries,
@@ -778,6 +892,7 @@ def fit_pairwise(
         "lose_weight": float(lose_weight),
         "trust_region": float(trust_region),
         "valid_mod": int(valid_mod),
+        "constraints": constraint_blocks,
         "trust_region_bound_keys": trust_region_bound_keys,
         "target_scale": samples.scale,
         "target": "chosen-over-alternative",
@@ -790,8 +905,8 @@ def fit_pairwise(
         "mean_pair_loss": float(data_loss / train_pairs_count),
         "iterations": len(history),
         "converged": converged,
-        "gradient_inf": history[-1]["gradient_inf"] if history else float("nan"),
-        "kkt_inf": history[-1].get("kkt_inf") if history else None,
+        "gradient_inf": final_gradient_inf,
+        "kkt_inf": final_kkt,
         "elapsed_s": round(time.perf_counter() - started, 1),
         "history": history,
         "train": train_block,
@@ -816,7 +931,7 @@ def render_weights_data(
     **配置行**（票 01）：报告里的 ``lose_weight`` / ``trust_region`` / ``valid_mod`` 非默认时，
     生成文件的模块 docstring 多一行配置读数（含 ``data_sha256``，票 02 要求落仓权重自带
     "用哪份样本拟合的"），**默认配置不写这一行**——默认路径必须与 08c 的落仓文件逐字节
-    相同（票 01 验收 1）。
+    相同（票 01 验收 1）。语义约束（票 03）另占一行，记名字 / margin / 拟合 gap / 量化 gap。
     """
     shared = sorted(report["integer_weights"].items())
     position = sorted(tuple(row) for row in ac_rows)
@@ -852,6 +967,12 @@ def render_weights_data(
     ]
     if configuration:
         lines.append(configuration)
+    for block in report.get("constraints", []):
+        lines.append(
+            f"语义约束：{block['name']} · margin = {block['margin']!r} · "
+            f"拟合 gap = {block['gap']!r} · 整数量化 gap = {block.get('integer_gap')!r}"
+            f"（整数量化满足 = {block.get('integer_satisfied')}）。"
+        )
     lines.extend(
         [
             '"""',
@@ -941,6 +1062,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_VALID_MOD,
         help="valid = seed %% valid_mod == 0（0 = 不切分，08c 路径）",
     )
+    fit.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        choices=("d4",),
+        help="语义约束（票 03；可重复，当前只登记 d4 = 古锭刀先手）",
+    )
     fit.add_argument("--out", type=Path, default=None)
     fit.add_argument("--report", type=Path, default=None)
     fit.add_argument(
@@ -973,6 +1101,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     samples = load_pair_samples(args.samples)
+    constraints = tuple(
+        semantic_constraints.build(name, samples.keys) for name in args.constraint
+    )
     report = fit_pairwise(
         samples,
         lambda_b=args.lambda_b,
@@ -981,6 +1112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         valid_mod=args.valid_mod,
         max_iterations=args.max_iterations,
         tolerance=args.tolerance,
+        constraints=constraints,
     )
     source = render_weights_data(
         report,
