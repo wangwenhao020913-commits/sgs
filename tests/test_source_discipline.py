@@ -786,7 +786,7 @@ TRAIN_SERVE_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "dataclasses": frozenset({"dataclass"}),
     "functools": frozenset({"lru_cache"}),
     "math": frozenset(),
-    "types": frozenset({"MappingProxyType"}),
+    "types": frozenset({"MappingProxyType", "ModuleType"}),
     # 关系类的闭集要拿身份（``Identity``）与模式（``Mode``）比对；两者都是**规则常数**，
     # 不是状态 / 记录流。``PlayerView`` / ``PublicEvent`` / ``Action`` / ``Query`` 是询问
     # 自带的视图、公开事实与协议类型。

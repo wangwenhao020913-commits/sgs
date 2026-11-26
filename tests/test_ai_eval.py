@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from sgs.agents import weights as weight_module
 from sgs.data import RuleConfig, load_content_pack
 from sgs.effects import legal_actions_for
 from sgs.engine import Engine, ai_stream
@@ -403,6 +404,44 @@ class HeuristicPlayer:
 '''
 
 
+def _stub_weights(rows: tuple[tuple[str, int], ...] = ()) -> str:
+    """测试用 ``weights_data.py``：整数字面量，与生成文件同形（票 15）。"""
+    return (
+        "from __future__ import annotations\n\n"
+        f"SHARED_B_ROWS: tuple[tuple[str, int], ...] = {rows!r}\n"
+        "IDENTITY_AC_ROWS: tuple[tuple[str, int], ...] = ()\n"
+    )
+
+
+WEIGHT_PROBE_HEURISTIC = '''\
+"""测试用假启发式：把版本局部权重读口的读数原样交出来（票 15）。"""
+
+from . import weights as weight_policy
+
+
+class HeuristicPlayer:
+    def __init__(self, stream=None):
+        self.stream = stream
+
+    def respond(self, query):
+        table = weight_policy.SHARED_B
+        return (
+            table.name,
+            weight_policy.has_fitted_b(),
+            weight_policy.b_weight_cached("探针"),
+        )
+'''
+
+
+FAILING_HEURISTIC = '''\
+"""测试用假启发式：在加载期就抛（票 15 的还原路径）。"""
+
+from . import weights as weight_policy
+
+raise RuntimeError("load-time boom")
+'''
+
+
 def _git(root: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(root), *args],
@@ -414,12 +453,33 @@ def _git(root: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _make_version_repo(tmp_path: Path, *, source: str = STUB_HEURISTIC, tag: str = "v1") -> Path:
-    root = tmp_path / "repo"
-    target = root / "src" / "sgs" / "agents" / "heuristic.py"
-    target.parent.mkdir(parents=True)
-    target.write_text(source, encoding="utf-8")
-    _git(root, "init", "-q", "-b", "main")
+def _git_bytes(root: Path, *args: str) -> bytes:
+    """``_git`` 的字节版：不用 ``strip()`` 动副本（票 15 的"逐字节"判据）。"""
+    completed = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout
+
+
+def _commit_version(
+    root: Path,
+    *,
+    source: str,
+    tag: str,
+    weights: str | None = None,
+) -> None:
+    """把一版启发式（+ 可选 weights_data.py）提交并打 tag。"""
+    agents = root / "src" / "sgs" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "heuristic.py").write_text(source, encoding="utf-8")
+    weights_file = agents / "weights_data.py"
+    if weights is None:
+        weights_file.unlink(missing_ok=True)
+    else:
+        weights_file.write_text(weights, encoding="utf-8")
     _git(root, "add", "-A")
     _git(
         root,
@@ -429,9 +489,22 @@ def _make_version_repo(tmp_path: Path, *, source: str = STUB_HEURISTIC, tag: str
         "user.email=ai-eval-test@example.com",
         "commit",
         "-qm",
-        "version",
+        tag,
     )
     _git(root, "tag", tag)
+
+
+def _make_version_repo(
+    tmp_path: Path,
+    *,
+    source: str = STUB_HEURISTIC,
+    tag: str = "v1",
+    weights: str | None = None,
+) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True)
+    _git(root, "init", "-q", "-b", "main")
+    _commit_version(root, source=source, tag=tag, weights=weights)
     return root
 
 
@@ -483,6 +556,208 @@ def test_a_corrupted_copy_is_refused_instead_of_imported(
     assert "字节不一致" in str(error.value)
 
 
+# ---------------------------------------------------------------------------
+# 票 15：按版本冻结 weights_data.py（B 表 + 版本局部读口）
+# ---------------------------------------------------------------------------
+
+
+def test_the_loader_freezes_weights_data_next_to_the_heuristic(tmp_path: Path) -> None:
+    """票 15 点 1：ref 里有权重文件 ⇒ 原字节落副本、读回比对、字段可进 manifest。"""
+    rows = (("b|探针", 1000),)
+    repo = _make_version_repo(
+        tmp_path, source=WEIGHT_PROBE_HEURISTIC, weights=_stub_weights(rows)
+    )
+    versions = tmp_path / "runs" / "ai-versions"
+
+    loaded = load_version("v1", repo_root=repo, versions_dir=versions)
+
+    expected = _git_bytes(repo, "show", "v1:src/sgs/agents/weights_data.py")
+    assert loaded.weights_frozen is True
+    assert loaded.weights_sha256 == hashlib.sha256(expected).hexdigest()
+    assert loaded.weights_path == versions / "v1-weights.py"
+    assert loaded.weights_path.read_bytes() == expected
+    policy = sys.modules[loaded.player_class.__module__].weight_policy
+    assert policy.SHARED_B.name == "shared_b@v1"
+    assert policy.SHARED_B.rows == rows
+    assert policy.has_fitted_b() is True
+    assert policy.b_weight_cached("探针") == 1.0
+    assert policy.weight(weight_module.b_key("探针")) == 1.0
+
+
+def test_the_same_ref_freezes_byte_identical_weights_twice(tmp_path: Path) -> None:
+    """票 15 判据 1：同一 ref 两次加载，sha256 与读数逐字节一致（两个副本目录各写一次）。"""
+    repo = _make_version_repo(
+        tmp_path,
+        source=WEIGHT_PROBE_HEURISTIC,
+        weights=_stub_weights((("b|探针", 1234),)),
+    )
+
+    first = load_version("v1", repo_root=repo, versions_dir=tmp_path / "a")
+    first_policy = sys.modules[first.player_class.__module__].weight_policy
+    reading = first_policy.b_weight_cached("探针")
+    second = load_version("v1", repo_root=repo, versions_dir=tmp_path / "b")
+
+    assert reading == 1.234
+    assert first.weights_sha256 == second.weights_sha256
+    assert first.weights_path is not None and second.weights_path is not None
+    assert first.weights_path.read_bytes() == second.weights_path.read_bytes()
+    assert first_policy is not sys.modules[second.player_class.__module__].weight_policy
+    assert sys.modules[second.player_class.__module__].weight_policy.b_weight_cached(
+        "探针"
+    ) == reading
+
+
+def test_two_versions_loaded_together_answer_from_their_own_tables(tmp_path: Path) -> None:
+    """票 15 判据 2：一低一高两版同进程，各自的 ``respond`` 读各自的 B 表（互不污染）。"""
+    repo = _make_version_repo(
+        tmp_path,
+        source=WEIGHT_PROBE_HEURISTIC,
+        tag="v-low",
+        weights=_stub_weights((("b|探针", 1000),)),
+    )
+    _commit_version(
+        repo,
+        source=WEIGHT_PROBE_HEURISTIC,
+        tag="v-high",
+        weights=_stub_weights((("b|探针", 3000),)),
+    )
+    versions = tmp_path / "runs" / "ai-versions"
+
+    low = load_version("v-low", repo_root=repo, versions_dir=versions)
+    high = load_version("v-high", repo_root=repo, versions_dir=versions)
+
+    assert low.player_class().respond(None) == ("shared_b@v-low", True, 1.0)
+    assert high.player_class().respond(None) == ("shared_b@v-high", True, 3.0)
+    # 交错再问一遍：两边的 ``weight_policy`` 都还是各自的代理。
+    assert high.player_class().respond(None) == ("shared_b@v-high", True, 3.0)
+    assert low.player_class().respond(None) == ("shared_b@v-low", True, 1.0)
+    assert weight_module.SHARED_B.name == "shared_b"
+    assert weight_module.SHARED_B.value(weight_module.b_key("探针")) is None
+
+
+def test_a_ref_without_weights_data_gets_an_explicit_empty_table(tmp_path: Path) -> None:
+    """票 15 点 1 的回落：08b 结构件之前没有权重文件 ⇒ 显式空表，**不读主树**。"""
+    repo = _make_version_repo(tmp_path, source=WEIGHT_PROBE_HEURISTIC)
+
+    loaded = load_version(
+        "v1", repo_root=repo, versions_dir=tmp_path / "runs" / "ai-versions"
+    )
+
+    assert loaded.weights_frozen is False
+    assert loaded.weights_sha256 is None
+    assert loaded.weights_path is None
+    # 判别前提：主树此刻确实有拟合值（ai-v13 的 69 行）——若有"偷读主树"的缝，
+    # 副本会读到 True / 1.0，而不是空表。
+    assert weight_module.has_fitted_b() is True
+    assert loaded.player_class().respond(None) == ("shared_b@v1", False, 1.0)
+
+
+def test_the_version_local_policy_refuses_the_unfrozen_ac_tables(tmp_path: Path) -> None:
+    """票 15「只冻结决策路径」：代理不提供 A/C 块，``weight`` 对 A/C 键显式拒绝。"""
+    repo = _make_version_repo(
+        tmp_path,
+        source=WEIGHT_PROBE_HEURISTIC,
+        weights=_stub_weights((("b|探针", 1000),)),
+    )
+    loaded = load_version(
+        "v1", repo_root=repo, versions_dir=tmp_path / "runs" / "ai-versions"
+    )
+
+    policy = sys.modules[loaded.player_class.__module__].weight_policy
+    assert not hasattr(policy, "IDENTITY_AC")
+    assert not hasattr(policy, "MODE_BLOCKS")
+    assert not hasattr(policy, "table_for")
+    with pytest.raises(ValueError) as error:
+        policy.weight(weight_module.c_key("move:DRAW", "self"))
+    assert "只冻结决策路径的 B 族" in str(error.value)
+
+
+def test_a_tampered_weights_copy_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """票 15 判据 3：权重副本字节与 git 不一致 ⇒ 响亮失败并点名 ref。"""
+    import ai_eval.versions as versions_module
+
+    repo = _make_version_repo(tmp_path, weights=_stub_weights((("b|探针", 1000),)))
+    versions = tmp_path / "runs" / "ai-versions"
+    original = versions_module._write_copy
+
+    def _tamper(path: Path, data: bytes) -> None:
+        original(path, b"# tampered\n" if path.name.endswith("-weights.py") else data)
+
+    monkeypatch.setattr(versions_module, "_write_copy", _tamper)
+
+    with pytest.raises(AiVersionError) as error:
+        load_version("v1", repo_root=repo, versions_dir=versions)
+
+    text = str(error.value)
+    assert "v1" in text
+    assert "weights_data.py" in text
+    assert "字节不一致" in text
+
+
+BAD_WEIGHTS_DATA = {
+    "missing table": "SHARED_B_ROWS = (('b|x', 1000),)\n",
+    "syntax error": "SHARED_B_ROWS: tuple = (\n",
+    "not a literal": "SHARED_B_ROWS = tuple()\nIDENTITY_AC_ROWS = ()\n",
+    "not a tuple": "SHARED_B_ROWS = [('b|x', 1000)]\nIDENTITY_AC_ROWS = ()\n",
+    "wrong family": "SHARED_B_ROWS = (('c|move:DRAW|self', 1000),)\nIDENTITY_AC_ROWS = ()\n",
+    "not an int": "SHARED_B_ROWS = (('b|x', '1000'),)\nIDENTITY_AC_ROWS = ()\n",
+    "duplicate key": "SHARED_B_ROWS = (('b|x', 1000), ('b|x', 1000))\nIDENTITY_AC_ROWS = ()\n",
+}
+
+
+@pytest.mark.parametrize(
+    "label, source", list(BAD_WEIGHTS_DATA.items()), ids=list(BAD_WEIGHTS_DATA)
+)
+def test_a_malformed_weights_file_fails_loudly(
+    tmp_path: Path, label: str, source: str
+) -> None:
+    """票 15 判据 3：行格式坏 ⇒ 响亮失败并点名 ref（label 只进用例名）。"""
+    repo = _make_version_repo(tmp_path, weights=source)
+
+    with pytest.raises(AiVersionError) as error:
+        load_version(
+            "v1", repo_root=repo, versions_dir=tmp_path / "runs" / "ai-versions"
+        )
+
+    text = str(error.value)
+    assert "v1" in text
+    assert "weights_data.py" in text
+
+
+def test_loading_a_version_leaves_the_global_weights_module_untouched(tmp_path: Path) -> None:
+    """票 15 判据 3：只读冻结——主树模块逐字段（对象身份）不变，两处引用都还原。"""
+    repo = _make_version_repo(tmp_path, weights=_stub_weights((("b|探针", 1000),)))
+    before = dict(weight_module.__dict__)
+
+    load_version("v1", repo_root=repo, versions_dir=tmp_path / "runs" / "ai-versions")
+
+    after = dict(weight_module.__dict__)
+    assert set(after) == set(before)
+    assert all(after[name] is value for name, value in before.items())
+    assert sys.modules["sgs.agents.weights"] is weight_module
+    assert sys.modules["sgs.agents"].weights is weight_module
+
+
+def test_a_failing_copy_still_restores_the_global_weights(tmp_path: Path) -> None:
+    """``exec_module`` 抛错时 ``finally`` 也要还原（不留半截 monkeypatch）。"""
+    repo = _make_version_repo(
+        tmp_path, source=FAILING_HEURISTIC, weights=_stub_weights()
+    )
+    before = dict(weight_module.__dict__)
+
+    with pytest.raises(AiVersionError) as error:
+        load_version(
+            "v1", repo_root=repo, versions_dir=tmp_path / "runs" / "ai-versions"
+        )
+
+    text = str(error.value)
+    assert "v1" in text
+    assert "加载失败" in text and "boom" in text
+    assert sys.modules["sgs.agents.weights"] is weight_module
+    assert sys.modules["sgs.agents"].weights is weight_module
+    assert all(weight_module.__dict__[name] is value for name, value in before.items())
+
+
 def test_the_ai_v0_tag_loads_and_only_touches_the_public_engine_surface() -> None:
     """`ai-v0` 是原点基线（spec §2.6）：它必须仍可加载，且只依赖 sgs.effects / sgs.state。"""
     loaded = load_version("ai-v0", repo_root=ROOT)
@@ -497,6 +772,45 @@ def test_the_ai_v0_tag_loads_and_only_touches_the_public_engine_surface() -> Non
     }
     assert {"sgs.effects", "sgs.state"} <= imported_modules, "扫描目标可能指错了"
     assert _engine_surface_offenders(source) == []
+
+
+def test_the_ai_v13_tag_freezes_its_fitted_weights() -> None:
+    """票 15 判据 1（真实 tag）：``ai-v13`` 的 69 行 B 表按 tag 字节冻结，不读主树。"""
+    loaded = load_version("ai-v13", repo_root=ROOT)
+    expected = _git_bytes(ROOT, "show", "ai-v13:src/sgs/agents/weights_data.py")
+
+    assert loaded.weights_frozen is True
+    assert loaded.weights_sha256 == hashlib.sha256(expected).hexdigest()
+    assert loaded.weights_path == ROOT / "runs" / "ai-versions" / "ai-v13-weights.py"
+    assert loaded.weights_path.read_bytes() == expected
+    policy = sys.modules[loaded.player_class.__module__].weight_policy
+    assert policy is not weight_module
+    assert policy.has_fitted_b() is True
+    assert len(policy.SHARED_B.rows) == 69
+    assert policy.b_weight_cached("斩杀") == 1.002
+    assert policy.SHARED_B is not weight_module.SHARED_B
+    # 主树此刻与 tag 同字节：读数是"同值但不同表"，隔离性由上面的 `is not` 判据承担。
+    assert weight_module.b_weight_cached("斩杀") == 1.002
+
+
+def test_the_ai_v0_tag_needs_no_weights_file_and_reads_no_main_tree() -> None:
+    """票 15 的回落（真实 tag）：``ai-v0`` 早于 08b ⇒ 空表、``weights_frozen=False``。"""
+    loaded = load_version("ai-v0", repo_root=ROOT)
+
+    assert loaded.weights_frozen is False
+    assert loaded.weights_sha256 is None
+    assert loaded.weights_path is None
+
+
+def test_the_ledger_records_the_frozen_weights_manifest() -> None:
+    """票 15 点 4：台账的 manifest 字段可机械读（``weights_sha256`` 列 + 该版的值）。"""
+    loaded = load_version("ai-v13", repo_root=ROOT)
+    ledger = (ROOT / "docs" / "agents" / "ai-versions.md").read_text(encoding="utf-8")
+
+    assert loaded.weights_sha256 is not None
+    assert "weights_sha256" in ledger
+    assert loaded.weights_sha256 in ledger
+    assert "weights_frozen=False" in ledger
 
 
 SELECT_OPTIONS_DEAL_SEED = 14777593171243393873
