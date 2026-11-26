@@ -5,6 +5,9 @@
 1. ``collect`` —— 跑自弈批，把**每个询问**的
    ``(选中候选的 B 分项, 至多 K 个其它候选的 B 分项, 阵营结局)`` 写成 ``jsonl.gz``。
    这一段必须用**仓内** ``.venv``（它要 ``import sgs``）；多进程采集，进程数 = ``--workers``。
+   `ai-train` 票 06 起，``--bucket-set`` 把输出升到 **v3**（header 带 ``buckets``、每行
+   带询问级桶 token ``u``）；``--weights-ref`` 用 ai_eval 的**版本玩家**重采旧 seeds
+   （同一策略才谈得上"只补元数据"）。两者缺省 = v2 / 主树，旧命令逐字节同口径。
 2. ``fit`` —— 读样本、拟合、量化成**整数**、打印 ``weights_data.py`` 的整块源码。这一段用
    **训练 venv**（numpy；§2.8 的常设约束：训练栈不进 ``SGS/.venv``）：仓库外那个
    ``../.venv-train``，命令见票面。
@@ -60,6 +63,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import multiprocessing
 import statistics
 import sys
 import time
@@ -79,12 +83,14 @@ __all__ = [
     "DEFAULT_VALID_MOD",
     "LAMBDA_GRID",
     "SCHEMA",
+    "SCHEMA_BUCKETED",
     "PairSamples",
     "collect_games",
     "fit_pairwise",
     "load_pair_samples",
     "main",
     "pair_weights_from_sign",
+    "parse_bucket_set",
     "project_weights_to_trust_region",
     "render_weights_data",
     "split_train_valid_masks",
@@ -94,6 +100,14 @@ SCHEMA = "sgs.fit.samples.v2"
 """样本文件的 schema 标（v2 = 成对偏好：``c`` 选中候选 + ``o`` 其它候选）。
 
 换字段口径必须换它：老文件不许被新拟合器静默读成新口径。
+"""
+
+SCHEMA_BUCKETED = "sgs.fit.samples.v3"
+"""样本文件的 schema 标（v3 = v2 + 每行的局面桶 token ``u``）。
+
+桶集与边界在 header 的 ``buckets`` 里（:func:`_buckets_header`）；``c`` / ``o`` 仍存
+**基键**，由 :func:`load_pair_samples` 按 ``u`` 展开成 ``b|<项名>@<token>``
+（design-04 §4.3 / §8）。
 """
 
 ALTERNATIVES = 8
@@ -161,6 +175,70 @@ def _factory(spec: Any) -> list[Any]:
     return players
 
 
+def _participants_factory(weights_ref: str | None) -> Any:
+    """``participants_factory``：默认主树玩家；给了 ref 就换成 ai_eval 的版本玩家。
+
+    版本玩家加载的是**冻结副本**（heuristic + weights_data 均按 ref），所以重采同一批
+    seeds 才是"同一个策略"，而不是"当前主树 + 旧标签"（design-04 §4.2）。
+    """
+    if weights_ref is None:
+        return _factory
+    from ai_eval.versions import load_version
+
+    player_class = load_version(weights_ref).player_class
+
+    def version_factory(spec: Any) -> list[Any]:
+        from sgs.engine import ai_stream
+
+        del _SINKS[:]
+        players: list[Any] = []
+        for seat in range(spec.players):
+            sink: list[tuple[Any, Any]] = []
+            _SINKS.append(sink)
+            players.append(_Capture(player_class(ai_stream(spec.seed, seat)), sink))
+        return players
+
+    return version_factory
+
+
+def _worker_context(weights_ref: str | None) -> Any:
+    """采集池的 multiprocessing 上下文。
+
+    ``--weights-ref`` 时**先**在父进程加载一次版本（冻结副本落到 ``runs/ai-versions/``），
+    再让 worker 用 ``fork`` 继承进程内缓存。Python 3.14 的默认 ``forkserver`` 不继承：
+    12 个 worker 会同时重写同一份副本，读回校验可能撞上半写文件。默认路径不动。
+    """
+    if weights_ref is None:
+        return None
+    from ai_eval.versions import load_version
+
+    load_version(weights_ref)
+    if "fork" in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context("fork")
+    return None
+
+
+def _buckets_header(bucket_set: Sequence[str]) -> dict[str, Any]:
+    """v3 header 的 ``buckets`` 块（design-04 §4.3 的预注册形状，唯一真源）。
+
+    只描述**本次采集实际启用的维度**；``alive`` 记闭区间（5 人局上界 5），``phase`` 的
+    ``play`` / ``other`` 对应 ``p0`` / ``p1``。loader 用同一个函数核 header（多一个字段 /
+    改一个边界都判红）。
+    """
+    from sgs.agents import features
+
+    dimensions = features.bucket_dimensions(bucket_set)
+    block: dict[str, Any] = {
+        "version": features.BUCKET_VERSION,
+        "set": list(dimensions),
+    }
+    if features.BUCKET_ALIVE in dimensions:
+        block["alive"] = [[low, high] for low, high in features.BUCKET_ALIVE_BOUNDS]
+    if features.BUCKET_PHASE in dimensions:
+        block["phase"] = ["play", "other"]
+    return block
+
+
 def _b_items(features: Any, query: Any, action: Any) -> list[list[Any]]:
     """一个候选的 B 族分项（同名项累加；键与值都保持既有打分的原样）。
 
@@ -173,9 +251,19 @@ def _b_items(features: Any, query: Any, action: Any) -> list[list[Any]]:
 
 
 def _sample_row(
-    seed: int, seat: int, query: Any, action: Any, y: int, alternatives: int
+    seed: int,
+    seat: int,
+    query: Any,
+    action: Any,
+    y: int,
+    alternatives: int,
+    bucket_set: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """一次询问的样本行：选中候选 + 手写分最高的 ``alternatives`` 个其它候选。"""
+    """一次询问的样本行：选中候选 + 手写分最高的 ``alternatives`` 个其它候选。
+
+    给了 ``bucket_set`` 时多写 ``"u": <token>``（v3；桶是询问级属性，全部候选共享它）。
+    ``c`` / ``o`` 仍存**基键**，展开留给 :func:`load_pair_samples`。
+    """
     from sgs.agents import features
     from sgs.agents import heuristic as heuristic_scoring
 
@@ -188,29 +276,34 @@ def _sample_row(
     ]
     # 平局按候选原序（确定性）：同一份样本表在任何进程里逐字节相同。
     ranked.sort(key=lambda item: (-item[0], item[1]))
-    return {
-        "s": seed,
-        "p": seat,
-        "k": kind.name,
-        "q": int(query.seq),
-        "y": y,
-        "v": float(scorer(query, action)),
-        "c": _b_items(features, query, action),
-        "o": [
-            _b_items(features, query, other)
-            for _score, _position, other in ranked[:alternatives]
-        ],
-    }
+    row: dict[str, Any] = {"s": seed, "p": seat, "k": kind.name}
+    if bucket_set is not None:
+        row["u"] = features.bucket(query, bucket_set)
+    row.update(
+        {
+            "q": int(query.seq),
+            "y": y,
+            "v": float(scorer(query, action)),
+            "c": _b_items(features, query, action),
+            "o": [
+                _b_items(features, query, other)
+                for _score, _position, other in ranked[:alternatives]
+            ],
+        }
+    )
+    return row
 
 
-def _collect_one(payload: tuple[int, int, str, int]) -> dict[str, Any]:
+def _collect_one(
+    payload: tuple[int, int, str, int, tuple[str, ...] | None, str | None],
+) -> dict[str, Any]:
     """跑**一局**并交出它的样本行（纯数据、可 pickle 回父进程）。"""
-    seed, players, mode, alternatives = payload
+    seed, players, mode, alternatives, bucket_set, weights_ref = payload
     from sgs.data import Mode
     from sgs_batch import GameSpec, run_one
 
     spec = GameSpec(seed=seed, mode=Mode(mode), players=players)
-    result = run_one(spec, participants_factory=_factory)
+    result = run_one(spec, participants_factory=_participants_factory(weights_ref))
     if not result.finished:
         return {"seed": seed, "error": result.error or "未完成的局", "samples": []}
 
@@ -220,7 +313,9 @@ def _collect_one(payload: tuple[int, int, str, int]) -> dict[str, Any]:
         won = won_by_seat.get(seat)
         y = 1 if won else -1
         for query, action in sink:
-            rows.append(_sample_row(seed, seat, query, action, y, alternatives))
+            rows.append(
+                _sample_row(seed, seat, query, action, y, alternatives, bucket_set)
+            )
     del _SINKS[:]
     return {"seed": seed, "error": None, "samples": rows}
 
@@ -232,35 +327,51 @@ def collect_games(
     mode: str = "identity",
     workers: int = 8,
     alternatives: int = ALTERNATIVES,
+    bucket_set: Sequence[str] | None = None,
+    weights_ref: str | None = None,
     out_path: Path,
     progress: bool = True,
 ) -> dict[str, Any]:
-    """跑整批自弈并写 ``jsonl.gz``；返回摘要（局数 / 样本数 / 失败种子）。"""
+    """跑整批自弈并写 ``jsonl.gz``；返回摘要（局数 / 样本数 / 失败种子）。
+
+    ``bucket_set``（如 ``("alive", "phase")``）把输出升到 v3：header 带 ``buckets``、
+    每行带 ``u``。``weights_ref``（如 ``"ai-v13"``）把主树玩家换成 ai_eval 的版本玩家
+    ——重采同一批 seeds 时策略必须与旧样本同源（design-04 §4.2）。两者缺省都关，输出与
+    v2 同一口径（header / 行字段一个不多）。
+    """
     if alternatives < 1:
         raise SystemExit(f"--alternatives 必须 ≥ 1：{alternatives}")
+    if bucket_set is not None:
+        from sgs.agents import features
+
+        bucket_set = features.bucket_dimensions(bucket_set)
+    if weights_ref is not None:
+        weights_ref = str(weights_ref).strip()
+        if not weights_ref:
+            raise SystemExit("--weights-ref 不能为空（缺省 = 主树玩家）")
     seed_list = list(seeds)
-    payloads = [(seed, players, mode, alternatives) for seed in seed_list]
+    payloads = [
+        (seed, players, mode, alternatives, bucket_set, weights_ref)
+        for seed in seed_list
+    ]
     failures: list[tuple[int, str]] = []
     samples = 0
     games = 0
     started = time.perf_counter()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    header: dict[str, Any] = {
+        "schema": SCHEMA if bucket_set is None else SCHEMA_BUCKETED,
+        "players": players,
+        "mode": mode,
+        "alternatives": alternatives,
+        "games_requested": len(payloads),
+    }
+    if bucket_set is not None:
+        header["buckets"] = _buckets_header(bucket_set)
     with gzip.open(out_path, "wt", encoding="utf-8") as handle, ProcessPoolExecutor(
-        max_workers=workers
+        max_workers=workers, mp_context=_worker_context(weights_ref)
     ) as pool:
-        handle.write(
-            json.dumps(
-                {
-                    "schema": SCHEMA,
-                    "players": players,
-                    "mode": mode,
-                    "alternatives": alternatives,
-                    "games_requested": len(payloads),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
+        handle.write(json.dumps(header, ensure_ascii=False, separators=(",", ":")))
         handle.write("\n")
         for index, result in enumerate(pool.map(_collect_one, payloads), start=1):
             if result["error"] is not None:
@@ -279,8 +390,8 @@ def collect_games(
                     f"{rate:.1f} 局/s · 失败 {len(failures)}",
                     file=sys.stderr,
                 )
-    return {
-        "schema": SCHEMA,
+    summary: dict[str, Any] = {
+        "schema": header["schema"],
         "players": players,
         "mode": mode,
         "alternatives": alternatives,
@@ -290,6 +401,11 @@ def collect_games(
         "elapsed_s": round(time.perf_counter() - started, 1),
         "file": str(out_path),
     }
+    if weights_ref is not None:
+        summary["weights_ref"] = weights_ref
+    if bucket_set is not None:
+        summary["buckets"] = header["buckets"]
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +474,8 @@ class PairSamples:
       **局种子**（train / valid 按它切）与选中候选分（定 S 用）；
     - ``chosen``：每个询问的选中候选下标；
     - ``pair_query`` / ``pair_alt``：每一对 = ``(询问, 另一个候选)``（选中侧由 ``chosen`` 查）；
-    - ``data_sha256``：样本文件的字节摘要（报表留痕；``PairSamples()`` 手建时为空串）。
+    - ``data_sha256``：样本文件的字节摘要（报表留痕；``PairSamples()`` 手建时为空串）；
+    - ``bucket_set`` / ``buckets``：v3 的桶集与 header 块（v2 为空——默认路径不读它们）。
 
     用 ``array`` 而不是 Python 对象：10⁶ 量级的询问 × 9 个候选，``list[tuple[...]]`` 会
     吃掉十几 GB；平铺数组在 numpy 侧可零拷贝。
@@ -377,6 +494,8 @@ class PairSamples:
     scale: float = 0.0
     games: int = 0
     data_sha256: str = ""
+    bucket_set: tuple[str, ...] = ()
+    buckets: dict[str, Any] = field(default_factory=dict)
 
     @property
     def queries(self) -> int:
@@ -400,35 +519,83 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_pair_samples(path: Path) -> PairSamples:
-    """读 v2 ``jsonl.gz``；``S`` 取**选中候选分 > 0** 的中位数（口径同 08b）。
+def load_pair_samples(
+    path: Path, *, bucket_set: Sequence[str] | None = None
+) -> PairSamples:
+    """读样本 ``jsonl.gz``；``S`` 取**选中候选分 > 0** 的中位数（口径同 08b）。
+
+    默认（``bucket_set=None``）只收 **v2**，读法与返回值一个不改——默认 fit 必须逐字节
+    复现 ai-v14。给了 ``bucket_set`` 则只收 **v3**：逐行校验 header 的桶集 / 边界与 ``u``，
+    并把每个基键展开成 ``b|<项名>@<u>``（design-04 §4.3；``c`` / ``o`` 仍存基键）。
 
     同时把每行的局种子（``s``）收进 ``query_seed``（票 01 的按局切分用），并对**文件字节**
     取 sha256 存进 ``data_sha256``——报表留痕到具体一份样本表，不换 schema、不新增字段。
     """
+    from sgs.agents import features
+    from sgs.agents import weights as weight_module
+
+    dimensions: tuple[str, ...] = ()
+    expected_buckets: dict[str, Any] | None = None
+    if bucket_set is not None:
+        dimensions = features.bucket_dimensions(bucket_set)
+        expected_buckets = _buckets_header(dimensions)
+
     store = PairSamples()
     store.data_sha256 = _file_sha256(path)
+    store.bucket_set = dimensions
+    if expected_buckets is not None:
+        store.buckets = dict(expected_buckets)
     seeds: set[int] = set()
     opener = gzip.open if path.suffix == ".gz" else open
 
-    def add(entries: Sequence[Sequence[Any]], where: str) -> int:
+    def add(entries: Sequence[Sequence[Any]], where: str, token: str | None) -> int:
         candidate = len(store.starts)
         store.starts.append(len(store.index))
         if not entries:
             raise SystemExit(f"{where} 的候选没有任何 B 分项：B 族只能从打分器 trace 派生")
         for key, value in entries:
-            found = store.keys.get(str(key))
+            text = str(key)
+            if token is not None:
+                try:
+                    if weight_module.family(text) != weight_module.FAMILY_B:
+                        raise ValueError(f"不是 B 族键：{text!r}")
+                    item = text.partition("|")[2]
+                    if "@" in item:
+                        raise ValueError(f"B 项名里有 '@'（与桶键分隔符冲突）：{text!r}")
+                    text = f"{weight_module.b_key(item)}@{token}"
+                except ValueError as error:
+                    raise SystemExit(f"{where} 的候选键不合法：{error}") from error
+            found = store.keys.get(text)
             if found is None:
                 found = len(store.keys)
-                store.keys[str(key)] = found
+                store.keys[text] = found
             store.index.append(found)
             store.values.append(float(value))
         return candidate
 
     with opener(path, "rt", encoding="utf-8") as handle:
         header = json.loads(handle.readline())
-        if header.get("schema") != SCHEMA:
-            raise SystemExit(f"样本 schema 不是 {SCHEMA}：{header.get('schema')!r}")
+        schema = header.get("schema")
+        if dimensions:
+            if schema != SCHEMA_BUCKETED:
+                if schema == SCHEMA:
+                    raise SystemExit(
+                        f"--bucket-set 需要 {SCHEMA_BUCKETED} 样本，读到 v2（{schema}）："
+                        "v2 没有 u / 存活数，不能事后补桶"
+                    )
+                raise SystemExit(f"样本 schema 不是 {SCHEMA_BUCKETED}：{schema!r}")
+            if header.get("buckets") != expected_buckets:
+                raise SystemExit(
+                    "样本 header 的桶集 / 边界与 --bucket-set 不一致："
+                    f"{header.get('buckets')!r} != {expected_buckets!r}"
+                )
+        elif schema == SCHEMA_BUCKETED:
+            raise SystemExit(
+                f"样本是 {SCHEMA_BUCKETED}（带桶元数据）：必须给 --bucket-set；"
+                "不静默丢掉 u 当 v2 读"
+            )
+        elif schema != SCHEMA:
+            raise SystemExit(f"样本 schema 不是 {SCHEMA}：{schema!r}")
         for line_number, line in enumerate(handle, start=2):
             row = json.loads(line)
             query = len(store.query_value)
@@ -437,10 +604,21 @@ def load_pair_samples(path: Path) -> PairSamples:
             store.query_seed.append(int(row["s"]))
             store.query_value.append(float(row["v"]))
             where = f"seed={row['s']} seat={row['p']} seq={row['q']}"
-            store.chosen.append(add(row["c"], where))
+            token: str | None = None
+            if dimensions:
+                raw = row.get("u")
+                if raw is None:
+                    raise SystemExit(
+                        f"{where}（第 {line_number} 行）缺 u：v3 每行都要带桶 token"
+                    )
+                try:
+                    token = features.validate_bucket_token(str(raw), dimensions)
+                except ValueError as error:
+                    raise SystemExit(f"{where} 的 u 不合法：{error}") from error
+            store.chosen.append(add(row["c"], where, token))
             for alternative in row["o"]:
                 store.pair_query.append(query)
-                store.pair_alt.append(add(alternative, where))
+                store.pair_alt.append(add(alternative, where, token))
     store.starts.append(len(store.index))
     store.games = len(seeds)
     positive = [float(value) for value in store.query_value if value > 0]
@@ -882,7 +1060,7 @@ def fit_pairwise(
             for constraint in constraints
         ]
 
-    return {
+    report: dict[str, Any] = {
         "schema": "sgs.fit.pairwise.report.v2",
         "samples": samples.queries,
         "pairs": samples.pairs,
@@ -917,6 +1095,9 @@ def fit_pairwise(
             key: float(value) for key, value in zip(keys, anchor, strict=True)
         },
     }
+    if samples.buckets:
+        report["buckets"] = dict(samples.buckets)
+    return report
 
 
 def render_weights_data(
@@ -967,6 +1148,12 @@ def render_weights_data(
     ]
     if configuration:
         lines.append(configuration)
+    buckets = report.get("buckets")
+    if buckets:
+        lines.append(
+            f"桶集：{','.join(buckets['set'])}（version {buckets['version']}；"
+            "B 键按 u 展开成 b|<项名>@<u>）。"
+        )
     for block in report.get("constraints", []):
         lines.append(
             f"语义约束：{block['name']} · margin = {block['margin']!r} · "
@@ -1021,6 +1208,22 @@ def _ac_rows(path: Path) -> list[tuple[str, int]]:
     ]
 
 
+def parse_bucket_set(text: str | None) -> tuple[str, ...] | None:
+    """CLI ``--bucket-set alive,phase`` → 预注册桶集；``None`` = 不启用（v2 路径）。
+
+    空串 / 未知维度 / 顺序不对都 ``SystemExit``（与 loader 的 fail-closed 同一口径）。
+    """
+    if text is None:
+        return None
+    from sgs.agents import features
+
+    names = tuple(part.strip() for part in str(text).split(",") if part.strip())
+    try:
+        return features.bucket_dimensions(names)
+    except ValueError as error:
+        raise SystemExit(f"--bucket-set 不合法：{error}") from error
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """CLI 定义（单独拆出来，测试不用跑拟合就能钉默认旋钮）。"""
     parser = argparse.ArgumentParser(prog="sgs_train.fit", description=__doc__)
@@ -1037,6 +1240,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=ALTERNATIVES,
         help=f"每条询问保留的其它候选上限 K（缺省 {ALTERNATIVES}）",
+    )
+    collect.add_argument(
+        "--bucket-set",
+        default=None,
+        help="局面桶集（逗号分隔；当前只登记 alive,phase；缺省 = v2 无桶）",
+    )
+    collect.add_argument(
+        "--weights-ref",
+        default=None,
+        help="用 ai_eval 版本玩家采样本（如 ai-v13；缺省 = 主树玩家）",
     )
     collect.add_argument("--out", type=Path, required=True)
     collect.add_argument("--summary", type=Path, default=None)
@@ -1069,6 +1282,11 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("d4",),
         help="语义约束（票 03；可重复，当前只登记 d4 = 古锭刀先手）",
     )
+    fit.add_argument(
+        "--bucket-set",
+        default=None,
+        help="局面桶集（逗号分隔；给了就按 v3 展开 b|<项名>@<u>）",
+    )
     fit.add_argument("--out", type=Path, default=None)
     fit.add_argument("--report", type=Path, default=None)
     fit.add_argument(
@@ -1091,6 +1309,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=args.mode,
             workers=args.workers,
             alternatives=args.alternatives,
+            bucket_set=parse_bucket_set(args.bucket_set),
+            weights_ref=args.weights_ref,
             out_path=args.out,
         )
         text = json.dumps(summary, ensure_ascii=False, indent=2)
@@ -1100,7 +1320,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.summary.write_text(text + "\n", encoding="utf-8")
         return 0
 
-    samples = load_pair_samples(args.samples)
+    samples = load_pair_samples(
+        args.samples, bucket_set=parse_bucket_set(args.bucket_set)
+    )
     constraints = tuple(
         semantic_constraints.build(name, samples.keys) for name in args.constraint
     )

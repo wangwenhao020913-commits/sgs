@@ -1,14 +1,16 @@
-"""训练管线的**纯 Python** 辅助（`ai-train` 票 01；`tools/sgs_train/fit.py`）。
+"""训练管线的**纯 Python** 辅助（`ai-train` 票 01 / 06；`tools/sgs_train/fit.py`）。
 
 门禁只付小钱：**不 import numpy**（仓内 `.venv` 没有；真正的 Newton / 信任域拟合在训练
-venv 里跑，读数写进票面 `## Answer`），也不碰 `.scratch/`。这里钉住四件事：
+venv 里跑，读数写进票面 `## Answer`），也不碰 `.scratch/`。这里钉住六件事：
 
 1. 结局 → pair 权重（胜 1.0 / 负 `lose_weight`）的映射；
 2. 信任域投影（`ε = 0` = 关闭，不能把权重拉回锚）；
 3. 按**局种子**切 train / valid（互补、不交、确定性）；
 4. 样本读取（`query_seed` / `data_sha256`）与报告渲染（默认配置**不**加配置行——
    默认路径必须逐字节复现 08c 的落仓 `weights_data.py`）；
-5. 票 03 的语义约束：D4 向量来自**共用**局面构造器、半空间投影可行 / 幂等、报表字段。
+5. 票 03 的语义约束：D4 向量来自**共用**局面构造器、半空间投影可行 / 幂等、报表字段；
+6. 票 06 的局面桶：边界 / token 闭集、v3 header+row 往返、按 `u` 展开基键、未知
+   schema / 桶值 / 缺 `u` 响亮失败、v2 默认路径不变。
 """
 
 from __future__ import annotations
@@ -16,14 +18,17 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+from sgs.agents import features  # noqa: E402
 from sgs_train import fit, semantic_constraints  # noqa: E402
 
 
@@ -118,7 +123,12 @@ def test_train_valid_split_is_by_game_seed_complementary_and_disjoint():
 # ---------------------------------------------------------------------------
 
 
-def _write_samples(path: Path, rows: list[dict], schema: str = fit.SCHEMA) -> Path:
+def _write_samples(
+    path: Path,
+    rows: list[dict],
+    schema: str = fit.SCHEMA,
+    buckets: dict | None = None,
+) -> Path:
     header = {
         "schema": schema,
         "players": 5,
@@ -126,6 +136,8 @@ def _write_samples(path: Path, rows: list[dict], schema: str = fit.SCHEMA) -> Pa
         "alternatives": fit.ALTERNATIVES,
         "games_requested": len({row["s"] for row in rows}),
     }
+    if buckets is not None:
+        header["buckets"] = buckets
     with gzip.open(path, "wt", encoding="utf-8") as handle:
         handle.write(json.dumps(header, separators=(",", ":")) + "\n")
         for row in rows:
@@ -134,18 +146,31 @@ def _write_samples(path: Path, rows: list[dict], schema: str = fit.SCHEMA) -> Pa
 
 
 def _row(
-    seed: int, seat: int, seq: int, y: int, value: float, others: int
+    seed: int,
+    seat: int,
+    seq: int,
+    y: int,
+    value: float,
+    others: int,
+    *,
+    kind: str = "play",
+    u: str | None = None,
 ) -> dict:
-    return {
-        "s": seed,
-        "p": seat,
-        "k": "play",
-        "q": seq,
-        "y": y,
-        "v": value,
-        "c": [["b|chosen", 1.0]],
-        "o": [[["b|other", float(index)]] for index in range(others)],
-    }
+    row: dict = {"s": seed, "p": seat, "k": kind}
+    if u is not None:
+        row["u"] = u
+    row.update(
+        {
+            "q": seq,
+            "y": y,
+            "v": value,
+            "c": [["b|chosen", 1.0]],
+            "o": [
+                [["b|other", float(index)]] for index in range(others)
+            ],
+        }
+    )
+    return row
 
 
 def test_load_pair_samples_reads_the_game_seed_and_hashes_the_file(tmp_path):
@@ -166,6 +191,9 @@ def test_load_pair_samples_reads_the_game_seed_and_hashes_the_file(tmp_path):
     assert samples.candidates == 9
     assert samples.scale == 4.5
     assert samples.data_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    # 默认路径不启用桶：v2 样本没有 u / header 块，读口保持空（不静默补默认桶）。
+    assert samples.bucket_set == ()
+    assert samples.buckets == {}
 
 
 def test_load_pair_samples_rejects_a_foreign_schema(tmp_path):
@@ -328,3 +356,191 @@ def test_render_records_the_semantic_constraint_line():
     assert "d4_equip_before_lethal_slash" in source
     assert "margin = 0.02" in source
     assert "整数量化满足 = True" in source
+
+
+# ---------------------------------------------------------------------------
+# 票 06：局面桶（边界 / token / v3 往返 / 键展开）
+# ---------------------------------------------------------------------------
+
+
+def _bucket_query(alive: int, kind: str = "PLAY_PHASE") -> SimpleNamespace:
+    """只带 ``bucket`` 允许读的两样东西：``query.view.players[].alive`` + ``query.kind``。"""
+    players = tuple(
+        SimpleNamespace(alive=index < alive) for index in range(max(alive, 5))
+    )
+    return SimpleNamespace(view=SimpleNamespace(players=players), kind=kind)
+
+
+def test_bucket_encodes_the_preregistered_alive_and_phase_boundaries():
+    """``alive`` ≤2 / 3–4 / ≥5 = a0/a1/a2；``phase`` 用与打分器同一个 QueryKind（p0/p1）。"""
+    for alive, expected in {1: "a0", 2: "a0", 3: "a1", 4: "a1", 5: "a2", 6: "a2"}.items():
+        assert features.bucket(_bucket_query(alive)) == expected + "p0"
+    assert features.bucket(_bucket_query(4, "DODGE")) == "a1p1"
+    assert features.bucket(_bucket_query(4, "RESPOND")) == "a1p1"
+    # 单维桶集也走同一条 token 语法（诊断用；预注册主集仍是 alive × phase）
+    assert features.bucket(_bucket_query(4), ("alive",)) == "a1"
+    assert features.bucket(_bucket_query(4, "RESPOND"), ("phase",)) == "p1"
+
+
+def test_bucket_and_token_validation_fail_loudly_on_unregistered_sets():
+    """空集 / 未知维度 / 重复 / 顺序不对 / 未知询问类型都不静默给空 token。"""
+    query = _bucket_query(3)
+    for bucket_set in ((), ("lord",), ("phase", "alive"), ("alive", "alive")):
+        with pytest.raises(ValueError):
+            features.bucket(query, bucket_set)
+    with pytest.raises(ValueError):
+        features.bucket(query, "alive")
+    with pytest.raises(ValueError):
+        features.bucket(_bucket_query(3, "NOT_A_QUERY_KIND"))
+    assert features.validate_bucket_token("a1p0") == "a1p0"
+    assert features.validate_bucket_token("a1", ("alive",)) == "a1"
+    for bad in ("a3p0", "a1p2", "a1", "a1p0x", ""):
+        with pytest.raises(ValueError):
+            features.validate_bucket_token(bad)
+    with pytest.raises(ValueError):
+        features.validate_bucket_token("p0a1")
+
+
+def test_the_v3_bucket_header_is_the_preregistered_shape():
+    """边界与 token 语法的**唯一真源**；改这里就是改预注册（票 04 §3 / §4.3）。"""
+    assert fit._buckets_header(("alive", "phase")) == {
+        "version": 1,
+        "set": ["alive", "phase"],
+        "alive": [[1, 2], [3, 4], [5, 5]],
+        "phase": ["play", "other"],
+    }
+    assert fit._buckets_header(("alive",)) == {
+        "version": 1,
+        "set": ["alive"],
+        "alive": [[1, 2], [3, 4], [5, 5]],
+    }
+
+
+def test_v3_samples_round_trip_and_expand_each_base_key_by_its_bucket(tmp_path):
+    """v3 的 ``c`` / ``o`` 仍存基键；loader 按每行 ``u`` 展开成 ``b|<项名>@<token>``。"""
+    buckets = fit._buckets_header(("alive", "phase"))
+    path = _write_samples(
+        tmp_path / "samples-v3.jsonl.gz",
+        [
+            _row(90000, 0, 1, 1, 3.5, 2, kind="PLAY_PHASE", u="a0p0"),
+            _row(90000, 1, 2, -1, 4.5, 1, kind="RESPOND", u="a1p1"),
+        ],
+        schema=fit.SCHEMA_BUCKETED,
+        buckets=buckets,
+    )
+    samples = fit.load_pair_samples(path, bucket_set=("alive", "phase"))
+    assert samples.bucket_set == ("alive", "phase")
+    assert samples.buckets == buckets
+    assert (samples.queries, samples.games, samples.pairs) == (2, 1, 3)
+    assert samples.candidates == 5
+    assert list(samples.keys) == [
+        "b|chosen@a0p0",
+        "b|other@a0p0",
+        "b|chosen@a1p1",
+        "b|other@a1p1",
+    ]
+    assert all("@" in key for key in samples.keys)
+    assert samples.data_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_v3_metadata_is_required_and_never_silently_dropped(tmp_path):
+    """v3 不给 ``--bucket-set`` / v2 硬给 ``--bucket-set`` 都响亮失败（不猜、不丢 u）。"""
+    buckets = fit._buckets_header(("alive", "phase"))
+    v3 = _write_samples(
+        tmp_path / "v3.jsonl.gz",
+        [_row(90000, 0, 1, 1, 3.5, 1, kind="PLAY_PHASE", u="a0p0")],
+        schema=fit.SCHEMA_BUCKETED,
+        buckets=buckets,
+    )
+    with pytest.raises(SystemExit):
+        fit.load_pair_samples(v3)
+    v2 = _write_samples(tmp_path / "v2.jsonl.gz", [_row(90000, 0, 1, 1, 3.5, 1)])
+    with pytest.raises(SystemExit):
+        fit.load_pair_samples(v2, bucket_set=("alive", "phase"))
+
+
+def test_v3_loader_rejects_a_foreign_header_or_a_bad_token(tmp_path):
+    good = fit._buckets_header(("alive", "phase"))
+    mismatched = _write_samples(
+        tmp_path / "mismatched.jsonl.gz",
+        [_row(90000, 0, 1, 1, 3.5, 1, kind="PLAY_PHASE", u="a0p0")],
+        schema=fit.SCHEMA_BUCKETED,
+        buckets=dict(good, version=2),
+    )
+    with pytest.raises(SystemExit):
+        fit.load_pair_samples(mismatched, bucket_set=("alive", "phase"))
+
+    missing = _write_samples(
+        tmp_path / "missing-u.jsonl.gz",
+        [_row(90000, 0, 1, 1, 3.5, 1, kind="PLAY_PHASE")],
+        schema=fit.SCHEMA_BUCKETED,
+        buckets=good,
+    )
+    with pytest.raises(SystemExit):
+        fit.load_pair_samples(missing, bucket_set=("alive", "phase"))
+
+    bad = _write_samples(
+        tmp_path / "bad-u.jsonl.gz",
+        [_row(90000, 0, 1, 1, 3.5, 1, kind="PLAY_PHASE", u="a9p0")],
+        schema=fit.SCHEMA_BUCKETED,
+        buckets=good,
+    )
+    with pytest.raises(SystemExit):
+        fit.load_pair_samples(bad, bucket_set=("alive", "phase"))
+
+    conflict = _row(90000, 0, 1, 1, 3.5, 1, kind="PLAY_PHASE", u="a0p0")
+    conflict["c"] = [["b|chosen@shadow", 1.0]]
+    separator = _write_samples(
+        tmp_path / "separator.jsonl.gz",
+        [conflict],
+        schema=fit.SCHEMA_BUCKETED,
+        buckets=good,
+    )
+    with pytest.raises(SystemExit):
+        fit.load_pair_samples(separator, bucket_set=("alive", "phase"))
+
+
+def test_no_score_item_name_uses_the_bucket_separator():
+    """``@`` 是桶键分隔符：既有的 ``Score.add`` 项名（字面量）里一个都不能有它。"""
+    source = (ROOT / "src" / "sgs" / "agents" / "heuristic.py").read_text(
+        encoding="utf-8"
+    )
+    names = re.findall(r'\.add\(\s*"([^"]*)"', source)
+    assert len(names) >= 30, "扫描面退化了（字面量项名少于 30）"
+    assert [name for name in names if "@" in name] == []
+
+
+def test_the_cli_parses_the_bucket_set_and_keeps_v2_as_the_default():
+    parser = fit._build_parser()
+    collect = parser.parse_args(["collect", "--games", "1", "--out", "x"])
+    assert (collect.bucket_set, collect.weights_ref) == (None, None)
+    chosen = parser.parse_args(
+        [
+            "collect",
+            "--games",
+            "1",
+            "--out",
+            "x",
+            "--bucket-set",
+            "alive,phase",
+            "--weights-ref",
+            "ai-v13",
+        ]
+    )
+    assert fit.parse_bucket_set(chosen.bucket_set) == ("alive", "phase")
+    assert chosen.weights_ref == "ai-v13"
+    fitting = parser.parse_args(["fit", "--samples", "x", "--lambda-b", "1"])
+    assert fitting.bucket_set is None
+    assert fit.parse_bucket_set(None) is None
+    with pytest.raises(SystemExit):
+        fit.parse_bucket_set("")
+    with pytest.raises(SystemExit):
+        fit.parse_bucket_set("alive,lord")
+
+
+def test_render_records_the_bucket_set_only_for_bucketed_reports():
+    report = _report(lose_weight=0.0, trust_region=0.05, valid_mod=5)
+    report["buckets"] = fit._buckets_header(("alive", "phase"))
+    source = fit.render_weights_data(report)
+    assert "桶集：alive,phase" in source
+    assert "桶集：" not in fit.render_weights_data(_report())

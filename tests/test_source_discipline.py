@@ -809,6 +809,9 @@ FEATURES_FUNCTIONS = frozenset(
     {
         "relation_class",
         "_relation",
+        "bucket_dimensions",
+        "bucket",
+        "validate_bucket_token",
         "_group",
         "b_family",
         "c_family",

@@ -27,6 +27,10 @@ features`` 是单向依赖，顶层 import 会成环；这条由
 
 **确定性**：纯函数，无 IO、无随机源、无时钟；映射一律按**首次出现序**（不用无序容器），
 故同输入同输出、跨 ``PYTHONHASHSEED`` 逐字节一致。
+
+**局面桶**（`ai-train` 票 06）：:func:`bucket` 只把询问级的两条公开量（存活数 / 是否
+出牌阶段）编码成 token（``a1p0``），供样本 v3 的键展开与 08a 的读路径共用；它不改任何
+既有打分，也不读 ``GameState``。
 """
 
 from __future__ import annotations
@@ -40,9 +44,18 @@ from sgs.state import Action, PlayerView, PublicEvent, Query
 from . import weights
 
 __all__ = [
+    "BUCKET_ALIVE",
+    "BUCKET_ALIVE_BOUNDS",
+    "BUCKET_ALIVE_TOKENS",
+    "BUCKET_PHASE",
+    "BUCKET_PHASE_TOKENS",
+    "BUCKET_VERSION",
+    "DEFAULT_BUCKET_SET",
     "FeatureFrame",
     "a_family",
     "b_family",
+    "bucket",
+    "bucket_dimensions",
     "c_family",
     "candidate_score",
     "extract",
@@ -50,6 +63,7 @@ __all__ = [
     "linear",
     "position_score",
     "relation_class",
+    "validate_bucket_token",
 ]
 
 
@@ -98,6 +112,109 @@ def _relation(view: PlayerView, seat: int) -> tuple[float, float]:
     from . import heuristic
 
     return heuristic._identity_relation(view, seat)
+
+
+# ---------------------------------------------------------------------------
+# 局面桶（`ai-train` 票 06；design-04 的 §3）
+# ---------------------------------------------------------------------------
+
+BUCKET_VERSION = 1
+"""桶元数据的版本（样本 header 的 ``buckets.version``）：边界或 token 语法一改就加一。"""
+
+BUCKET_ALIVE = "alive"
+BUCKET_PHASE = "phase"
+DEFAULT_BUCKET_SET: tuple[str, ...] = (BUCKET_ALIVE, BUCKET_PHASE)
+"""预注册桶集（design-04 的 §3.1）：``alive`` × ``phase`` = 6 桶；``lord`` 留第二层。"""
+
+BUCKET_ALIVE_BOUNDS: tuple[tuple[int, int], ...] = ((1, 2), (3, 4), (5, 5))
+"""``alive`` 三档的存活数**闭区间**：≤2 / 3–4 / ≥5（``a0`` / ``a1`` / ``a2`` 的边界原文）。"""
+
+BUCKET_ALIVE_TOKENS: tuple[str, ...] = ("a0", "a1", "a2")
+BUCKET_PHASE_TOKENS: tuple[str, ...] = ("p0", "p1")
+"""``p0`` = ``QueryKind.PLAY_PHASE``，``p1`` = 其他询问（与打分器同一个枚举换算）。"""
+
+
+def bucket_dimensions(
+    bucket_set: Sequence[str] = DEFAULT_BUCKET_SET,
+) -> tuple[str, ...]:
+    """校验并规范化桶集：非空、只含预注册维度、无重复、按注册顺序。
+
+    空集 / 未知维度 / 重复 / 顺序不对 ⇒ ``ValueError``（**响亮失败**，不静默给空 token）：
+    桶集要写进样本 header 并决定键空间，静默纠正会让"采样的桶"与"读到的桶"对不上。
+    """
+    if isinstance(bucket_set, str) or not isinstance(bucket_set, (tuple, list)):
+        raise ValueError(f"桶集必须是元组 / 列表，得到 {type(bucket_set).__name__}")
+    dimensions = tuple(bucket_set)
+    if not dimensions:
+        raise ValueError("桶集不能为空：没有桶就没有 token（不静默给空 token）")
+    registered = (BUCKET_ALIVE, BUCKET_PHASE)
+    unknown = [name for name in dimensions if name not in registered]
+    if unknown:
+        raise ValueError(f"未知桶集维度 {unknown}（只登记了 {registered}；lord 留第二层）")
+    if len(set(dimensions)) != len(dimensions):
+        raise ValueError(f"桶集维度重复：{dimensions}")
+    expected = tuple(name for name in registered if name in dimensions)
+    if dimensions != expected:
+        raise ValueError(f"桶集必须按注册顺序 {expected}：{dimensions}")
+    return dimensions
+
+
+def bucket(
+    query: Query, bucket_set: Sequence[str] = DEFAULT_BUCKET_SET
+) -> str:
+    """这次询问的局面桶 token（如 ``a1p0``）；只读 ``query.view`` + ``query.kind``。
+
+    同一个询问的**全部候选共享**一个 token（桶是询问级属性）。``alive`` 数公开面的
+    ``PlayerPublic.alive``；``phase`` 用与打分器**同一个** ``QueryKind(query.kind)``
+    换算（函数内延迟 import ``heuristic``，不新增枚举、不读 ``GameState``）。未知询问
+    类型由 ``QueryKind`` 自己响亮失败。
+    """
+    dimensions = bucket_dimensions(bucket_set)
+    pieces: list[str] = []
+    for dimension in dimensions:
+        if dimension == BUCKET_ALIVE:
+            alive = sum(1 for player in query.view.players if player.alive)
+            if alive <= BUCKET_ALIVE_BOUNDS[0][1]:
+                pieces.append(BUCKET_ALIVE_TOKENS[0])
+            elif alive <= BUCKET_ALIVE_BOUNDS[1][1]:
+                pieces.append(BUCKET_ALIVE_TOKENS[1])
+            else:
+                pieces.append(BUCKET_ALIVE_TOKENS[2])
+        else:
+            from . import heuristic
+
+            kind = heuristic.QueryKind(query.kind)
+            pieces.append(
+                BUCKET_PHASE_TOKENS[0]
+                if kind is heuristic.QueryKind.PLAY_PHASE
+                else BUCKET_PHASE_TOKENS[1]
+            )
+    return "".join(pieces)
+
+
+def validate_bucket_token(
+    token: str, bucket_set: Sequence[str] = DEFAULT_BUCKET_SET
+) -> str:
+    """核一个桶 token 的形状与取值；合法才返回（否则 ``ValueError``）。
+
+    每维固定 2 字符、按 :func:`bucket_dimensions` 的注册顺序拼接（``a1p0`` / 单维
+    ``a1``）。样本 v3 的 ``u`` 与 08a 的读路径共用这一条语法，不各写一份正则。
+    """
+    dimensions = bucket_dimensions(bucket_set)
+    if not isinstance(token, str):
+        raise ValueError(f"桶 token 必须是字符串，得到 {type(token).__name__}")
+    if len(token) != 2 * len(dimensions):
+        raise ValueError(
+            f"桶 token 必须是 {2 * len(dimensions)} 个字符（每维 2 个）：{token!r}"
+        )
+    for offset, dimension in enumerate(dimensions):
+        piece = token[2 * offset : 2 * offset + 2]
+        allowed = (
+            BUCKET_ALIVE_TOKENS if dimension == BUCKET_ALIVE else BUCKET_PHASE_TOKENS
+        )
+        if piece not in allowed:
+            raise ValueError(f"桶 token 的 {dimension} 段不在闭集 {allowed}：{token!r}")
+    return token
 
 
 # ---------------------------------------------------------------------------
