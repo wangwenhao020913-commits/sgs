@@ -51,7 +51,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 
 from sgs.data import Mode
 
@@ -76,6 +76,7 @@ __all__ = [
     "b_key",
     "c_key",
     "family",
+    "local_policy",
     "table_for",
     "unregistered_anchor",
     "weight",
@@ -433,6 +434,81 @@ def weight(key: str, mode: Mode = Mode.IDENTITY) -> float:
     else:
         fitted = table_for(mode).value(key)
     return anchor(key) if fitted is None else fitted / WEIGHT_SCALE
+
+
+def local_policy(
+    rows: tuple[tuple[str, int], ...],
+    *,
+    label: str = "",
+) -> ModuleType:
+    """版本局部的权重读口（`ai-view` 票 15）：B 表只用**传入的冻结行**，不读本模块的全局表。
+
+    调用方是 :func:`~ai_eval.versions.load_version`：它在副本 ``exec_module`` 期间把本函数
+    交出的模块临时挂到 ``sys.modules["sgs.agents.weights"]`` **与** ``sgs.agents`` 包的
+    ``weights`` 属性上（缺后者时 ``from . import weights`` 会命中包的旧属性、拿到主树模块），
+    加载完立即还原。同一进程因此可以并存两版（``quick`` 的 candidate / baseline），各自的
+    ``respond`` 只读各自的 B 表。
+
+    代理只包**决策路径**的三个口（:func:`b_weight_cached` / :func:`has_fitted_b` /
+    :func:`weight`）与 B 族表；纯代码面（键语法 / :func:`anchor` / 族常数 /
+    :class:`WeightTable`）按当前模块原样引用——那些是代码语义，spec §2.6 的"旧版解析到
+    当前引擎"覆盖它们。A / C 族的拟合块**不在**本票的冻结范围（票 15「只冻结决策路径」），
+    故代理**不提供** ``IDENTITY_AC`` / ``MODE_BLOCKS`` / :func:`table_for`；:func:`weight`
+    对 A/C 键显式拒绝，**不**静默读主树（那正是本票要堵的缝）。
+    """
+    table = WeightTable(
+        name=f"shared_b@{label}" if label else "shared_b",
+        families=(FAMILY_B,),
+        rows=rows,
+    )
+
+    @lru_cache(maxsize=4096)
+    def b_weight_cached(item: str) -> float:
+        fitted = table.value(b_key(item))
+        return B_ANCHOR if fitted is None else fitted / WEIGHT_SCALE
+
+    def has_fitted_b() -> bool:
+        return bool(table.rows)
+
+    def weight(key: str, mode: Mode = Mode.IDENTITY) -> float:
+        if family(key) != FAMILY_B:
+            raise ValueError(
+                "版本局部权重只冻结决策路径的 B 族（ai-view 票 15）："
+                f"{key!r}（mode={mode!r}）要等 A/C 块的冻结口径裁定后再接"
+            )
+        fitted = table.value(key)
+        return B_ANCHOR if fitted is None else fitted / WEIGHT_SCALE
+
+    policy = ModuleType("sgs.agents.weights")
+    policy.__doc__ = (
+        "版本局部权重读口（ai-view 票 15）：SHARED_B 来自冻结的 weights_data.py，"
+        "不读主树的拟合值；A/C 族不在此代理里（只冻结决策路径）。"
+    )
+    policy.SHARED_B = table
+    policy.b_weight_cached = b_weight_cached
+    policy.has_fitted_b = has_fitted_b
+    policy.weight = weight
+    # 纯代码面按**当前模块**原样引用（键语法 / 锚 / 族常数 / WeightTable）：它们是代码语义，
+    # 不是随版本冻结的数值。数据面与四个读口由代理自己接管，故按名字跳过。
+    own = frozenset(
+        {
+            "IDENTITY_AC",
+            "MODE_BLOCKS",
+            "NO_IDENTITY_AC",
+            "PVE_AC",
+            "SHARED_B",
+            "b_weight_cached",
+            "has_fitted_b",
+            "local_policy",
+            "table_for",
+            "weight",
+        }
+    )
+    copied = tuple(name for name in (*__all__, "WEIGHT_SCALE") if name not in own)
+    for name in copied:
+        setattr(policy, name, globals()[name])
+    policy.__all__ = ("SHARED_B", "b_weight_cached", "has_fitted_b", "weight", *copied)
+    return policy
 
 
 @lru_cache(maxsize=4096)
