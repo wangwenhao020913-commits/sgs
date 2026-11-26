@@ -814,8 +814,9 @@ def render_weights_data(
     两次逐字节相同。
 
     **配置行**（票 01）：报告里的 ``lose_weight`` / ``trust_region`` / ``valid_mod`` 非默认时，
-    生成文件的模块 docstring 多一行配置读数，让落仓权重自带"用哪个旋钮拟合的"；**默认
-    配置不写这一行**——默认路径必须与 08c 的落仓文件逐字节相同（票 01 验收 1）。
+    生成文件的模块 docstring 多一行配置读数（含 ``data_sha256``，票 02 要求落仓权重自带
+    "用哪份样本拟合的"），**默认配置不写这一行**——默认路径必须与 08c 的落仓文件逐字节
+    相同（票 01 验收 1）。
     """
     shared = sorted(report["integer_weights"].items())
     position = sorted(tuple(row) for row in ac_rows)
@@ -834,9 +835,11 @@ def render_weights_data(
         DEFAULT_TRUST_REGION,
         DEFAULT_VALID_MOD,
     ):
+        data_sha = report.get("data_sha256")
+        digest = f" · 数据 sha256 = {data_sha}" if data_sha else ""
         configuration = (
             f"配置：lose_weight = {lose_weight!r} · trust_region = {trust_region!r} · "
-            f"valid_mod = {valid_mod}（默认 1.0 / 0 / 0 = 08c 等权无投影全量）。"
+            f"valid_mod = {valid_mod}（默认 1.0 / 0 / 0 = 08c 等权无投影全量）{digest}。"
         )
     lines = [
         '"""拟合出来的整数权重（`ai-view` 票 08c；生成文件，**不要手改**）。',

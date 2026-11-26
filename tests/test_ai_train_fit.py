@@ -193,6 +193,7 @@ def _report(**overrides: object) -> dict:
         "lose_weight": 1.0,
         "trust_region": 0.0,
         "valid_mod": 0,
+        "data_sha256": "a" * 64,
     }
     report.update(overrides)
     return report
@@ -222,6 +223,7 @@ def test_render_records_non_default_configuration():
     assert "lose_weight = 0.25" in source
     assert "trust_region = 0.05" in source
     assert "valid_mod = 5" in source
+    assert "数据 sha256 = " + "a" * 64 in source
     # 只加一行 docstring；表本身的结构与默认渲染一致
     default_lines = fit.render_weights_data(_report()).splitlines()
     configured_lines = source.splitlines()
