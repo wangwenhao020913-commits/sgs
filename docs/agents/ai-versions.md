@@ -160,7 +160,8 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 文件（08b 结构件 `e4f5a8a` 之前）⇒ **显式空表** + `weights_frozen=False`：不读主树的拟合值，
 也不报错。副本的 `from . import weights as weight_policy` 在 `exec_module` 期间解析到
 **版本局部代理**（`sgs.agents.weights.local_policy`：冻结的 B 表 + `b_weight_cached` /
-`has_fitted_b` / `weight` 三个读口；A/C 块不冻结，`weight` 对 A/C 键显式拒绝），加载完
+`has_fitted_b` / `has_bucketed_b` / `weight` 四个读口；A/C 块不冻结，`weight` 对 A/C 键
+显式拒绝），加载完
 `sys.modules` 与包属性逐项还原——主树模块一个字段都不改，两版可同进程并存（`quick` 的
 candidate / baseline 就是同进程）。权重副本字节不一致 / 行格式坏 / ref 读不到都按 heuristic
 同一纪律 `AiVersionError` 点名 ref。

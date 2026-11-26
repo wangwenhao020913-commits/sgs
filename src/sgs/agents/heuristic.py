@@ -188,6 +188,7 @@ from sgs.state import (
     step_option_key,
 )
 
+from . import features
 from . import identity as identity_model
 from . import weights as weight_policy
 
@@ -1620,12 +1621,19 @@ class Score:
 
 
 def _weighted_candidate_score(
-    scorer: Callable[[Query, Action], float], query: Query, action: Action
+    scorer: Callable[[Query, Action], float],
+    query: Query,
+    action: Action,
+    token: str | None = None,
 ) -> float:
-    """带权候选分：``Σ 项值 × weight(b|项名)``（`ai-view` 票 08b）。
+    """带权候选分：``Σ 项值 × weight(b|项名[ @token])``（`ai-view` 票 08b / `ai-train` 08a）。
 
     只在 :func:`sgs.agents.weights.has_fitted_b` 为真时走这条路（有拟合值的版本）；空表时
     ``respond`` 直接用打分器的 float，**逐 float 等于 08a 的落地态**、也不多分配一次 trace。
+
+    ``token`` 是询问级的局面桶（``features.bucket``；无桶表 / 旧版本 ⇒ ``None``）。桶化在
+    **权重读口**完成（``b_weight_cached`` 的回落链 桶键 → 基键 → 锚），这里不另算桶，也
+    不改任何项值——故"权重全 1 时逐 float 等于原 ``Score`` 总分"仍是同一个算式。
 
     trace 必须打开：B 族的值**只**来自既有的 ``Score.add`` 分项（票 02），这里不另算任何
     几何 / 概率 / 记牌量（spec §2.7 的"B 族不许另算"）。项名即键名，查表走缓存读口。
@@ -1637,7 +1645,7 @@ def _weighted_candidate_score(
         raise ValueError(f"{query.kind} 的打分器没有交出分项：带权打分只能从 Score trace 派生")
     total = 0.0
     for name, item in items:
-        total += item * weight_policy.b_weight_cached(name)
+        total += item * weight_policy.b_weight_cached(name, token)
     return total
 
 def _item_score(name: str, value: float) -> float:
@@ -6267,8 +6275,12 @@ class HeuristicPlayer:
             raise ValueError(f"{query.kind} 询问没有候选行动，参与者无法应答")
         scorer = _SCORERS[QueryKind(query.kind)]
         if weight_policy.has_fitted_b():
+            # 桶化（`ai-train` 票 08a）：每个询问算**一次** token（桶是询问级属性），桶表才
+            # 算——空表 / ai-v14 及更早的冻结表不调 bucket、不多分配，读法与旧版逐字节相同。
+            token = features.bucket(query) if weight_policy.has_bucketed_b() else None
             scores = [
-                _weighted_candidate_score(scorer, query, action) for action in actions
+                _weighted_candidate_score(scorer, query, action, token)
+                for action in actions
             ]
         else:
             scores = [scorer(query, action) for action in actions]

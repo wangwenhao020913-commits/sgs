@@ -3,7 +3,8 @@
 在固定种子上跑全启发式对局，对每条询问比较两套 argmax：
 
 - **手写**：``features.unweighted_candidate_score``（逐项不乘权 = 08a 的落地态）；
-- **带权**：``Σ 项值 × weight(b|项名)``（当前 ``weights_data`` 里的表）。
+- **带权**：``heuristic._weighted_candidate_score``（生产读口；桶表下按
+  ``features.bucket(query)`` 的 token 走桶键 / 基键 / 锚的回落链，见 08a）。
 
 输出的是**变化率**，不是胜负——选 λ_B 要的是"改了多少"，胜负由 ``promote`` 兜。
 
@@ -50,9 +51,16 @@ def decision_diff(
         if len(actions) >= 2:
             frames = [features.frame(query, action) for action in actions]
             hand = [features.unweighted_candidate_score(frame) for frame in frames]
+            # 带权侧走**生产读口**（`ai-train` 票 08a）：桶化之后 `weights.weight(基键)` 只会
+            # 读回锚 1.0，自己拼 Σ 项×权重 会让容量表下的 diff 变成 0% 的空转判据。
+            token = features.bucket(query) if weights.has_bucketed_b() else None
+            kind = heuristic_scoring.QueryKind(query.kind)
+            scorer = heuristic_scoring._SCORERS[kind]
             weighted = [
-                sum(item * weights.weight(key) for key, item in frame.items)
-                for frame in frames
+                heuristic_scoring._weighted_candidate_score(
+                    scorer, query, action, token
+                )
+                for action in actions
             ]
             total += 1
             if _argmax(hand) != _argmax(weighted):

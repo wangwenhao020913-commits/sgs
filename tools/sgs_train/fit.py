@@ -602,9 +602,9 @@ def load_pair_samples(
                     if weight_module.family(text) != weight_module.FAMILY_B:
                         raise ValueError(f"不是 B 族键：{text!r}")
                     item = text.partition("|")[2]
-                    if "@" in item:
-                        raise ValueError(f"B 项名里有 '@'（与桶键分隔符冲突）：{text!r}")
-                    text = f"{weight_module.b_key(item)}@{token}"
+                    # 键的拼法只有一处（`weights.bucket_key`）：采集 / loader / 读路径共用，
+                    # 项名含 '@' 在那里响亮失败。
+                    text = weight_module.bucket_key(item, token)
                 except ValueError as error:
                     raise SystemExit(f"{where} 的候选键不合法：{error}") from error
             found = store.keys.get(text)
