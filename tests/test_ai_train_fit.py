@@ -10,7 +10,9 @@ venv 里跑，读数写进票面 `## Answer`），也不碰 `.scratch/`。这里
    默认路径必须逐字节复现 08c 的落仓 `weights_data.py`）；
 5. 票 03 的语义约束：D4 向量来自**共用**局面构造器、半空间投影可行 / 幂等、报表字段；
 6. 票 06 的局面桶：边界 / token 闭集、v3 header+row 往返、按 `u` 展开基键、未知
-   schema / 桶值 / 缺 `u` 响亮失败、v2 默认路径不变。
+   schema / 桶值 / 缺 `u` 响亮失败、v2 默认路径不变；
+7. 票 07 的候选矩阵：auto 阈值（键 / 字节预算）、dense / sparse 估算公式、report 字段、
+   每种表示的缺省分块与 CLI 旋钮。
 """
 
 from __future__ import annotations
@@ -544,3 +546,96 @@ def test_render_records_the_bucket_set_only_for_bucketed_reports():
     source = fit.render_weights_data(report)
     assert "桶集：alive,phase" in source
     assert "桶集：" not in fit.render_weights_data(_report())
+
+
+# ---------------------------------------------------------------------------
+# 票 07：候选矩阵的表示选择（auto / dense / sparse）
+# ---------------------------------------------------------------------------
+
+
+def test_matrix_auto_switches_to_sparse_only_past_the_preregistered_limits():
+    """auto：键 >128 **或** dense 估算 >8 GiB ⇒ sparse（design-04 的 §5.2）；显式表示不改判。
+
+    10k 的真实形状：v3 展开后 492 键 ⇒ 27.79 GB ⇒ sparse；v2（82 键）≈4.63 GB ⇒ dense
+    ——后者是"默认路径仍逐字节复现 ai-v14"的前提。
+    """
+    assert fit.choose_matrix_kind(7_060_912, 492, 35_000_000) == "sparse"
+    assert fit.choose_matrix_kind(7_060_912, 82, 35_000_000) == "dense"
+    # 键阈值本身：128 仍 dense、129 翻面（判据是严格大于）
+    assert fit.choose_matrix_kind(1, 128, 4) == "dense"
+    assert fit.choose_matrix_kind(1, 129, 4) == "sparse"
+    # 字节预算本身：恰好 8 GiB 仍 dense，多一个候选就 sparse
+    boundary = fit.DENSE_BYTE_BUDGET // (8 * 64)
+    assert fit.choose_matrix_kind(boundary, 64, 1) == "dense"
+    assert fit.choose_matrix_kind(boundary + 1, 64, 1) == "sparse"
+    # 显式表示不被估算改判（等价性读数要同一份样本各走一遍两条路径）
+    assert fit.choose_matrix_kind(1, 492, 1, requested="dense") == "dense"
+    assert fit.choose_matrix_kind(1, 2, 1, requested="sparse") == "sparse"
+    with pytest.raises(ValueError):
+        fit.choose_matrix_kind(1, 2, 1, requested="bogus")
+
+
+def test_matrix_estimates_are_the_byte_formulas_and_get_reported():
+    """估算 = 口径公式；``report()`` 的字段名就是票面 07 的验收口径。"""
+    candidates, keys, nnz = 7_060_912, 492, 35_000_000
+    dense_bytes = fit.estimate_dense_bytes(candidates, keys)
+    sparse_bytes = fit.estimate_sparse_bytes(candidates, nnz)
+    assert dense_bytes == candidates * keys * 8 == 27_791_749_632
+    assert sparse_bytes == nnz * 12 + (candidates + 1) * 8
+    # sparse 估算只按实际 nnz 算：这就是"27.8GB → 0.48GB"的可复核口径
+    assert fit.matrix_plan(candidates, keys, nnz).kind == "sparse"
+    plan = fit.matrix_plan(candidates, keys, nnz)
+    assert (plan.candidates, plan.keys, plan.nnz) == (candidates, keys, nnz)
+    assert plan.dense_bytes_estimate == dense_bytes
+    assert plan.matrix_bytes_estimate == sparse_bytes
+    assert plan.report() == {
+        "matrix": "sparse",
+        "keys": keys,
+        "nnz": nnz,
+        "matrix_bytes_estimate": sparse_bytes,
+        "dense_bytes_estimate": dense_bytes,
+        "matrix_chunk": fit.SPARSE_DIFFERENCE_CHUNK,
+    }
+    # dense 侧的 report 记的是 dense 的常驻估算，不是稀疏估算
+    dense_plan = fit.matrix_plan(100, 82, 500)
+    assert dense_plan.report()["matrix_bytes_estimate"] == fit.estimate_dense_bytes(100, 82)
+
+
+def test_matrix_plan_defaults_the_chunk_per_representation_and_rejects_bad_chunks():
+    """dense 保持 08c 的 262,144（复现字节）；sparse 取 131,072；显式分块优先。"""
+    dense = fit.matrix_plan(100, 82, 500)
+    assert (dense.kind, dense.chunk) == ("dense", fit.DENSE_DIFFERENCE_CHUNK)
+    assert fit.DENSE_DIFFERENCE_CHUNK == 262_144
+    sparse = fit.matrix_plan(100, 129, 500)
+    assert (sparse.kind, sparse.chunk) == ("sparse", fit.SPARSE_DIFFERENCE_CHUNK)
+    assert fit.SPARSE_DIFFERENCE_CHUNK == 131_072
+    tuned = fit.matrix_plan(100, 129, 500, chunk=65_536)
+    assert tuned.chunk == 65_536
+    assert tuned.matrix_bytes_estimate == fit.estimate_sparse_bytes(100, 500)
+    for bad in (0, -1):
+        with pytest.raises(ValueError):
+            fit.matrix_plan(100, 129, 500, chunk=bad)
+
+
+def test_cli_exposes_the_matrix_knobs_with_auto_as_the_default():
+    """``--matrix`` 缺省 auto（v2 的默认路径不动）；显式 dense / sparse 用于等价性读数。"""
+    parser = fit._build_parser()
+    default = parser.parse_args(["fit", "--samples", "x", "--lambda-b", "1"])
+    assert (default.matrix, default.matrix_chunk) == (fit.AUTO_MATRIX, None)
+    assert fit.MATRIX_KINDS == ("auto", "dense", "sparse")
+    forced = parser.parse_args(
+        [
+            "fit",
+            "--samples",
+            "x",
+            "--lambda-b",
+            "1",
+            "--matrix",
+            "sparse",
+            "--matrix-chunk",
+            "65536",
+        ]
+    )
+    assert (forced.matrix, forced.matrix_chunk) == ("sparse", 65_536)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["fit", "--samples", "x", "--lambda-b", "1", "--matrix", "bogus"])

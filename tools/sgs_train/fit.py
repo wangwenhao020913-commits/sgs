@@ -43,6 +43,15 @@
 除回去。整数是为了**逐字节可复现**（浮点 repr 跨平台会漂），并让"整数权重 vs 浮点参考"
 这条 parity 可机械断言。
 
+**候选矩阵**（`ai-train` 票 07）：每个 Newton 步只需要矩阵的三个动作——乘向量取分、转置乘
+累加梯度、按对取候选差（Hessian）。10k 局 × 6 桶后键 492、候选 7,060,912：dense
+``(候选, 键)`` float64 ≈ 27.8GB，故 :class:`CandidateMatrix` 把这三件事抽成两种表示：
+:class:`DenseCandidateMatrix` 包既有 dense 矩阵（**默认路径逐位复现 ai-v14**）；
+:class:`SparseCandidateMatrix` 用样本的 CSR 三件套（``np.add.reduceat`` / ``np.bincount`` /
+按块物化的差矩阵）。``auto`` 规则（design-04 §5.2）：键 > :data:`DENSE_KEY_LIMIT` 或 dense
+估算 > :data:`DENSE_BYTE_BUDGET` ⇒ sparse；``--matrix`` / ``--matrix-chunk`` 可显式接管，
+report 记 ``matrix`` / ``nnz`` / 估算值 / 分块。矩阵类只在训练 venv 里构造（要 numpy）。
+
 用法（采集在仓根、用仓内 venv）::
 
     PYTHONPATH=tools .venv/bin/python -m sgs_train.fit collect \\
@@ -78,17 +87,32 @@ from . import semantic_constraints
 
 __all__ = [
     "ALTERNATIVES",
+    "AUTO_MATRIX",
+    "DENSE_BYTE_BUDGET",
+    "DENSE_DIFFERENCE_CHUNK",
+    "DENSE_KEY_LIMIT",
     "DEFAULT_LOSE_WEIGHT",
     "DEFAULT_TRUST_REGION",
     "DEFAULT_VALID_MOD",
     "LAMBDA_GRID",
+    "MATRIX_KINDS",
     "SCHEMA",
     "SCHEMA_BUCKETED",
+    "SPARSE_DIFFERENCE_CHUNK",
+    "CandidateMatrix",
+    "DenseCandidateMatrix",
+    "MatrixPlan",
     "PairSamples",
+    "SparseCandidateMatrix",
+    "build_candidate_matrix",
+    "choose_matrix_kind",
     "collect_games",
+    "estimate_dense_bytes",
+    "estimate_sparse_bytes",
     "fit_pairwise",
     "load_pair_samples",
     "main",
+    "matrix_plan",
     "pair_weights_from_sign",
     "parse_bucket_set",
     "project_weights_to_trust_region",
@@ -132,6 +156,24 @@ DEFAULT_TRUST_REGION = 0.0
 
 DEFAULT_VALID_MOD = 0
 """valid 切分默认：0 = 不切分（全量拟合；票 01 的默认路径）。"""
+
+AUTO_MATRIX = "auto"
+"""``--matrix auto``：按 :func:`choose_matrix_kind` 的预注册规则选表示（票 07 默认）。"""
+
+MATRIX_KINDS: tuple[str, ...] = (AUTO_MATRIX, "dense", "sparse")
+"""候选矩阵表示的闭集（CLI ``choices`` 与 :func:`choose_matrix_kind` 共用）。"""
+
+DENSE_KEY_LIMIT = 128
+"""键数上限：``keys > 128`` 时 dense 不再划算（design-04 §5.2 的 auto 阈值）。"""
+
+DENSE_BYTE_BUDGET = 8 * 1024**3
+"""dense 估算的字节预算（8 GiB）：超过它 ⇒ sparse（design-04 §5.2）。"""
+
+DENSE_DIFFERENCE_CHUNK = 262_144
+"""dense 路径物化多少对的差行（既有值；换它会改浮点累加顺序 ⇒ 不再是 ai-v14 的字节）。"""
+
+SPARSE_DIFFERENCE_CHUNK = 131_072
+"""sparse 路径的差矩阵分块（492 键时 ≈0.5GB；预算超了就调它，不降数据量）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +690,251 @@ def _matrix(np: Any, samples: PairSamples) -> Any:
     return matrix
 
 
+def estimate_dense_bytes(candidates: int, keys: int) -> int:
+    """dense ``(候选, 键)`` float64 矩阵的字节数（票 07 的 auto 判据输入）。"""
+    return int(candidates) * int(keys) * 8
+
+
+def estimate_sparse_bytes(candidates: int, nnz: int) -> int:
+    """稀疏三元组的常驻字节数：值 8 B + 键 4 B 各一项，外加每候选一个 int64 边界。"""
+    return int(nnz) * 12 + (int(candidates) + 1) * 8
+
+
+def choose_matrix_kind(
+    candidates: int, keys: int, nnz: int, *, requested: str = AUTO_MATRIX
+) -> str:
+    """``auto`` 的预注册规则（design-04 §5.2）：键 >128 **或** dense 估算 >8 GiB ⇒ sparse。
+
+    显式 ``requested``（``dense`` / ``sparse``）时不再按估算改判：等价性读数要在**同一份
+    小样本**上各走一遍，被 auto 规则换掉就测不到另一条路径。未知取值响亮失败。
+    """
+    if requested not in MATRIX_KINDS:
+        raise ValueError(
+            f"未知的矩阵表示：{requested!r}（可选 {', '.join(MATRIX_KINDS)}）"
+        )
+    if requested != AUTO_MATRIX:
+        return requested
+    if int(keys) > DENSE_KEY_LIMIT:
+        return "sparse"
+    if estimate_dense_bytes(candidates, keys) > DENSE_BYTE_BUDGET:
+        return "sparse"
+    return "dense"
+
+
+@dataclass(frozen=True)
+class MatrixPlan:
+    """候选矩阵的**表示选择**（票 07）：纯数据，门禁 venv 里不 import numpy 也能断言。
+
+    - ``nnz`` = 样本候选三元组的非零项数（dense 实际存 ``candidates × keys``，故它是
+      "压缩了多少"的参照，不是 dense 的存储量）；
+    - ``dense_bytes_estimate`` = auto 规则的输入（dense 估算）；
+    - ``matrix_bytes_estimate`` = **选中表示**的常驻估算（dense: 8 B/格；sparse:
+      12 B/nnz + 8 B/候选边界）；
+    - ``chunk`` = 一次物化多少对的差行（dense 保持 08c 的 262,144 以复现字节）。
+    """
+
+    kind: str
+    candidates: int
+    keys: int
+    nnz: int
+    dense_bytes_estimate: int
+    matrix_bytes_estimate: int
+    chunk: int
+
+    def report(self) -> dict[str, Any]:
+        """report 的矩阵块：字段名即票面 07 的验收口径（``keys`` 与顶层同名同值）。"""
+        return {
+            "matrix": self.kind,
+            "keys": self.keys,
+            "nnz": self.nnz,
+            "matrix_bytes_estimate": self.matrix_bytes_estimate,
+            "dense_bytes_estimate": self.dense_bytes_estimate,
+            "matrix_chunk": self.chunk,
+        }
+
+
+def matrix_plan(
+    candidates: int,
+    keys: int,
+    nnz: int,
+    *,
+    requested: str = AUTO_MATRIX,
+    chunk: int | None = None,
+) -> MatrixPlan:
+    """选表示 + 估算 + 分块（纯函数；:func:`build_candidate_matrix` 照它构造）。
+
+    ``chunk=None`` 取该表示的缺省值（dense 262,144 / sparse 131,072）；显式给值必须为正。
+    """
+    kind = choose_matrix_kind(candidates, keys, nnz, requested=requested)
+    if chunk is None:
+        chunk = SPARSE_DIFFERENCE_CHUNK if kind == "sparse" else DENSE_DIFFERENCE_CHUNK
+    if int(chunk) <= 0:
+        raise ValueError(f"差矩阵分块必须为正：{chunk}")
+    dense_bytes = estimate_dense_bytes(candidates, keys)
+    return MatrixPlan(
+        kind=kind,
+        candidates=int(candidates),
+        keys=int(keys),
+        nnz=int(nnz),
+        dense_bytes_estimate=dense_bytes,
+        matrix_bytes_estimate=(
+            dense_bytes if kind == "dense" else estimate_sparse_bytes(candidates, nnz)
+        ),
+        chunk=int(chunk),
+    )
+
+
+class CandidateMatrix:
+    """候选 × 键矩阵的**共用面**（票 07）：拟合只依赖这三个动作与只读元数据。
+
+    - :meth:`scores` = ``M @ w``（每个候选一个分）；
+    - :meth:`transpose_mul` = ``Mᵀ @ coeff``（梯度里的逐键累加）；
+    - :meth:`difference` = 一对候选的**差行**（Hessian 的 ``d dᵀ`` 用；按 ``chunk`` 切）。
+
+    dense / sparse 的等价性读数见票面 07：同一份小样本上 ``scores`` / 梯度 / Hessian
+    的差 ≤1e-12（绝对；Hessian 用相对读数 ≤2e-16），差行与"同一份 weight"的 Hessian
+    逐位相同；**默认 dense 路径与 08c/ai-v14 逐位相同**。
+    """
+
+    kind = ""
+
+    def __init__(self, plan: MatrixPlan) -> None:
+        self.plan = plan
+        self.kind = plan.kind
+        self.candidates = plan.candidates
+        self.keys = plan.keys
+        self.chunk = plan.chunk
+
+    def scores(self, weights: Any) -> Any:
+        raise NotImplementedError
+
+    def transpose_mul(self, coefficients: Any) -> Any:
+        raise NotImplementedError
+
+    def difference(self, chosen: Any, alternative: Any) -> Any:
+        raise NotImplementedError
+
+
+class DenseCandidateMatrix(CandidateMatrix):
+    """dense 候选矩阵：包既有 :func:`_matrix`（默认路径，数值必须逐位等于 ai-v14）。"""
+
+    kind = "dense"
+
+    def __init__(self, np: Any, samples: PairSamples, plan: MatrixPlan) -> None:
+        super().__init__(plan)
+        self._matrix = _matrix(np, samples)
+
+    def scores(self, weights: Any) -> Any:
+        return self._matrix @ weights
+
+    def transpose_mul(self, coefficients: Any) -> Any:
+        return self._matrix.T @ coefficients
+
+    def difference(self, chosen: Any, alternative: Any) -> Any:
+        return self._matrix[chosen] - self._matrix[alternative]
+
+
+class SparseCandidateMatrix(CandidateMatrix):
+    """稀疏候选矩阵：保留样本的 CSR 三元组，只在 Hessian 里按块物化候选差。
+
+    - ``scores``：每个候选的分项段在扁平数组里连续 ⇒ ``np.add.reduceat``；
+    - ``transpose_mul``：``np.repeat(coeff, counts) * values`` 把"候选系数 × 该 nnz 的 B 值"
+      铺到 nnz 上（与 ``coeff[rows] * values`` 逐项相同，省一个 nnz 长的行号数组），
+      ``np.bincount`` 按 nnz 序累加——**必须乘 ``values``**：票面公式的
+      ``coeff[rows]`` 只在 0/1 指示矩阵上成立，B 项的值不是 1（等价性读数抓到的第一版偏差）；
+    - ``difference``：对 ``chunk`` 个对建 ``(chunk, keys)`` 的 dense 差，
+      ``np.add.at`` 先加选中、再减另一项（每格最多两次触碰，结果与 dense 的 ``v − u``
+      逐位相同）。
+
+    ``np.add.at`` 在 (pair, key) 上无重复下标（每个候选的 B 项名已归并），故是无缓冲散加，
+    不走 ``np.add.at`` 的慢路径兜底；Hessian 本身仍交给 BLAS。
+    """
+
+    kind = "sparse"
+
+    def __init__(self, np: Any, samples: PairSamples, plan: MatrixPlan) -> None:
+        super().__init__(plan)
+        starts = np.frombuffer(samples.starts, dtype=np.int64)
+        counts = np.diff(starts)
+        if np.any(counts <= 0):
+            raise SystemExit("样本里有空候选：starts 必须严格递增")
+        self._starts = starts
+        self._index = np.frombuffer(samples.index, dtype=np.int32)
+        self._values = np.frombuffer(samples.values, dtype=np.float64)
+
+    def scores(self, weights: Any) -> Any:
+        import numpy as np
+
+        return np.add.reduceat(
+            self._values * weights[self._index], self._starts[:-1]
+        )
+
+    def transpose_mul(self, coefficients: Any) -> Any:
+        import numpy as np
+
+        return np.bincount(
+            self._index,
+            weights=np.repeat(coefficients, np.diff(self._starts)) * self._values,
+            minlength=self.keys,
+        )
+
+    def difference(self, chosen: Any, alternative: Any) -> Any:
+        import numpy as np
+
+        count = len(chosen)
+        difference = np.zeros((count, self.keys), dtype=np.float64)
+        rows = np.arange(count, dtype=np.int64)
+        self._scatter(difference, rows, chosen, 1.0)
+        self._scatter(difference, rows, alternative, -1.0)
+        return difference
+
+    def _scatter(
+        self, target: Any, rows: Any, candidates: Any, sign: float
+    ) -> None:
+        """把 ``candidates`` 的稀疏分项按 ``sign`` 散加进 ``target[rows]``。"""
+        import numpy as np
+
+        starts = self._starts[candidates]
+        counts = self._starts[candidates + 1] - starts
+        # 每个候选的 nnz 段在扁平数组里连续：把 (对, 候选) 映射回段内位置。
+        prefix = np.cumsum(counts) - counts
+        positions = np.arange(int(counts.sum()), dtype=np.int64) + np.repeat(
+            starts - prefix, counts
+        )
+        np.add.at(
+            target,
+            (np.repeat(rows, counts), self._index[positions]),
+            sign * self._values[positions],
+        )
+
+
+def build_candidate_matrix(
+    samples: PairSamples, *, kind: str = AUTO_MATRIX, chunk: int | None = None
+) -> CandidateMatrix:
+    """按 :func:`matrix_plan` 构造候选矩阵（**只在训练 venv 里调用**：要 numpy）。
+
+    返回的矩阵带 ``plan``；``fit_pairwise`` 把 ``plan.report()`` 并进报表。未知表示 /
+    非法分块 ⇒ :class:`ValueError`（CLI 面转成 ``SystemExit``）。
+    """
+    import numpy as np
+
+    plan = matrix_plan(
+        samples.candidates,
+        len(samples.keys),
+        len(samples.index),
+        requested=kind,
+        chunk=chunk,
+    )
+    constructor = DenseCandidateMatrix if plan.kind == "dense" else SparseCandidateMatrix
+    matrix = constructor(np, samples, plan)
+    if (matrix.candidates, matrix.keys) != (plan.candidates, plan.keys):
+        raise SystemExit(
+            "候选矩阵的形状与样本不一致："
+            f"{(matrix.candidates, matrix.keys)} != {(plan.candidates, plan.keys)}"
+        )
+    return matrix
+
+
 def _sigmoid(np: Any, z: Any) -> Any:
     """数值稳定的 logistic（正负两段各自 exp，避免 ``exp(大正数)`` 溢出）。"""
     out = np.empty_like(z)
@@ -659,11 +946,11 @@ def _sigmoid(np: Any, z: Any) -> Any:
 
 
 def _objective(
-    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, pair_weight: Any,
-    w: Any, anchor: Any, lambda_b: float,
+    np: Any, matrix: CandidateMatrix, pair_chosen: Any, pair_alt: Any, y_pair: Any,
+    pair_weight: Any, w: Any, anchor: Any, lambda_b: float,
 ) -> float:
     """加权成对 logistic 损失 + 锚先验（标量；线搜索与收敛判据共用）。"""
-    scores = matrix @ w
+    scores = matrix.scores(w)
     delta = scores[pair_chosen] - scores[pair_alt]
     z = -y_pair * delta
     loss = float((pair_weight * np.logaddexp(0.0, z)).sum())
@@ -672,16 +959,19 @@ def _objective(
 
 
 def _gradient_hessian(
-    np: Any, matrix: Any, pair_chosen: Any, pair_alt: Any, y_pair: Any, pair_weight: Any,
-    w: Any, anchor: Any, lambda_b: float, *, chunk: int = 262_144,
+    np: Any, matrix: CandidateMatrix, pair_chosen: Any, pair_alt: Any, y_pair: Any,
+    pair_weight: Any, w: Any, anchor: Any, lambda_b: float, *, chunk: int | None = None,
 ) -> tuple[Any, Any, float, float]:
     """返回 ``(∇, ∇², 总目标, 加权成对损失)``；Hessian 按对分批累加（不物化全部候选差）。
 
     Hessian = ``Σ w_pair·h_p d_p d_pᵀ + 2λI``（``d_p`` = 选中候选 − 另一候选的特征差、
     ``h_p`` = σ(1−σ)）；只是候选**差**的函数，故没有截距、也不受"多数决策同分"影响。
     ``w_pair`` 是每对的结局权重（票 01）：梯度与 Hessian 都乘它，``1.0`` 时与 08c 逐位相同。
+
+    ``matrix`` 是票 07 的 :class:`CandidateMatrix`（dense / sparse）；``chunk`` 缺省取
+    ``matrix.chunk``（dense 262,144 = 08c 的既有分块，避免改浮点累加顺序）。
     """
-    scores = matrix @ w
+    scores = matrix.scores(w)
     delta = scores[pair_chosen] - scores[pair_alt]
     z = -y_pair * delta
     data_loss = float((pair_weight * np.logaddexp(0.0, z)).sum())
@@ -689,19 +979,22 @@ def _gradient_hessian(
     loss = data_loss + lambda_b * float(gap @ gap)
     probability = _sigmoid(np, z)
     coefficient = -y_pair * probability * pair_weight
-    candidates = matrix.shape[0]
+    candidates = matrix.candidates
     per_candidate = np.bincount(pair_chosen, weights=coefficient, minlength=candidates)
     per_candidate -= np.bincount(pair_alt, weights=coefficient, minlength=candidates)
-    gradient = matrix.T @ per_candidate + 2.0 * lambda_b * (w - anchor)
+    gradient = matrix.transpose_mul(per_candidate) + 2.0 * lambda_b * (w - anchor)
 
-    dim = matrix.shape[1]
+    dim = matrix.keys
     hessian = np.zeros((dim, dim), dtype=np.float64)
     # 链式法则里 dz/dw = −y·d，故二阶项带 y²（y = ±S，S ≠ 1：漏掉它 Hessian 会小 S² 倍）。
     weight = probability * (1.0 - probability) * (y_pair * y_pair) * pair_weight
     total = len(pair_chosen)
-    for start in range(0, total, chunk):
-        stop = min(start + chunk, total)
-        difference = matrix[pair_chosen[start:stop]] - matrix[pair_alt[start:stop]]
+    step = matrix.chunk if chunk is None else int(chunk)
+    if step <= 0:
+        raise SystemExit(f"差矩阵分块必须为正：{step}")
+    for start in range(0, total, step):
+        stop = min(start + step, total)
+        difference = matrix.difference(pair_chosen[start:stop], pair_alt[start:stop])
         hessian += difference.T @ (difference * weight[start:stop, None])
     hessian = hessian + 2.0 * lambda_b * np.eye(dim)
     return gradient, hessian, loss, data_loss
@@ -717,6 +1010,8 @@ def fit_pairwise(
     max_iterations: int = 60,
     tolerance: float = 1e-6,
     constraints: Sequence[Any] = (),
+    matrix: str = AUTO_MATRIX,
+    matrix_chunk: int | None = None,
 ) -> dict[str, Any]:
     """单个 ``λ_B`` 的成对拟合（Newton + 投影 + Armijo；确定性、不取随机数）。
 
@@ -728,7 +1023,10 @@ def fit_pairwise(
       按方向进活跃集（只许朝域内走），其余键在自由集上重解 Newton，线搜索走投影后的可行
       方向（必要时退到投影梯度）；收敛判据换成投影梯度（KKT 残差，``history[*].kkt_inf``）；
     - 切分：``valid_mod > 0`` 时只用 train 拟合；``valid`` 只算未加权 pair log loss 与
-      accuracy（严格 ``选中分 > 其它分``），不参与拟合、不当判据。
+      accuracy（严格 ``选中分 > 其它分``），不参与拟合、不当判据；
+    - 候选矩阵（票 07）：``matrix`` = ``auto`` / ``dense`` / ``sparse``，``auto`` 按键数与
+      dense 估算选（:func:`matrix_plan`）；``matrix_chunk`` 覆盖该表示的差行分块。默认
+      ``auto`` 在 v2（82 键）上选 dense，数值仍逐位等于 ai-v14。
     """
     import numpy as np
 
@@ -757,7 +1055,10 @@ def fit_pairwise(
             )
     anchor = np.asarray([weight_module.anchor(key) for key in keys], dtype=np.float64)
     anchor_values = anchor.tolist()
-    matrix = _matrix(np, samples)
+    try:
+        matrix = build_candidate_matrix(samples, kind=matrix, chunk=matrix_chunk)
+    except ValueError as error:
+        raise SystemExit(f"--matrix / --matrix-chunk 不合法：{error}") from error
 
     pair_query = np.frombuffer(samples.pair_query, dtype=np.int32)
     pair_chosen = np.frombuffer(samples.chosen, dtype=np.int32)[pair_query]
@@ -1005,7 +1306,7 @@ def fit_pairwise(
     }
 
     train_pairs_count = int(train_pairs.sum())
-    train_scores = matrix @ w
+    train_scores = matrix.scores(w)
     train_delta = train_scores[train_chosen] - train_scores[train_alt]
     train_games = int(np.unique(query_seed[train_query]).size)
     train_block = {
@@ -1023,7 +1324,7 @@ def fit_pairwise(
         valid_chosen = pair_chosen[valid_pairs]
         valid_alt = pair_alt[valid_pairs]
         valid_y = y_pair[valid_pairs]
-        valid_scores = matrix @ w
+        valid_scores = matrix.scores(w)
         valid_delta = valid_scores[valid_chosen] - valid_scores[valid_alt]
         valid_pointwise = np.logaddexp(0.0, -valid_y * valid_delta)
         valid_loss = float(valid_pointwise.sum())
@@ -1095,6 +1396,9 @@ def fit_pairwise(
             key: float(value) for key, value in zip(keys, anchor, strict=True)
         },
     }
+    # 票 07：矩阵表示 / nnz / 估算 / 分块（auto 决策可复核；这是 report 的新增字段，
+    # 权重渲染不读它们 ⇒ ai-v14 的 weights_data.py 字节不变）。
+    report.update(matrix.plan.report())
     if samples.buckets:
         report["buckets"] = dict(samples.buckets)
     return report
@@ -1287,6 +1591,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="局面桶集（逗号分隔；给了就按 v3 展开 b|<项名>@<u>）",
     )
+    fit.add_argument(
+        "--matrix",
+        default=AUTO_MATRIX,
+        choices=MATRIX_KINDS,
+        help=(
+            "候选矩阵表示：auto（键 >128 或 dense 估算 >8GB ⇒ sparse）/ dense / sparse；"
+            "等价性读数用显式 dense|sparse 各跑一遍同一份样本"
+        ),
+    )
+    fit.add_argument(
+        "--matrix-chunk",
+        type=int,
+        default=None,
+        help="差矩阵分块（对）；缺省 dense 262144 / sparse 131072，超预算先调它",
+    )
     fit.add_argument("--out", type=Path, default=None)
     fit.add_argument("--report", type=Path, default=None)
     fit.add_argument(
@@ -1335,6 +1654,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_iterations=args.max_iterations,
         tolerance=args.tolerance,
         constraints=constraints,
+        matrix=args.matrix,
+        matrix_chunk=args.matrix_chunk,
     )
     source = render_weights_data(
         report,
