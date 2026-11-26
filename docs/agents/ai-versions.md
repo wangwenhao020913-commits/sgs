@@ -8,7 +8,7 @@
 工具在 `tools/ai_eval/`（**不进 `src/`**，与 `tools/sgs_batch/` 同层）。统一调用方式：
 
 ```bash
-PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|live|replay> ...
+PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|curve|live|replay> ...
 ```
 
 `PYTHONPATH=tools` **不可省**：`.venv` 是 editable 只指 `src/`，漏写会
@@ -23,6 +23,7 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|live|replay> ..
 | 封印 | `seal --batch sealed-1 --versions ai-v0 ai-vN --workers 8` | **1024 副写死**批（CLI 不暴露副数），**只出聚合**、不打印逐种子 | ≈17 min |
 | 实机 | `live --run <stem> [--runs-dir runs]` | 一局 journal + meta 的两行读数（§2.11 两个廉价指标 + 人类超时）；**不判 verdict、不打胜率** | ≈1 s |
 | 回放台 | `replay <stem> [--explain [--seq N]] [--score] [--godview]` | 一次引擎重放的决策解释 / 基线尺子 / 上帝视角复盘；**不判 verdict、不打胜率** | ≈1–2 s |
+| 局势读数 | `curve --deals 128 [--players 5]` | commit 派生批上的四类结局概率 + 局面曲线 + 事件打点（阵亡 / 体力归零 / 装备变更）；**不判 verdict、不进决策** | ≈40 s |
 
 ```bash
 # 快检：改完立刻（改的是**提交**里的代码；工作树与提交不一致会打一行警告）
@@ -37,6 +38,9 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval seal --batch sealed-1 --versions ai
 
 # 实机：终局后读最新一局（配方见 docs/agents/acceptance-ai.md）
 PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
+
+# 局势读数：四类结局概率 + 局面曲线（ai-view 票 09；不进决策、不写记录流）
+PYTHONPATH=tools .venv/bin/python -m ai_eval curve --deals 128 --out runs/curve-<sha>.json
 ```
 
 - `live` 只读一局录像（`<stem>.jsonl` + `<stem>.meta.json`），输出是**两行摘要 + 空报账表**，
@@ -49,6 +53,10 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
   函数，不读静态历史行）。seed=7004 的入仓夹具是前 512 条前缀（全量 ai-v4 录像在 PEACH
   顺序上与今天引擎分歧），`--explain --seq` 可用；`--score` / `--godview` 要整局，不能用
   那条前缀。票面 / 读数：`.scratch/ai-view/issues/03-replay-console.md`。
+
+- `curve` 只读**公开视图**：四类结局概率来自 `sgs.agents.position.read`，事件打点只比
+  公开快照（阵亡 / 体力归零 / 装备区增减），**不写记录流、不参与任何决策**；平局是第四类
+  （正常身份局罕见，概率给极小底）。票面 / 读数：`.scratch/ai-view/issues/09-position-score.md`。
 
 - **候选 = 提交**：`--candidate-ref`（缺省 `HEAD`）解析出的完整 sha 既派生种子批、也
   `git show` 出被评估的启发式字节。工作树与提交不一致时 CLI 在 stderr 警告一行，但**照样评估

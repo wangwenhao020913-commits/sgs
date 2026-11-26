@@ -24,9 +24,12 @@
   不判 verdict、不打胜率）。
 - **回放台**：:func:`run_replay` / :func:`render_replay`（`ai-view` 票 03；explain /
   score / godview 共用一次引擎重放，不判 verdict、不打胜率）。
+- **局势读数**：:func:`run_curve` / :func:`events_between` / :func:`prior_for_players`
+  （`ai-view` 票 09；四类结局概率 + 局面曲线 + 事件打点，不判 verdict、不进决策）。
 """
 
 from .cases import CasesResult, run_cases
+from .curve import CurveGame, CurveReport, events_between, prior_for_players, run_curve
 from .cli import main
 from .decisions import Divergence, decision_diff, diff_decisions
 from .errors import AiEvalError, AiEvalRunError, AiEvalSpecError, AiVersionError
@@ -51,6 +54,8 @@ __all__ = (
     "AiEvalSpecError",
     "AiVersionError",
     "CasesResult",
+    "CurveGame",
+    "CurveReport",
     "Divergence",
     "DecisionFact",
     "LoadedVersion",
@@ -63,6 +68,7 @@ __all__ = (
     "compare_pairs",
     "count_misses",
     "decision_diff",
+    "events_between",
     "diff_decisions",
     "derive_batch",
     "derive_sealed_batch",
@@ -73,9 +79,11 @@ __all__ = (
     "load_version",
     "noise_floor",
     "paired_diff_ci",
+    "prior_for_players",
     "render_live",
     "render_replay",
     "run_cases",
+    "run_curve",
     "run_live",
     "run_promote",
     "run_quick",
