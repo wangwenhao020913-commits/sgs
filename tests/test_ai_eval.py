@@ -789,8 +789,8 @@ def test_the_ai_v13_tag_freezes_its_fitted_weights() -> None:
     assert len(policy.SHARED_B.rows) == 69
     assert policy.b_weight_cached("斩杀") == 1.002
     assert policy.SHARED_B is not weight_module.SHARED_B
-    # 主树此刻与 tag 同字节：读数是"同值但不同表"，隔离性由上面的 `is not` 判据承担。
-    assert weight_module.b_weight_cached("斩杀") == 1.002
+    # 主树可以已经走到下一版（ai-v14）：这里不再断言主树与 ai-v13 同值——冻结副本的
+    # 1.002 与 `is not` 的隔离判据已经够；把旧版数值钉在主树上会在每次落新版时假红。
 
 
 def test_the_ai_v0_tag_needs_no_weights_file_and_reads_no_main_tree() -> None:

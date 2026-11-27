@@ -12,8 +12,10 @@
 5. **0 样本不归零**：新键读到 ``anchor``（手写值），不是 ``0``。
 6. **尾部追加**：新增一行键不改任何既有键的数值。
 7. **确定性**：同输入同输出；跨 ``PYTHONHASHSEED`` 逐字节。
-8. **不接进决策路径**：``heuristic`` 不 import 本模块（读点表不动、金录像零字节变化由
-   ``tests/test_goldens.sh`` 与全量档兜住，票面记读数）。
+8. **决策路径只读 ``features.bucket``**：B 族的权重接线（``weights``）在 `ai-view` 08b；
+   `ai-train` 票 08a 起 ``heuristic`` 另读本模块的**桶 token**（`respond` 每询问算一次，
+   交给权重读口做键选择）。``frame`` / A / C 提取仍在工具侧，不进决策路径；金录像零字节
+   变化由 ``tests/test_goldens.sh`` 与全量档兜住。
 
 **为什么用真实对局做 parity 批**：票面要的是"同一批询问上逐 float"，而特征的值来自**既有
 打分器**——构造视图只能覆盖想得到的分支，真对局能撞出 `DISTRIBUTE` 之外的十类询问。4 个
@@ -311,7 +313,9 @@ def test_the_distribute_query_also_has_a_constructed_parity_case():
             key = weights.b_key(item)
             expected[key] = expected.get(key, 0.0) + item_value
         checked += 1
-        assert features.candidate_score(store) == float(value), action
+        # 与打分器的 parity 是**未加权**的项和（candidate_score 是带权生产路径；
+        # ai-v13 里这条键恰好是锚 1.0，落 ai-v14 后带权值会差 0.014 而假红）。
+        assert features.unweighted_candidate_score(store) == float(value), action
         assert dict(store.b()) == expected, action
 
     assert checked >= 3, f"只构造出 {checked} 个分配候选"
@@ -409,11 +413,13 @@ print(json.dumps(rows, sort_keys=True))
 
 
 def test_the_weights_table_is_wired_into_the_decision_path():
-    """08b 的接线：``heuristic.py`` **只** import ``weights``（B 族读口），不 import ``features``。
+    """接线：决策路径读 ``weights``（B 族读口）+ ``features.bucket``（桶 token，票 08a）。
 
     B 族的值必须来自既有的 ``Score.add`` 分项（票 02 的 trace），所以决策路径不需要特征
-    提取器本身；``features`` 是工具侧 / parity 用的另一条入口。空表时 ``respond`` 走原来的
-    快路径（逐 float 等于 08a），有拟合值时走 ``_weighted_candidate_score``。
+    提取器本身；08b 的接线只读 ``weights``。`ai-train` 票 08a 起 ``respond`` 另把询问级的
+    局面桶（``features.bucket``）交给权重读口——桶化发生在**键**上，不进 ``features.frame``。
+    ``features`` 的其余入口（``frame`` / ``c_family`` …）仍在工具侧，决策路径一个都不调，
+    否则会把 A / C 提取多算一遍。
     """
     source = (ROOT / "src" / "sgs" / "agents" / "heuristic.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -432,9 +438,79 @@ def test_the_weights_table_is_wired_into_the_decision_path():
                     imported.add(name)
 
     assert "weights" in imported, "08b 必须把权重表接进决策路径"
-    assert "features" not in imported, (
-        "决策路径只该读 weights；features 是工具侧的提取入口，接进来会多算一遍 A / C"
+    assert "features" in imported, "08a 的桶 token 必须来自 features.bucket（唯一真源）"
+    used = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "features"
+    }
+    assert used == {"bucket"}, (
+        f"决策路径只该读 features.bucket（桶 token），多读了 {sorted(used)}："
+        "frame / A / C 提取是工具侧入口"
     )
+
+
+# ---------------------------------------------------------------------------
+# D4 桶化（`ai-train` 票 08b）：token 来自共用构造器；桶在权重键上，不在 frame
+# ---------------------------------------------------------------------------
+
+
+def test_the_d4_query_bucket_comes_from_the_shared_position_constructor():
+    """D4 的桶 token 由 ``features.bucket`` 从共用询问算：2 人 / PLAY_PHASE ⇒ ``a0p0``。
+
+    token 在测试里**只作为期望值**出现；约束（``semantic_constraints``）与读路径都从
+    ``features.bucket`` 现算，不手抄。
+    """
+    from support import d4_actions, d4_query
+
+    query = d4_query()
+    token = features.bucket(query)
+    assert features.validate_bucket_token(token) == token
+    # 桶化在**权重读口**（键）上，不进 frame：D4 两个候选的 B 键仍是基键。
+    for action in d4_actions(query):
+        keys = features.frame(query, action).b()
+        assert keys, "D4 候选没有 B 项，夹具失效"
+        assert all("@" not in key for key in keys), keys
+
+
+def test_all_one_bucket_weights_reproduce_the_d4_score_float_for_float(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """桶权重全 1 ⇒ D4 候选的带权分逐 float 等于原 ``Score`` 总分。
+
+    08a 的整局 parity 覆盖真实对局；这条把同一个桶化读口钉在 08b 的 D4 询问上：
+    token 来自 ``features.bucket``、键来自 ``weights.bucket_key``，不另写回落链。
+    """
+    from support import d4_actions, d4_query
+
+    query = d4_query()
+    token = features.bucket(query)
+    table = weights.WeightTable(
+        name="d4-all-one",
+        families=(weights.FAMILY_B,),
+        rows=tuple(
+            (weights.bucket_key(item, token), weights.WEIGHT_SCALE)
+            for item in ("装备先手", "伤害牌底价", "目标数")
+        ),
+    )
+    weights.b_weight_cached.cache_clear()
+    monkeypatch.setattr(weights, "SHARED_B", table)
+    assert weights.has_bucketed_b() is True
+    try:
+        scorer = heuristic_scoring._SCORERS[QueryKind(query.kind)]
+        actions = d4_actions(query)
+        for action in actions:
+            with heuristic_scoring.Score.tracing():
+                bare = float(scorer(query, action))
+            weighted = heuristic_scoring._weighted_candidate_score(
+                scorer, query, action, token
+            )
+            assert weighted == bare, action
+        assert len(actions) == 2
+    finally:
+        weights.b_weight_cached.cache_clear()
 
 
 # ---------------------------------------------------------------------------

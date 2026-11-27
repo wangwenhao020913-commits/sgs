@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from sgs.data import ContentPack, Gender, Identity, Kingdom, RuleConfig, load_content_pack
+from sgs.effects import behavior_for, is_slash
 from sgs.engine import Engine, instantiate_cards
 from sgs.resolution import Frame
 from sgs.state import (
@@ -27,6 +28,8 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
+from .scripts import PassPlayer, find_action, run_queries
+
 __all__ = [
     "M1_DECK_PROFILE",
     "PeachInPlayPhasePlayer",
@@ -37,9 +40,18 @@ __all__ = [
     "STATE_SCENE_SKILL",
     "build_state",
     "cards_of_type",
+    "d4_actions",
+    "d4_card",
+    "d4_pack",
+    "d4_query",
+    "d4_session",
     "deck_excluding",
+    "deck_with_inert_top",
     "damage_window_engine",
     "declare_death",
+    "inert_draws",
+    "lethal_play_query",
+    "lethal_play_session",
     "move_after_engine",
     "pindian_engine",
     "maxlife_engine",
@@ -675,3 +687,138 @@ def damage_window_engine(seed: int = 7):
     finally:
         catalog_module.CATALOG = saved
     return engine
+
+
+# ---------------------------------------------------------------------------
+# D4「古锭刀先手」局面（`ai-train` 票 03）：测试与训练**共用**的唯一构造器
+#
+# 票 03 选项 A 把 D4 写成 fit 的线性约束；约束向量必须从**同一个**局面构造器生成，
+# 不许在训练脚本里手抄一份特征。故构造器住这里（测试支撑），`test_ai_cases.py` 与
+# `tools/sgs_train/semantic_constraints.py` 都调它。
+#
+# 票 08b 起 D4 的桶也走同一个询问：token 由 ``features.bucket(query)`` 算（本局面 = 2 人 /
+# PLAY_PHASE ⇒ ``a0p0``），桶键由 ``weights.bucket_key(项名, token)`` 拼。这里**不**导出
+# 硬编码 token，训练与测试都从构造器的询问现算，避免"夹具改了、约束还钉着旧桶"。
+# ---------------------------------------------------------------------------
+
+
+def inert_draws(pack: ContentPack, *, count: int, used: set[int]) -> tuple[int, ...]:
+    """牌堆顶 ``count`` 张「惰性牌」（【闪】）：出牌阶段没有使用候选，摸到它们不改变决策面。
+
+    避开 ``used``（构造在座位上的实体牌）保证一局里不出现重复的实体牌。
+    """
+    top = tuple(card_id for card_id in cards_of_type(pack, "dodge") if card_id not in used)[
+        :count
+    ]
+    assert len(top) == count, "牌堆顶的惰性【闪】不够（构造局面写错了）"
+    return top
+
+
+def deck_with_inert_top(pack: ContentPack, *, seats, count: int) -> tuple[int, ...]:
+    """牌堆序：顶上 ``count`` 张惰性牌 + 其余不重复的实体牌（构造局面共用）。"""
+    used = {card_id for spec in seats for card_id in (*spec.hand, *spec.equip)}
+    top = inert_draws(pack, count=count, used=used)
+    reserved = used | set(top)
+    return (
+        *top,
+        *(card_id for card_id in range(len(pack.deck.cards)) if card_id not in reserved),
+    )
+
+
+def lethal_play_session(*, pack, seats, ai_seat: int, inert: int):
+    """推进到 ``ai_seat`` 的**第一个** ``PLAY_PHASE``，返回 ``(engine, query)``。
+
+    与 D1 / D3 同一驱动姿态：真局面 → ``Engine.from_state`` → ``run_queries`` → 真
+    ``HeuristicPlayer.respond``；本文件不抄候选。返回 engine 供"两步链"真的提交第一步。
+    """
+    state = build_state(
+        pack=pack,
+        rule_config=RuleConfig(player_count=len(seats)),
+        seats=seats,
+        deck=deck_with_inert_top(pack, seats=seats, count=inert),
+        turn_seat=ai_seat,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in seats],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == ai_seat,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达 AI 的出牌阶段前就停了"
+    return engine, query
+
+
+def lethal_play_query(*, pack, seats, ai_seat: int, inert: int):
+    """只要询问的简写（两/三步链另走 :func:`lethal_play_session`）。"""
+    return lethal_play_session(pack=pack, seats=seats, ai_seat=ai_seat, inert=inert)[1]
+
+
+_D4_PACK: ContentPack | None = None
+
+
+def d4_pack() -> ContentPack:
+    """D4 专用牌堆档（军争 160）：古锭刀 / 青釭剑 / 藤甲只在这一档。"""
+    global _D4_PACK
+    if _D4_PACK is None:
+        _D4_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _D4_PACK
+
+
+def d4_card(type_id: str) -> int:
+    """D4 牌堆里某牌名的**第一张** ``card_id``（数据表下标）。"""
+    return cards_of_type(d4_pack(), type_id)[0]
+
+
+def d4_session(
+    *,
+    hand: tuple[int, ...] | None = None,
+    target_hp: int = 2,
+    target_hand: tuple[int, ...] = (),
+    target_equip: tuple[int, ...] = (),
+):
+    """无身份 2 人局：AI = 座位 0（先手），默认握【古锭刀】+【杀】；座位 1 是唯一目标。
+
+    无身份 ⇒ 关系项为 0，判据只剩"这一刀打不打得死"；目标只有一个 ⇒ 候选面里没有第二个
+    目标可分心。默认 ``target_hp=2``、0 手 = D4 的「装刀才斩杀」局面。
+    """
+    if hand is None:
+        hand = (d4_card("ancient_scimitar"), d4_card("slash"))
+    seats = [
+        SeatSpec(hp=4, hp_max=4, hand=hand),
+        SeatSpec(
+            hp=target_hp,
+            hp_max=4,
+            hand=tuple(target_hand),
+            equip=tuple(target_equip),
+        ),
+    ]
+    return lethal_play_session(pack=d4_pack(), seats=seats, ai_seat=0, inert=2)
+
+
+def d4_query(**kwargs):
+    """只要 D4 询问（约束提取用；两步链另走 :func:`d4_session`）。
+
+    桶 token 由调用方从返回的询问经 ``features.bucket`` 现算（票 08b），本函数不返回
+    硬编码的 ``a0p0``。
+    """
+    return d4_session(**kwargs)[1]
+
+
+def d4_actions(query) -> tuple[UseCard, UseCard]:
+    """D4 询问里"使用【古锭刀】"与"出【杀】"的两条真实候选（不手抄候选面）。"""
+    equipment = find_action(
+        query,
+        lambda action: isinstance(action, UseCard)
+        and action.card.card_id == d4_card("ancient_scimitar"),
+    )
+    slash = find_action(
+        query,
+        lambda action: isinstance(action, UseCard)
+        and is_slash(behavior_for(action.card)),
+    )
+    if equipment is None or slash is None:
+        raise AssertionError("D4 夹具失效：候选面里没有古锭刀或【杀】")
+    return equipment, slash
